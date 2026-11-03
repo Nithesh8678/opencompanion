@@ -92,6 +92,8 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
   private var turnSpeaksAloud = false
   private var generation: UInt64 = 0
   var taskGeneration: UInt64 { generation }
+  /// Only a successfully recognized held utterance transfers compact HUD ownership.
+  var onVoiceResponseSubmitted: ((UInt64, UInt64) -> Void)?
   var capturePublicationRevision: UInt64 { captureGate.generation }
   var captureResultID: UUID? { evidence?.frameID }
   private var scenePresentedForTurn = false
@@ -240,6 +242,7 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
   private func send(textOverride: String?, voiceOnly: Bool, speakAloud: Bool) {
     let text = (textOverride ?? input).trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty else { return }
+    let sourceGeneration = generation
     stop()
     if textOverride == nil { input = "" }
     turnSpeaksAloud = speakAloud
@@ -250,6 +253,7 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
     scenePresentedForTurn = false
     busy = true
     state = "Thinking"
+    if voiceOnly { onVoiceResponseSubmitted?(sourceGeneration, current) }
     updateBadge()
     record("turn.declaredEnd.textSubmit")
     messages.append(ChatLine(role: "user", text: text))

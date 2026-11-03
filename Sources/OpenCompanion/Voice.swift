@@ -154,6 +154,7 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
   private var tailTask: Task<Void, Never>?
   private var microphoneLevelSession: VoiceMicrophoneLevelSession?
   private var utterances = Set<ObjectIdentifier>()
+  var hasPendingSpeech: Bool { !utterances.isEmpty }
   private nonisolated let utteranceTokens = VoiceUtteranceTokens()
   var onInputState: ((VoiceInputSnapshot) -> Void)?
   var onTranscript: ((UUID, VoiceInputMode, String, Bool) -> Void)?

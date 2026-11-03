@@ -103,7 +103,9 @@ struct WorkspaceView: View {
         }
       }
       Spacer()
-      if model.busy || model.listening || model.state == "Speaking" || model.state == "Observing" {
+      if model.busy || model.listening || model.state == "Speaking" || model.state == "Observing"
+        || model.voice.hasPendingSpeech
+      {
         Text(model.state).font(.system(size: 11)).foregroundStyle(WorkspacePalette.secondary)
         Button("Stop", systemImage: "stop.circle", action: model.stop)
           .buttonStyle(.borderless).controlSize(.small)

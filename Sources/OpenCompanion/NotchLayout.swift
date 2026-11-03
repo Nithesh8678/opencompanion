@@ -1,6 +1,16 @@
 import Foundation
 
-enum NotchSurface: String, Sendable { case tucked, peek, conversation, settings }
+enum NotchSurface: String, Sendable {
+  case tucked, activity, peek, conversation, settings
+  var isCompact: Bool { self == .tucked || self == .activity }
+}
+
+/// Authored status wings; their central gap is always the measured camera width.
+enum NotchActivityMetrics {
+  static let leadingWing: CGFloat = 108
+  static let trailingWing: CGFloat = 68
+  static let shoulder: CGFloat = 7
+}
 
 enum NotchDestination: String, Sendable { case home, chat, settings }
 enum NotchExposure: Sendable, Equatable { case tucked, hover, interactive }
@@ -59,9 +69,25 @@ struct NotchLayout: Sendable {
 
   func frame(for surface: NotchSurface) -> CGRect {
     if surface == .tucked, let cutout { return cutout }
+    if surface == .activity, let cutout {
+      let width = min(
+        cutout.width + NotchActivityMetrics.leadingWing + NotchActivityMetrics.trailingWing
+          + NotchActivityMetrics.shoulder * 2, display.width - 12)
+      return CGRect(
+        x: min(
+          max(
+            display.minX + 6,
+            cutout.minX - NotchActivityMetrics.leadingWing
+              - NotchActivityMetrics.shoulder), display.maxX - width - 6),
+        y: cutout.minY, width: width, height: cutout.height)
+    }
     let requested: CGSize
     switch surface {
     case .tucked: requested = CGSize(width: 96, height: 36)
+    case .activity:
+      requested = CGSize(
+        width: NotchActivityMetrics.leadingWing + NotchActivityMetrics.trailingWing
+          + NotchActivityMetrics.shoulder * 2, height: 36)
     // Seven-point shoulders sit outside the straight body on each side.
     // These endpoint proportions follow the measured reference, not its
     // unmeasured private animation implementation.
@@ -95,7 +121,7 @@ struct NotchHoverPolicy {
       if !inside { suppressedUntilExit = false }
       return .none
     }
-    if inside { return surface == .tucked ? .reveal : .none }
-    return surface == .tucked ? .none : .tuck
+    if inside { return surface.isCompact ? .reveal : .none }
+    return surface.isCompact ? .none : .tuck
   }
 }

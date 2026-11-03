@@ -87,6 +87,9 @@ import SwiftUI
     shell = CompanionShell(
       model: model, observePointer: !CommandLine.arguments.contains("--interaction-acceptance"),
       onOpenWorkspace: { [weak self] in self?.openRequestedSurface() })
+    model.onVoiceResponseSubmitted = { [weak self] source, destination in
+      self?.shell?.handoffVoiceActivity(from: source, to: destination)
+    }
     shell?.show(anchor: .notch)
     if let index = CommandLine.arguments.firstIndex(of: "--interaction-acceptance") {
       Task { @MainActor in
@@ -162,7 +165,9 @@ import SwiftUI
         [weak self] busy, listening, state in
         MainActor.assumeIsolated {
           guard let self else { return }
-          let active = busy || listening || state == "Speaking" || state == "Observing"
+          let active =
+            busy || listening || state == "Speaking" || state == "Observing"
+            || self.model.voice.hasPendingSpeech
           guard active != self.stopKeyRegistered else { return }
           self.stopKeyRegistered = active
           if active {
@@ -187,7 +192,7 @@ import SwiftUI
           let companionFocused = event.window?.identifier?.rawValue == "org.opencompanion.resident"
           let active =
             self.model.busy || self.model.listening || self.model.state == "Speaking"
-            || self.model.state == "Observing"
+            || self.model.state == "Observing" || self.model.voice.hasPendingSpeech
           if event.keyCode == 53 && (companionFocused || active) {
             self.voiceShortcut.cancelActive(reason: .manualStop)
             self.model.stop()

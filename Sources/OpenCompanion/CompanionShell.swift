@@ -93,6 +93,7 @@ private final class ResidentCompanionPanel: NSPanel {
   private let presentation = ShellPresentation()
   private let panel: ResidentCompanionPanel
   private let motion = ShellFrameMotion()
+  private var activity = NotchActivityState()
   private var surfaceHost: ShellSurfaceHost?
   private var screen: NSScreen?
   private var previousApplication: NSRunningApplication?
@@ -158,6 +159,11 @@ private final class ResidentCompanionPanel: NSPanel {
           self.position(animated: false)
         }
       }.store(in: &subscriptions)
+    NSWorkspace.shared.notificationCenter.publisher(
+      for: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification
+    ).sink { [weak self] _ in
+      Task { @MainActor in self?.position(animated: false) }
+    }.store(in: &subscriptions)
     if observePointer {
       globalPointerMonitor = NSEvent.addGlobalMonitorForEvents(matching: [
         .mouseMoved, .leftMouseDragged,
@@ -208,7 +214,9 @@ private final class ResidentCompanionPanel: NSPanel {
   var motionStatistics: NotchMotionStatistics { motion.statistics }
 
   private var surface: NotchSurface {
-    if presentation.state.exposure == .tucked { return .tucked }
+    if presentation.state.exposure == .tucked {
+      return activity.phase == .idle ? .tucked : .activity
+    }
     switch presentation.destination {
     case .home: return .peek
     case .chat: return .conversation
@@ -230,10 +238,23 @@ private final class ResidentCompanionPanel: NSPanel {
       ?? NSScreen.main ?? NSScreen.screens.first
   }
 
-  /// The hold shortcut owns audio only. Pointer presence alone owns the HUD.
-  func showVoiceActivity() { observeCurrentPointer() }
+  /// A physical hold owns only the shallow activity wings, never dashboard
+  /// exposure or keyboard focus. Hover continues to own Home/Chat/Settings.
+  func showVoiceActivity() {
+    activity.begin(generation: model.taskGeneration)
+    updateState()
+    position(animated: true)
+    observeCurrentPointer()
+  }
+
+  func handoffVoiceActivity(from source: UInt64, to destination: UInt64) {
+    activity.handoff(from: source, to: destination)
+    updateState()
+  }
 
   func shutdown() {
+    activity.cancel(generation: model.taskGeneration)
+    surfaceHost?.updateActivity(phase: .idle, level: 0)
     pointerPolling?.stop()
     hoverTransition?.cancel()
     motion.stop()
@@ -308,6 +329,7 @@ private final class ResidentCompanionPanel: NSPanel {
   private var voiceIsActive: Bool {
     model.busy || model.listening || model.pushToTalkActive || model.state == "Speaking"
       || model.state == "Finishing speech" || model.state == "Preparing microphone"
+      || model.voice.hasPendingSpeech
   }
 
   func toggle() { presentation.expanded ? collapse() : expand() }
@@ -570,8 +592,23 @@ private final class ResidentCompanionPanel: NSPanel {
   }
 
   func updateState() {
+    let previousActivity = activity.phase
+    activity.update(
+      generation: model.taskGeneration, inputPhase: model.voiceInputState,
+      pushToTalkActive: model.pushToTalkActive, busy: model.busy, state: model.state,
+      hasPendingSpeech: model.voice.hasPendingSpeech, failed: model.error != nil)
+    if (previousActivity == .idle) != (activity.phase == .idle),
+      presentation.state.exposure == .tucked
+    {
+      position(animated: true)
+    } else {
+      surfaceHost?.updateActivity(
+        phase: surface == .activity ? activity.phase : .idle, level: model.microphoneLevel)
+    }
     dockArt.state = model.state
-    dockArt.active = model.busy || model.listening || model.state == "Speaking"
+    dockArt.active =
+      model.busy || model.listening || model.state == "Speaking"
+      || model.voice.hasPendingSpeech
     dockArt.needsDisplay = true
     NSApp.dockTile.display()
     if let pendingTaskGeneration, pendingTaskGeneration != model.taskGeneration {
@@ -614,7 +651,8 @@ private final class ResidentCompanionPanel: NSPanel {
       right: display.auxiliaryTopRightArea)
     presentation.topInset = presentation.anchor == .notch ? notch.topInset : 0
     presentation.hasCutout = presentation.anchor == .notch && notch.cutout != nil
-    panel.hasShadow = surface != .tucked || !presentation.hasCutout
+    panel.hasShadow = !surface.isCompact || !presentation.hasCutout
+    panel.ignoresMouseEvents = surface.isCompact
     panel.level =
       presentation.hasCutout
       ? NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1) : .floating
@@ -641,12 +679,17 @@ private final class ResidentCompanionPanel: NSPanel {
     }
     origin.y = max(bounds.minY + 6, origin.y)
     let frame = CGRect(origin: origin, size: size)
-    if surface != .tucked {
+    if !surface.isCompact {
       let contentSize = CGSize(
         width: size.width - (presentation.hasCutout ? 14 : 0), height: size.height)
       presentation.contentSize = contentSize
       surfaceHost?.configure(size: contentSize, attached: presentation.hasCutout)
     }
+    surfaceHost?.configureActivity(
+      frame: notch.frame(for: .activity), cutoutWidth: notch.cutout?.width ?? 0,
+      compact: surface.isCompact, attached: presentation.hasCutout)
+    surfaceHost?.updateActivity(
+      phase: surface == .activity ? activity.phase : .idle, level: model.microphoneLevel)
     let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     if animated && !reduceMotion {
       motion.move(panel, to: frame)
@@ -663,6 +706,11 @@ private final class ResidentCompanionPanel: NSPanel {
 @MainActor private final class ShellSurfaceHost: NSView {
   private let hosting: NSHostingView<CompanionShellView>
   private let surfaceMask = CAShapeLayer()
+  private let activityView = NotchActivityView(frame: .zero)
+  private var activityFrame = CGRect.zero
+  private var cutoutWidth: CGFloat = 0
+  private var compact = true
+  private var activityVisible = false
   private var contentSize = CGSize(width: 516, height: 160)
   var attached = true
 
@@ -673,6 +721,8 @@ private final class ResidentCompanionPanel: NSPanel {
     layer?.backgroundColor = NSColor.black.cgColor
     layer?.mask = surfaceMask
     addSubview(hosting)
+    addSubview(activityView)
+    activityView.layer?.opacity = 0
   }
   required init?(coder: NSCoder) { nil }
 
@@ -682,11 +732,54 @@ private final class ResidentCompanionPanel: NSPanel {
     needsLayout = true
   }
 
+  func configureActivity(frame: CGRect, cutoutWidth: CGFloat, compact: Bool, attached: Bool) {
+    activityFrame = frame
+    self.cutoutWidth = cutoutWidth
+    self.compact = compact
+    self.attached = attached
+    hosting.isHidden = compact
+    activityView.isHidden = !compact
+    needsLayout = true
+  }
+
+  func updateActivity(phase: NotchActivityPhase, level: Double) {
+    let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    let visible = compact && phase != .idle
+    activityView.update(
+      phase: phase, level: level, cutoutWidth: cutoutWidth, reduceMotion: reduced)
+    guard let layer = activityView.layer else { return }
+    if activityVisible != visible || reduced {
+      let from = layer.presentation()?.opacity ?? layer.opacity
+      layer.removeAnimation(forKey: "statusExposure")
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      layer.opacity = visible ? 1 : 0
+      CATransaction.commit()
+      if !reduced {
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = from
+        fade.toValue = layer.opacity
+        fade.duration = visible ? 0.20 : 0.12
+        fade.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(fade, forKey: "statusExposure")
+      }
+      activityVisible = visible
+    }
+  }
+
   override func layout() {
     super.layout()
     hosting.frame = CGRect(
       x: (bounds.width - contentSize.width) / 2,
       y: bounds.height - contentSize.height, width: contentSize.width, height: contentSize.height)
+    // Keep the hardware gap fixed in global coordinates while the viewport
+    // widens. Its wings reveal through the native mask, without sliding text
+    // across the camera or stretching the hosted dashboard.
+    activityView.frame = CGRect(
+      x: activityFrame.minX + NotchActivityMetrics.shoulder - (window?.frame.minX ?? 0),
+      y: bounds.height - activityFrame.height,
+      width: max(0, activityFrame.width - NotchActivityMetrics.shoulder * 2),
+      height: activityFrame.height)
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     surfaceMask.frame = bounds
@@ -830,6 +923,7 @@ private struct CompanionShellView: View {
   private var visible: Bool { presentation.state.exposure != .tucked }
   private var active: Bool {
     model.busy || model.listening || model.pushToTalkActive || model.state == "Speaking"
+      || model.voice.hasPendingSpeech
   }
   private var headerHeight: CGFloat { max(36, presentation.topInset) }
 

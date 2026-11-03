@@ -25,6 +25,33 @@ import Testing
     #expect(layout.frame(for: .settings).size == CGSize(width: 814, height: 650))
     #expect(layout.frame(for: .conversation).width == 614)
   }
+  @Test func activityWingsPreserveTheMeasuredCameraGapAndHeight() throws {
+    let cutout = try #require(layout.cutout)
+    let frame = layout.frame(for: .activity)
+    #expect(frame.height == cutout.height)
+    #expect(frame.maxY == cutout.maxY)
+    #expect(
+      frame.minX + NotchActivityMetrics.shoulder + NotchActivityMetrics.leadingWing
+        == cutout.minX)
+    #expect(
+      frame.maxX - NotchActivityMetrics.shoulder - NotchActivityMetrics.trailingWing
+        == cutout.maxX)
+    #expect(frame.width < layout.frame(for: .peek).width)
+  }
+  @Test func compactActivityRevealsHomeOnEitherWingButDoesNotTuckOnExit() {
+    var policy = NotchHoverPolicy()
+    let frame = layout.frame(for: .activity)
+    for x in [frame.minX + 16, frame.maxX - 16] {
+      #expect(
+        policy.action(
+          pointer: CGPoint(x: x, y: frame.midY), layout: layout, surface: .activity,
+          displayedFrame: frame) == .reveal)
+    }
+    #expect(
+      policy.action(
+        pointer: CGPoint(x: -1300, y: 500), layout: layout, surface: .activity,
+        displayedFrame: frame) == .none)
+  }
   @Test func notchlessFallbackKeepsControlsBelowMenuBar() {
     let plain = NotchLayout(
       display: CGRect(x: 2000, y: -200, width: 1920, height: 1080),
@@ -33,6 +60,8 @@ import Testing
     #expect(plain.cutout == nil && plain.topInset == 0)
     #expect(plain.frame(for: .peek).maxY == plain.visible.maxY - 5)
     #expect(plain.display.contains(plain.frame(for: .conversation)))
+    #expect(plain.frame(for: .activity).height == 36)
+    #expect(plain.frame(for: .activity).maxY == plain.visible.maxY - 5)
   }
   @Test func everySurfaceTucksOnPointerExit() {
     var policy = NotchHoverPolicy()

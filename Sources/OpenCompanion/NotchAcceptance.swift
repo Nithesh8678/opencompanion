@@ -22,14 +22,58 @@ enum NotchAcceptance {
       }
     }
     model.input = "An unsent draft stays here."
+    let outside = CGPoint(x: initial.displayFrame.minX + 30, y: initial.displayFrame.minY + 30)
     model.listening = true
+    model.pushToTalkActive = true
+    model.voiceInputState = "Listening"
     model.state = "Listening"
     shell.showVoiceActivity()
-    try await Task.sleep(for: .milliseconds(120))
-    guard shell.geometry.surface == "tucked" else {
-      throw Failure.message("Background voice activity revealed the notch without a pointer.")
+    try await Task.sleep(for: .milliseconds(650))
+    let activity = shell.geometry
+    guard activity.surface == "activity", !activity.expanded, NSApp.keyWindow == nil,
+      NSWorkspace.shared.frontmostApplication?.processIdentifier == originalForeground,
+      activity.frame.height == initial.frame.height
+    else {
+      throw Failure.message("Hotkey status expanded the dashboard or changed foreground focus.")
     }
+    try await shell.exportLiveSnapshot(to: output.appendingPathComponent("notch-listening.png"))
+    // Hover works from the compact wing as well as from the hardware cutout;
+    // leaving returns to activity rather than pinning the dashboard open.
+    shell.pointerMoved(to: CGPoint(x: activity.frame.minX + 18, y: activity.frame.midY))
+    try await Task.sleep(for: .milliseconds(650))
+    guard shell.geometry.surface == "peek", NSApp.keyWindow == nil else {
+      throw Failure.message("The compact activity wing did not reveal Home without activation.")
+    }
+    shell.pointerMoved(to: outside)
+    try await Task.sleep(for: .milliseconds(800))
+    guard shell.geometry.surface == "activity", !shell.geometry.expanded else {
+      throw Failure.message("Leaving Home did not return to compact hotkey feedback.")
+    }
+    let source = model.taskGeneration
+    model.stop()
+    model.busy = true
+    model.state = "Thinking"
+    shell.handoffVoiceActivity(from: source, to: model.taskGeneration)
+    try await Task.sleep(for: .milliseconds(300))
+    guard shell.geometry.surface == "activity", !shell.geometry.expanded else {
+      throw Failure.message("Voice-response handoff lost compact activity ownership.")
+    }
+    try await shell.exportLiveSnapshot(to: output.appendingPathComponent("notch-thinking.png"))
+    model.busy = false
     model.listening = false
+    model.state = "Ready"
+    try await Task.sleep(for: .milliseconds(650))
+    guard shell.geometry.surface == "tucked", shell.geometry.frame == initial.frame else {
+      throw Failure.message("Completed voice status did not retract to the camera cutout.")
+    }
+    // An unrelated text turn cannot borrow the finished hotkey's presentation.
+    model.busy = true
+    model.state = "Thinking"
+    try await Task.sleep(for: .milliseconds(100))
+    guard shell.geometry.surface == "tucked" else {
+      throw Failure.message("An unrelated background response reopened hotkey activity.")
+    }
+    model.busy = false
     model.state = "Ready"
     let monitor = VoiceShortcutMonitor()
     let availability = monitor.start(onPressed: {}, onReleased: {}, onCancelled: { _ in })
@@ -46,7 +90,6 @@ enum NotchAcceptance {
       throw Failure.message("Hover did not reveal a nonactivating peek.")
     }
     try await shell.exportLiveSnapshot(to: output.appendingPathComponent("notch-peek.png"))
-    let outside = CGPoint(x: initial.displayFrame.minX + 30, y: initial.displayFrame.minY + 30)
     shell.pointerMoved(to: outside)
     try await Task.sleep(for: .milliseconds(500))
     guard shell.geometry.surface == "tucked", model.input == "An unsent draft stays here." else {
@@ -76,7 +119,8 @@ enum NotchAcceptance {
       }
     }
     let receipt = Receipt(
-      initial: initial, peek: peek, hoverFocusPreserved: true,
+      initial: initial, activity: activity, peek: peek, compactVoiceFocusPreserved: true,
+      voiceCompletionRetracted: true, hoverFocusPreserved: true,
       repeatedHoverAndDraftPreserved: true, inputMonitoringAllowed: CGPreflightListenEventAccess(),
       physicalPointerObservationEnabled: shell.observesPointer,
       accessibilityAllowed: AXIsProcessTrusted(), eventTapInstalled: availability.isInstalled,
@@ -104,7 +148,7 @@ enum NotchAcceptance {
     try encoder.encode(shell.motionStatistics).write(
       to: output.appendingPathComponent("display-link-callbacks.json"))
     print(
-      "NOTCH_ACCEPTANCE_PASSED · cutout placement, repeated synthetic hover, draft and foreground focus"
+      "NOTCH_ACCEPTANCE_PASSED · compact voice lifecycle, cutout placement, repeated synthetic hover, draft and foreground focus"
     )
     print(
       "VOICE_PREFLIGHT tapInstalled=\(availability.isInstalled) inputMonitoring=\(receipt.inputMonitoringAllowed) accessibility=\(receipt.accessibilityAllowed) microphone=\(receipt.microphoneAuthorization) speech=\(receipt.speechAuthorization)"
@@ -112,7 +156,10 @@ enum NotchAcceptance {
   }
   private struct Receipt: Codable {
     let initial: CompanionShellGeometry
+    let activity: CompanionShellGeometry
     let peek: CompanionShellGeometry
+    let compactVoiceFocusPreserved: Bool
+    let voiceCompletionRetracted: Bool
     let hoverFocusPreserved: Bool
     let repeatedHoverAndDraftPreserved: Bool
     let inputMonitoringAllowed: Bool

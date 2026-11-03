@@ -10,7 +10,112 @@ struct VoiceRecognitionUpdate: Sendable {
 
 enum VoiceSpeechEvent: Sendable { case started, finished, cancelled }
 
-/// The only unchecked conformance is this bounded value map. Every access is
+/// A bounded estimate for activity presentation, not a calibrated sound meter.
+/// At most two channels and 2,048 samples are read from any input buffer.
+enum MicrophoneRMS {
+  static let maximumSamples = 2_048
+
+  static func calculate(
+    frameCount: Int, channelCount: Int, sampleAt: (Int, Int) -> Double
+  ) -> Double {
+    guard frameCount > 0, channelCount > 0 else { return 0 }
+    let channels = min(2, channelCount)
+    let maximumFrames = maximumSamples / channels
+    let step = 1 + (frameCount - 1) / maximumFrames
+    var frame = 0
+    var count = 0
+    var sum = 0.0
+    while frame < frameCount && count < maximumSamples {
+      for channel in 0..<channels where count < maximumSamples {
+        let raw = sampleAt(frame, channel)
+        let value = raw.isFinite ? min(1, max(-1, raw)) : 0
+        sum += value * value
+        count += 1
+      }
+      guard frameCount - frame > step else { break }
+      frame += step
+    }
+    return count > 0 ? sqrt(sum / Double(count)) : 0
+  }
+
+  static func measure(_ buffer: AVAudioPCMBuffer) -> Double {
+    let frames = Int(buffer.frameLength)
+    let channels = Int(buffer.format.channelCount)
+    let stride = max(1, Int(buffer.stride))
+    let interleaved = buffer.format.isInterleaved
+    if let data = buffer.floatChannelData {
+      return calculate(frameCount: frames, channelCount: channels) { frame, channel in
+        Double(data[interleaved ? 0 : channel][frame * stride + (interleaved ? channel : 0)])
+      }
+    }
+    if let data = buffer.int16ChannelData {
+      return calculate(frameCount: frames, channelCount: channels) { frame, channel in
+        Double(data[interleaved ? 0 : channel][frame * stride + (interleaved ? channel : 0)])
+          / 32_768
+      }
+    }
+    if let data = buffer.int32ChannelData {
+      return calculate(frameCount: frames, channelCount: channels) { frame, channel in
+        Double(data[interleaved ? 0 : channel][frame * stride + (interleaved ? channel : 0)])
+          / 2_147_483_648
+      }
+    }
+    return 0
+  }
+}
+
+struct MicrophoneLevelEnvelope: Sendable {
+  private(set) var level = 0.0
+
+  mutating func advance(rms: Double, elapsed: TimeInterval) -> Double {
+    let bounded = rms.isFinite ? min(1, max(0, rms)) : 0
+    let target = bounded > 0 ? min(1, max(0, (20 * log10(bounded) + 60) / 54)) : 0
+    let interval = elapsed.isFinite ? min(0.25, max(0, elapsed)) : 0
+    let timeConstant = target > level ? 0.025 : 0.14
+    level += (target - level) * (1 - exp(-interval / timeConstant))
+    level = level < 0.001 ? 0 : min(1, max(0, level))
+    return level
+  }
+
+  mutating func reset() { level = 0 }
+}
+
+/// One coalesced scalar, never an audio buffer. The audio thread never waits:
+/// a contended sample is dropped and a later buffer can publish a newer peak.
+final class MicrophoneLevelMailbox: @unchecked Sendable {
+  private let lock = NSLock()
+  private var peak = 0.0
+
+  func publish(rms: Double) {
+    guard rms.isFinite, lock.try() else { return }
+    peak = max(peak, min(1, max(0, rms)))
+    lock.unlock()
+  }
+
+  func consumePeak() -> Double {
+    lock.withLock {
+      let value = peak
+      peak = 0
+      return value
+    }
+  }
+}
+
+private final class VoiceMicrophoneLevelSession {
+  let id: UUID
+  let mailbox: MicrophoneLevelMailbox
+  var envelope = MicrophoneLevelEnvelope()
+  var lastTick = ProcessInfo.processInfo.systemUptime
+  var timer: Timer?
+
+  init(id: UUID, mailbox: MicrophoneLevelMailbox) {
+    self.id = id
+    self.mailbox = mailbox
+  }
+  deinit { timer?.invalidate() }
+}
+
+/// This unchecked conformance covers only a bounded value map. Every access is
 /// protected by its lock; neither framework objects nor service state enter it.
 final class VoiceUtteranceTokens: @unchecked Sendable {
   private let lock = NSLock()
@@ -47,6 +152,7 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
   private var recognizer: SFSpeechRecognizer?
   private var input = VoiceInputStateMachine()
   private var tailTask: Task<Void, Never>?
+  private var microphoneLevelSession: VoiceMicrophoneLevelSession?
   private var utterances = Set<ObjectIdentifier>()
   private nonisolated let utteranceTokens = VoiceUtteranceTokens()
   var onInputState: ((VoiceInputSnapshot) -> Void)?
@@ -54,6 +160,7 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
   var onInputCompletion: ((VoiceInputCompletion) -> Void)?
   var onInputError: ((UUID, Error) -> Void)?
   var onInputNotice: ((UUID, String) -> Void)?
+  var onInputLevel: ((UUID, Double) -> Void)?
   var onState: ((String) -> Void)?
   var onSpeechEvent: ((String) -> Void)?
 
@@ -159,10 +266,14 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
   /// Constructed outside MainActor so entry on AVAudioEngine's audio thread
   /// cannot assert actor isolation. Append stays on that thread: no UI work,
   /// Task creation, copying, logging or crossing of audio buffers is performed.
+  /// Meter work is bounded and only a coalesced scalar leaves the callback.
   nonisolated private static func audioTap(
-    request: SFSpeechAudioBufferRecognitionRequest
+    request: SFSpeechAudioBufferRecognitionRequest, levels: MicrophoneLevelMailbox
   ) -> AVAudioNodeTapBlock {
-    { buffer, _ in request.append(buffer) }
+    { buffer, _ in
+      request.append(buffer)
+      levels.publish(rms: MicrophoneRMS.measure(buffer))
+    }
   }
 
   nonisolated static func deliverSpeechEvent(
@@ -177,6 +288,7 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
   func beginInput(id: UUID, mode: VoiceInputMode) {
     cancelInput()
     input.begin(id: id, mode: mode)
+    onInputLevel?(id, 0)
     publishInputState()
   }
 
@@ -218,8 +330,10 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
           "No usable microphone route is available. Select a microphone in System Settings → Sound → Input."
         )
       }
+      let levels = MicrophoneLevelMailbox()
       engine.inputNode.installTap(
-        onBus: 0, bufferSize: 1024, format: format, block: Self.audioTap(request: request))
+        onBus: 0, bufferSize: 1024, format: format,
+        block: Self.audioTap(request: request, levels: levels))
       tapInstalled = true
       recognition = recognizer.recognitionTask(
         with: request,
@@ -241,6 +355,7 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
       engine.prepare()
       try engine.start()
       guard input.microphoneReady(id: id) else { throw CancellationError() }
+      startMicrophoneLevels(id: id, mailbox: levels)
       onSpeechEvent?("voice.microphoneReady")
       publishInputState()
     } catch {
@@ -326,7 +441,41 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
 
   private func publishInputState() { onInputState?(input.snapshot) }
 
+  private func startMicrophoneLevels(id: UUID, mailbox: MicrophoneLevelMailbox) {
+    stopMicrophoneLevels()
+    let session = VoiceMicrophoneLevelSession(id: id, mailbox: mailbox)
+    let timer = Timer(timeInterval: 1.0 / 25, repeats: true) { [weak self] _ in
+      MainActor.assumeIsolated { self?.publishMicrophoneLevel(id: id) }
+    }
+    timer.tolerance = 0.008
+    session.timer = timer
+    microphoneLevelSession = session
+    RunLoop.main.add(timer, forMode: .common)
+  }
+
+  private func publishMicrophoneLevel(id: UUID) {
+    guard let session = microphoneLevelSession, session.id == id else { return }
+    guard input.isActive(id: id), input.snapshot.phase == .listening else {
+      stopMicrophoneLevels()
+      return
+    }
+    let now = ProcessInfo.processInfo.systemUptime
+    let level = session.envelope.advance(
+      rms: session.mailbox.consumePeak(), elapsed: now - session.lastTick)
+    session.lastTick = now
+    onInputLevel?(id, level)
+  }
+
+  private func stopMicrophoneLevels() {
+    guard let session = microphoneLevelSession else { return }
+    microphoneLevelSession = nil
+    session.timer?.invalidate()
+    session.envelope.reset()
+    onInputLevel?(session.id, 0)
+  }
+
   private func stopAudioCapture() {
+    stopMicrophoneLevels()
     engine?.stop()
     if tapInstalled {
       engine?.inputNode.removeTap(onBus: 0)

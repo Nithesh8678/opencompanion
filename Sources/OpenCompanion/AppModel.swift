@@ -40,6 +40,7 @@ struct NotebookTurnBinding: Sendable, Equatable {
   @Published var voiceShortcutStatus = "Control+Option shortcut is not registered."
   @Published var voiceTranscript = ""
   @Published var voiceNotice: String?
+  @Published private(set) var microphoneLevel: Double = 0
   @Published var configuration = ProviderConfiguration.load()
   @Published var providerMode =
     UserDefaults.standard.string(forKey: "providerMode") ?? "ChatGPT via Codex"
@@ -128,6 +129,13 @@ struct NotebookTurnBinding: Sendable, Equatable {
       }
     }
     voice.onInputState = { [weak self] snapshot in self?.acceptVoiceState(snapshot) }
+    voice.onInputLevel = { [weak self] id, level in
+      guard let self, self.voiceSessionID == id else { return }
+      let value =
+        self.voiceInputState == VoiceInputPhase.listening.label && level.isFinite
+        ? min(1, max(0, level)) : 0
+      if self.microphoneLevel != value { self.microphoneLevel = value }
+    }
     voice.onTranscript = { [weak self] id, mode, text, _ in
       self?.acceptVoiceTranscript(id: id, mode: mode, text: text)
     }
@@ -138,6 +146,7 @@ struct NotebookTurnBinding: Sendable, Equatable {
       self.voiceMode = nil
       self.listening = false
       self.pushToTalkActive = false
+      self.microphoneLevel = 0
       self.showError(error)
       self.state = "Ready"
       self.updateBadge()
@@ -344,6 +353,7 @@ struct NotebookTurnBinding: Sendable, Equatable {
     voice.stop()
     listening = false
     pushToTalkActive = false
+    microphoneLevel = 0
     voiceInputState = "Ready"
     busy = false
     state = "Ready"
@@ -407,6 +417,7 @@ struct NotebookTurnBinding: Sendable, Equatable {
     guard let id = snapshot.sessionID, id == voiceSessionID else { return }
     voiceInputState = snapshot.phase.label
     voiceTranscript = snapshot.transcript
+    if snapshot.phase != .listening { microphoneLevel = 0 }
     listening = snapshot.phase.isActive
     pushToTalkActive = snapshot.mode == .pushToTalk && snapshot.isHeld && snapshot.phase.isActive
     state = snapshot.phase.isActive ? snapshot.phase.label : (busy ? "Thinking" : "Ready")
@@ -427,6 +438,7 @@ struct NotebookTurnBinding: Sendable, Equatable {
       voice.cancelInput()
       listening = false
       pushToTalkActive = false
+      microphoneLevel = 0
       voiceInputState = "Ready"
       state = busy ? "Thinking" : "Ready"
       notice = "Your typed edit was kept. Speech input stopped."
@@ -443,6 +455,7 @@ struct NotebookTurnBinding: Sendable, Equatable {
     voiceStartTask = nil
     listening = false
     pushToTalkActive = false
+    microphoneLevel = 0
     voiceInputState = "Ready"
     state = "Ready"
     guard !completion.transcript.isEmpty else {

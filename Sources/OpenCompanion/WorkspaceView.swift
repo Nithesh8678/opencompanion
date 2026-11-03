@@ -27,6 +27,21 @@ struct WorkspaceView: View {
     }.frame(minWidth: notebookOnly ? 760 : 1000, minHeight: notebookOnly ? 580 : 680)
       .background(WorkspacePalette.background).foregroundStyle(WorkspacePalette.text)
       .tint(blue).preferredColorScheme(.dark)
+      .sheet(
+        isPresented: Binding(
+          get: {
+            !notebookOnly && model.showingWindowPicker && model.windowPickerHost == .workspace
+          },
+          set: { if !$0 { model.cancelWindowPicker() } }
+        )
+      ) {
+        CompanionWindowPickerView(
+          windows: model.captureWindows,
+          select: { window in
+            model.cancelWindowPicker()
+            model.performCapture(window: window)
+          }, cancel: model.cancelWindowPicker)
+      }
   }
 
   private var isChat: Bool {
@@ -272,7 +287,7 @@ struct WorkspaceView: View {
       HStack(spacing: 14) {
         Menu {
           Button("Capture display", action: model.observe)
-          Button("Capture a window", action: model.chooseWindow)
+          Button("Capture a window") { model.chooseWindow() }
           Button("Select region") { model.chooseRegion(.region) }
           Button("Draw spatial context") { model.chooseRegion(.scribble) }
         } label: {

@@ -25,6 +25,8 @@ struct NotebookTurnBinding: Sendable, Equatable {
   }
 }
 
+enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
+
 @MainActor final class AppModel: ObservableObject {
   @Published var section = "Companion"
   @Published var input = ""
@@ -65,6 +67,7 @@ struct NotebookTurnBinding: Sendable, Equatable {
   @Published var evidence: ScreenEvidence?
   @Published var captureWindows: [CaptureWindow] = []
   @Published var showingWindowPicker = false
+  @Published var windowPickerHost: CapturePickerHost = .workspace
   var lastExternalPID: pid_t = 0
   private var workspaceObserver: NSObjectProtocol?
   @Published var selectedDisplay: CGDirectDisplayID?
@@ -871,8 +874,9 @@ extension AppModel {
     windowPickerTask = nil
     if showingWindowPicker { showingWindowPicker = false }
   }
-  func chooseWindow() {
+  func chooseWindow(host: CapturePickerHost = .workspace) {
     cancelWindowPicker()
+    windowPickerHost = host
     let requestID = UUID()
     windowPickerRequestID = requestID
     windowPickerTask = Task { [weak self] in

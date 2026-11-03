@@ -47,6 +47,9 @@ composer. Hidden Chat and Settings controls are disabled, and a destination
 change releases hidden text focus. Settings utility actions collapse the notch
 before opening the full workspace. Voice has no presentation pin. Completed
 voice errors/notices can be dismissed directly on Home.
+The window picker belongs to the host that requested it; it cannot attach to
+the tucked notch when opened from the full workspace. Leaving the notch also
+cancels its pending picker so late enumeration cannot reopen a sheet.
 
 The measured reference proportions informed a 516 x 160-point Home body and
 an 800 x 650-point Settings body, with seven-point attachment shoulders at each

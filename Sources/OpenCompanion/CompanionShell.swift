@@ -343,6 +343,7 @@ private final class ResidentCompanionPanel: NSPanel {
     hoverTransition?.cancel()
     hoverAction = .none
     guard presentation.expanded || presentation.peeked else { return }
+    if model.windowPickerHost == .notch { model.cancelWindowPicker() }
     presentation.state.tuck()
     panel.permitsKeyboard = false
     panel.resignKey()
@@ -401,7 +402,7 @@ private final class ResidentCompanionPanel: NSPanel {
   private func captureScreen(_ source: ShellCaptureSource) {
     invalidateInvocations()
     if source == .window {
-      model.chooseWindow()
+      model.chooseWindow(host: .notch)
       return
     }
     let generation = model.taskGeneration
@@ -578,7 +579,7 @@ private final class ResidentCompanionPanel: NSPanel {
     }
     let pickerAppeared = model.showingWindowPicker && !lastWindowPickerPresented
     lastWindowPickerPresented = model.showingWindowPicker
-    if pickerAppeared && !presentation.expanded { expand() }
+    if pickerAppeared && model.windowPickerHost == .notch && !presentation.expanded { expand() }
     guard let expectation = captureExpectation else { return }
     switch expectation.completion(
       taskGeneration: model.taskGeneration,
@@ -887,23 +888,15 @@ private struct CompanionShellView: View {
       model.stop()
       collapse()
     }
-    .sheet(isPresented: $model.showingWindowPicker) {
-      VStack(alignment: .leading, spacing: 14) {
-        Text("Choose a window to share").font(
-          .system(size: 19, weight: .semibold, design: .rounded))
-        Text("Only the window you choose is included.").font(.callout).foregroundStyle(.secondary)
-        List(model.captureWindows) { window in
-          Button {
-            selectWindow(window)
-          } label: {
-            VStack(alignment: .leading, spacing: 4) {
-              Text(window.title.isEmpty ? "Untitled window" : window.title).lineLimit(1)
-              Text(window.appName).font(.caption).foregroundStyle(.secondary)
-            }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4)
-          }.buttonStyle(.plain)
-        }.frame(height: 210)
-        Button("Cancel") { model.showingWindowPicker = false }.keyboardShortcut(.cancelAction)
-      }.padding(22).frame(width: 480).preferredColorScheme(.dark)
+    .sheet(
+      isPresented: Binding(
+        get: { model.showingWindowPicker && model.windowPickerHost == .notch && visible },
+        set: { if !$0 { model.cancelWindowPicker() } }
+      )
+    ) {
+      CompanionWindowPickerView(
+        windows: model.captureWindows, select: selectWindow,
+        cancel: model.cancelWindowPicker)
     }
   }
 

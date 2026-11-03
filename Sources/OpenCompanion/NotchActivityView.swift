@@ -31,22 +31,45 @@ import QuartzCore
 
   override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+  /// Clears a previous turn before the owner reveals a new microphone session.
+  /// Container opacity remains entirely under the parent's control.
+  func reset() {
+    withoutImplicitAnimations {
+      layer?.removeAllAnimations()
+      stopAnimations()
+      phase = .idle
+      level = 0
+      clearVisibleContent()
+    }
+  }
+
   func update(
     phase: NotchActivityPhase, level: Double, cutoutWidth: CGFloat, reduceMotion: Bool
   ) {
-    let crossfade = self.phase != .idle && phase != .idle && self.phase != phase && !reduceMotion
+    let incomingResponse = phase == .thinking || phase == .speaking
+    let crossfade =
+      incomingResponse && self.phase != .idle && self.phase != .preparing
+      && self.phase != phase && !reduceMotion
+    let enteringInput = self.phase != phase && (phase == .preparing || phase == .listening)
     let changedAppearance = self.phase != phase || self.reduceMotion != reduceMotion
     self.phase = phase
     // Idle keeps the last rendered bars while the owner fades this container.
-    if phase != .idle { self.level = level.isFinite ? min(1, max(0, level)) : 0 }
+    if phase == .preparing {
+      self.level = 0
+    } else if phase != .idle {
+      self.level = level.isFinite ? min(1, max(0, level)) : 0
+    }
     self.cutoutWidth = cutoutWidth.isFinite ? max(0, cutoutWidth) : 0
     self.reduceMotion = reduceMotion
-    if changedAppearance {
-      stopAnimations(preservingPresentation: phase == .idle)
-      if crossfade { crossfadePhase() }
-      updatePhaseAppearance()
+    withoutImplicitAnimations {
+      if changedAppearance {
+        stopAnimations(preservingPresentation: phase == .idle)
+        if enteringInput { clearVisibleContent() }
+        if crossfade { crossfadePhase() }
+        updatePhaseAppearance()
+      }
+      layoutLayers()
     }
-    layoutLayers()
     synchronizeAnimations()
   }
 
@@ -115,7 +138,7 @@ import QuartzCore
     }
     setAccessibilityRole(.staticText)
     updateScale()
-    updatePhaseAppearance()
+    reset()
   }
 
   private func updateScale() {
@@ -125,6 +148,10 @@ import QuartzCore
   }
 
   private func updatePhaseAppearance() {
+    guard phase != .preparing else {
+      clearVisibleContent()
+      return
+    }
     guard phase != .idle else {
       setAccessibilityElement(false)
       setAccessibilityLabel(nil)
@@ -133,6 +160,7 @@ import QuartzCore
     withoutImplicitAnimations {
       labelLayer.isHidden = false
       indicatorWing.isHidden = false
+      glowLayer.isHidden = false
       let color =
         phase == .thinking
         ? NSColor(srgbRed: 0.91, green: 0.35, blue: 0.89, alpha: 1)
@@ -209,7 +237,7 @@ import QuartzCore
   }
 
   private func synchronizeAnimations() {
-    guard phase != .idle, !reduceMotion, !isHiddenOrHasHiddenAncestor,
+    guard phase != .idle, phase != .preparing, !reduceMotion, !isHiddenOrHasHiddenAncestor,
       let window, window.isVisible, window.occlusionState.contains(.visible)
     else {
       stopAnimations()
@@ -248,6 +276,25 @@ import QuartzCore
     transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
     labelLayer.add(transition, forKey: "phaseCrossfade")
     indicatorWing.add(transition, forKey: "phaseCrossfade")
+  }
+
+  private func clearVisibleContent() {
+    labelLayer.string = nil
+    labelLayer.contents = nil
+    labelLayer.isHidden = true
+    indicatorWing.isHidden = true
+    glowLayer.isHidden = true
+    glowLayer.colors = nil
+    for bar in bars {
+      bar.isHidden = true
+      bar.backgroundColor = nil
+    }
+    for dot in dots {
+      dot.isHidden = true
+      dot.backgroundColor = nil
+    }
+    setAccessibilityElement(false)
+    setAccessibilityLabel(nil)
   }
 
   private func stopAnimations(preservingPresentation: Bool = false) {

@@ -34,6 +34,12 @@ The configurable text shortcut remains Cmd + Shift + Space by default.
 Double-Control and dictation shortcuts from other products are not advertised
 as implemented.
 
+Microphone preparation is visually quiet. Listening is the first visible input
+status after the audio engine becomes ready. A fresh hold clears the previous
+turn's text, dots and layer animations synchronously; entry into Listening never
+crossfades a previous response. This prevents a Thinking/Listening overlap on
+first use or when interrupting a reply. Response phases retain their short fades.
+
 Listening bars now use a bounded real microphone RMS envelope, with attack and
 release smoothing. The audio callback reads at most 2,048 samples across at most
 two channels and publishes only a coalesced scalar through a nonblocking lock.
@@ -73,13 +79,17 @@ must not enlarge Home and push its header/footer outside the viewport.
 The compact strip uses retained native text, bar, dot and radial glow layers.
 Its 108/68-point left/right wings sit outside the actual camera gap, with no
 content under the camera. Entry/exit uses the same spring and a short opacity
-fade; status changes crossfade, and Core Animation drives the quiet glow/dots.
+fade; response phases crossfade, and Core Animation drives the quiet glow/dots.
 No timer or task is created per animation frame. Hidden and idle activity stops
 repeating animations. These dimensions and curves are authored from the supplied
 visual references, not recovered private implementation values.
 Reduce Motion skips the geometry animation and unnecessary activity movement,
 including the activity pulse and status crossfade.
 Render/input work is local and independent of provider latency.
+
+The shell uses an explicit black perimeter and no native window shadow or host
+focus ring. Home, Chat and Settings share this border, including where the inner
+Settings background is charcoal. Internal controls retain their own focus styles.
 
 ## Verification boundary
 
@@ -92,7 +102,11 @@ own-window screenshots. Compact-status fixtures also verify camera-height
 placement, focus preservation, hover from a status wing, return from Home,
 explicit response handoff, completion retraction and unrelated-turn isolation.
 Pure state tests cover pending speech, late callbacks, cancellation and terminal
-generations. Escape and visible Stop remain available while speech is queued,
+generations. Retained-layer tests cover prior-response reset, quiet preparation,
+clean Listening entry and finite meter geometry. Native acceptance captures both
+first preparation and an immediate restart from Thinking, then checks that no
+old text, dots or glow are visible. It also verifies that expanded surfaces have
+no native window shadow. Escape and visible Stop remain available while speech is queued,
 including before the synthesizer's start callback. Acceptance never proves physical input delivery or acoustic
 output. Its callback interval JSON measures local display-link scheduling,
 not presented-frame FPS.

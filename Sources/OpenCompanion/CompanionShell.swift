@@ -17,6 +17,7 @@ struct CompanionShellGeometry: Codable, Sendable {
   let safeAreaTop: CGFloat
   let surface: String
   let cutoutFrame: CGRect?
+  let hasWindowShadow: Bool
 }
 
 struct NotchMotionStatistics: Codable {
@@ -125,7 +126,9 @@ private final class ResidentCompanionPanel: NSPanel {
       styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     panel.isOpaque = false
     panel.backgroundColor = .clear
-    panel.hasShadow = true
+    // The attached shell is part of the black camera housing. WindowServer's
+    // default panel rim/shadow must not outline it against the menu bar.
+    panel.hasShadow = false
     panel.hidesOnDeactivate = false
     panel.isReleasedWhenClosed = false
     panel.acceptsMouseMovedEvents = true
@@ -208,7 +211,7 @@ private final class ResidentCompanionPanel: NSPanel {
     return CompanionShellGeometry(
       anchor: presentation.anchor.rawValue, expanded: presentation.expanded, frame: panel.frame,
       displayFrame: display?.frame ?? .zero, safeAreaTop: display?.safeAreaInsets.top ?? 0,
-      surface: surface.rawValue, cutoutFrame: layout?.cutout)
+      surface: surface.rawValue, cutoutFrame: layout?.cutout, hasWindowShadow: panel.hasShadow)
   }
 
   var motionStatistics: NotchMotionStatistics { motion.statistics }
@@ -241,7 +244,10 @@ private final class ResidentCompanionPanel: NSPanel {
   /// A physical hold owns only the shallow activity wings, never dashboard
   /// exposure or keyboard focus. Hover continues to own Home/Chat/Settings.
   func showVoiceActivity() {
-    activity.begin(generation: model.taskGeneration)
+    guard activity.begin(generation: model.taskGeneration) else { return }
+    // A new physical hold replaces the previous response immediately. Its old
+    // label/dots must not survive the fade while the microphone is preparing.
+    surfaceHost?.resetActivity()
     updateState()
     position(animated: true)
     observeCurrentPointer()
@@ -651,7 +657,7 @@ private final class ResidentCompanionPanel: NSPanel {
       right: display.auxiliaryTopRightArea)
     presentation.topInset = presentation.anchor == .notch ? notch.topInset : 0
     presentation.hasCutout = presentation.anchor == .notch && notch.cutout != nil
-    panel.hasShadow = !surface.isCompact || !presentation.hasCutout
+    panel.hasShadow = false
     panel.ignoresMouseEvents = surface.isCompact
     panel.level =
       presentation.hasCutout
@@ -706,6 +712,7 @@ private final class ResidentCompanionPanel: NSPanel {
 @MainActor private final class ShellSurfaceHost: NSView {
   private let hosting: NSHostingView<CompanionShellView>
   private let surfaceMask = CAShapeLayer()
+  private let surfaceEdge = CAShapeLayer()
   private let activityView = NotchActivityView(frame: .zero)
   private var activityFrame = CGRect.zero
   private var cutoutWidth: CGFloat = 0
@@ -719,10 +726,21 @@ private final class ResidentCompanionPanel: NSPanel {
     super.init(frame: .zero)
     wantsLayer = true
     layer?.backgroundColor = NSColor.black.cgColor
+    layer?.borderWidth = 0
+    layer?.borderColor = NSColor.black.cgColor
     layer?.mask = surfaceMask
+    focusRingType = .none
+    hosting.focusRingType = .none
     addSubview(hosting)
     addSubview(activityView)
     activityView.layer?.opacity = 0
+    // Keep a black perimeter even where an inner Settings surface is charcoal.
+    // It shares the attachment path; there is no white stroke or native rim.
+    surfaceEdge.fillColor = nil
+    surfaceEdge.strokeColor = NSColor.black.cgColor
+    surfaceEdge.lineWidth = 2
+    surfaceEdge.zPosition = 10
+    layer?.addSublayer(surfaceEdge)
   }
   required init?(coder: NSCoder) { nil }
 
@@ -744,7 +762,9 @@ private final class ResidentCompanionPanel: NSPanel {
 
   func updateActivity(phase: NotchActivityPhase, level: Double) {
     let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-    let visible = compact && phase != .idle
+    // Preparation remains an internal input state. Only the live microphone
+    // may introduce Listening; preparation never displays work-in-progress dots.
+    let visible = compact && phase != .idle && phase != .preparing
     activityView.update(
       phase: phase, level: level, cutoutWidth: cutoutWidth, reduceMotion: reduced)
     guard let layer = activityView.layer else { return }
@@ -767,6 +787,16 @@ private final class ResidentCompanionPanel: NSPanel {
     }
   }
 
+  func resetActivity() {
+    activityView.reset()
+    activityView.layer?.removeAnimation(forKey: "statusExposure")
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    activityView.layer?.opacity = 0
+    CATransaction.commit()
+    activityVisible = false
+  }
+
   override func layout() {
     super.layout()
     hosting.frame = CGRect(
@@ -783,7 +813,10 @@ private final class ResidentCompanionPanel: NSPanel {
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     surfaceMask.frame = bounds
-    surfaceMask.path = Self.path(in: bounds, attached: attached)
+    let path = Self.path(in: bounds, attached: attached)
+    surfaceMask.path = path
+    surfaceEdge.frame = bounds
+    surfaceEdge.path = path
     CATransaction.commit()
   }
 

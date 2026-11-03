@@ -13,7 +13,7 @@ enum NotchAcceptance {
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
     let initial = shell.geometry
     let originalForeground = NSWorkspace.shared.frontmostApplication?.processIdentifier
-    guard initial.surface == "tucked" else {
+    guard initial.surface == "tucked", !initial.hasWindowShadow else {
       throw Failure.message("The synthetic acceptance panel must start tucked.")
     }
     if let cutout = initial.cutoutFrame {
@@ -25,9 +25,15 @@ enum NotchAcceptance {
     let outside = CGPoint(x: initial.displayFrame.minX + 30, y: initial.displayFrame.minY + 30)
     model.listening = true
     model.pushToTalkActive = true
+    model.voiceInputState = "Preparing microphone"
+    model.state = "Preparing microphone"
+    shell.showVoiceActivity()
+    try await Task.sleep(for: .milliseconds(650))
+    let preparingURL = output.appendingPathComponent("notch-preparing.png")
+    try await shell.exportLiveSnapshot(to: preparingURL)
+    try requireQuietPreparation(at: preparingURL)
     model.voiceInputState = "Listening"
     model.state = "Listening"
-    shell.showVoiceActivity()
     try await Task.sleep(for: .milliseconds(650))
     let activity = shell.geometry
     guard activity.surface == "activity", !activity.expanded, NSApp.keyWindow == nil,
@@ -59,6 +65,23 @@ enum NotchAcceptance {
       throw Failure.message("Voice-response handoff lost compact activity ownership.")
     }
     try await shell.exportLiveSnapshot(to: output.appendingPathComponent("notch-thinking.png"))
+    // Start a second hold directly from a visible response, without waiting for
+    // a rendered idle frame. This reproduced the stale-label/dot crossfade.
+    model.stop()
+    model.listening = true
+    model.pushToTalkActive = true
+    model.voiceInputState = "Preparing microphone"
+    model.state = "Preparing microphone"
+    shell.showVoiceActivity()
+    let restartURL = output.appendingPathComponent("notch-restart-preparing.png")
+    try await shell.exportLiveSnapshot(to: restartURL)
+    try requireQuietPreparation(at: restartURL)
+    model.voiceInputState = "Listening"
+    model.state = "Listening"
+    try await Task.sleep(for: .milliseconds(300))
+    try await shell.exportLiveSnapshot(
+      to: output.appendingPathComponent("notch-restart-listening.png"))
+    model.stop()
     model.busy = false
     model.listening = false
     model.state = "Ready"
@@ -84,7 +107,7 @@ enum NotchAcceptance {
     shell.pointerMoved(to: CGPoint(x: target.midX, y: target.midY))
     try await Task.sleep(for: .milliseconds(420))
     let peek = shell.geometry
-    guard peek.surface == "peek", NSApp.keyWindow == nil,
+    guard peek.surface == "peek", !peek.hasWindowShadow, NSApp.keyWindow == nil,
       NSWorkspace.shared.frontmostApplication?.processIdentifier == originalForeground
     else {
       throw Failure.message("Hover did not reveal a nonactivating peek.")
@@ -120,7 +143,8 @@ enum NotchAcceptance {
     }
     let receipt = Receipt(
       initial: initial, activity: activity, peek: peek, compactVoiceFocusPreserved: true,
-      voiceCompletionRetracted: true, hoverFocusPreserved: true,
+      voiceCompletionRetracted: true, preparationClearedPreviousStatus: true,
+      hoverFocusPreserved: true,
       repeatedHoverAndDraftPreserved: true, inputMonitoringAllowed: CGPreflightListenEventAccess(),
       physicalPointerObservationEnabled: shell.observesPointer,
       accessibilityAllowed: AXIsProcessTrusted(), eventTapInstalled: availability.isInstalled,
@@ -136,7 +160,9 @@ enum NotchAcceptance {
     try await shell.exportLiveSnapshot(to: output.appendingPathComponent("notch-conversation.png"))
     shell.openSettings()
     try await Task.sleep(for: .milliseconds(650))
-    guard shell.geometry.surface == "settings", model.input == "An unsent draft stays here." else {
+    guard shell.geometry.surface == "settings", !shell.geometry.hasWindowShadow,
+      model.input == "An unsent draft stays here."
+    else {
       throw Failure.message("Settings did not share the shell or preserve the chat draft.")
     }
     try await shell.exportLiveSnapshot(to: output.appendingPathComponent("notch-settings.png"))
@@ -154,12 +180,35 @@ enum NotchAcceptance {
       "VOICE_PREFLIGHT tapInstalled=\(availability.isInstalled) inputMonitoring=\(receipt.inputMonitoringAllowed) accessibility=\(receipt.accessibilityAllowed) microphone=\(receipt.microphoneAuthorization) speech=\(receipt.speechAuthorization)"
     )
   }
+
+  /// Inspect only our own small compositor capture. Preparation must be black:
+  /// no stale Thinking text, glow, dots or transient crossfade from the old turn.
+  @MainActor private static func requireQuietPreparation(at url: URL) throws {
+    let data = try Data(contentsOf: url)
+    guard let image = NSBitmapImageRep(data: data), image.pixelsWide > 0,
+      image.pixelsHigh > 0, image.pixelsWide <= 4096, image.pixelsHigh <= 256
+    else { throw Failure.message("Invalid compact preparation capture.") }
+    for y in 0..<image.pixelsHigh {
+      for x in 0..<image.pixelsWide {
+        guard let color = image.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else {
+          throw Failure.message("Preparation capture could not be inspected.")
+        }
+        if color.alphaComponent > 0.05,
+          max(color.redComponent, color.greenComponent, color.blueComponent) > 0.05
+        {
+          throw Failure.message(
+            "Preparation retained visible text or indicator from another phase.")
+        }
+      }
+    }
+  }
   private struct Receipt: Codable {
     let initial: CompanionShellGeometry
     let activity: CompanionShellGeometry
     let peek: CompanionShellGeometry
     let compactVoiceFocusPreserved: Bool
     let voiceCompletionRetracted: Bool
+    let preparationClearedPreviousStatus: Bool
     let hoverFocusPreserved: Bool
     let repeatedHoverAndDraftPreserved: Bool
     let inputMonitoringAllowed: Bool

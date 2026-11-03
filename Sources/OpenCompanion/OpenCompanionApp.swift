@@ -40,7 +40,7 @@ import SwiftUI
     let acceptanceMode = [
       "--keychain-acceptance", "--smoke-test-codex", "--render-acceptance", "--capture-acceptance",
       "--interaction-acceptance", "--cursor-acceptance", "--cursor-live-acceptance",
-      "--guidance-live-acceptance",
+      "--guidance-live-acceptance", "--guidance-routing-acceptance",
     ].contains(where: CommandLine.arguments.contains)
     model = AppModel(acceptanceMode: acceptanceMode)
     model.onOpen = { [weak self] in self?.openRequestedSurface() }
@@ -87,9 +87,37 @@ import SwiftUI
       }
       return
     }
+    if let index = CommandLine.arguments.firstIndex(of: "--guidance-routing-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 1 < CommandLine.arguments.count else {
+            throw ProviderError.message(
+              "Provide an output directory for guidance routing acceptance.")
+          }
+          try await GuidanceRoutingAcceptance.run(
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
+            executable: model.codexPath, model: model.codexModel)
+          print("GUIDANCE_ROUTING_ACCEPTANCE_PASSED")
+        } catch {
+          print("GUIDANCE_ROUTING_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
+    }
     shell = CompanionShell(
       model: model, observePointer: !acceptanceMode,
       onOpenWorkspace: { [weak self] in self?.openRequestedSurface() })
+    model.onPrepareScreenGuidance = { [weak self] generation, expectedPID in
+      try Task.checkCancellation()
+      guard let self, let shell = self.shell, self.model.taskGeneration == generation else {
+        throw CancellationError()
+      }
+      self.utilityWindow?.orderOut(nil)
+      self.explanationPanel?.orderOut(nil)
+      try await shell.prepareScreenGuidance(generation: generation, expectedPID: expectedPID)
+    }
     model.onVoiceResponseSubmitted = { [weak self] source, destination in
       self?.shell?.handoffVoiceActivity(from: source, to: destination)
     }

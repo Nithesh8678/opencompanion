@@ -63,8 +63,14 @@ actor ReasoningProvider {
     configuration: ProviderConfiguration, key: String, messages: [ChatLine], context: String,
     image: Data?, scene: SceneDocument?,
     onUnit: @escaping @Sendable (ProviderUnit) async throws -> Void,
-    onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil
+    onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil,
+    responsePolicy: ResponsePolicy? = nil
   ) async throws {
+    let requestPolicy =
+      responsePolicy
+      ?? ResponsePolicy.resolve(
+        text: messages.last(where: { $0.role == "user" })?.text ?? "",
+        screenGuidanceEnabled: image != nil, inNotebook: scene != nil, hasNotebook: scene != nil)
     guard !configuration.model.trimmingCharacters(in: .whitespaces).isEmpty else {
       throw ProviderError.message("Choose a model in Settings, then run the connection test.")
     }
@@ -73,8 +79,13 @@ actor ReasoningProvider {
     request.timeoutInterval = 90
     request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-    var history: [[String: Any]] = [["role": "system", "content": Self.instructions]]
-    if let scene, let data = try? JSONEncoder().encode(scene),
+    var history: [[String: Any]] = [
+      [
+        "role": "system", "content": Self.instructions + "\n" + requestPolicy.instructions,
+      ]
+    ]
+    if requestPolicy.includesExistingNotebook, let scene,
+      let data = try? JSONEncoder().encode(scene),
       let json = String(data: data, encoding: .utf8)
     {
       history.append([
@@ -179,9 +190,9 @@ actor ReasoningProvider {
     Output ONLY complete newline-delimited JSON objects, no Markdown fences. Keep each object bounded and immediately useful. Types:
     {"type":"text","text":"A short complete natural-language paragraph."}
     {"type":"scene","title":"Specific lesson title","nodes":[...],"removeIDs":[]}
-    {"type":"target","target":{"x":0.1,"y":0.2,"width":0.2,"height":0.05,"instruction":"Click the named control.","label":"Table Editor","shape":"roundedRectangle","advanceOn":"click"}}
+    {"type":"target","target":{"x":0.1,"y":0.2,"width":0.2,"height":0.05,"instruction":"Click the named button.","label":"Open editor","shape":"ellipse","advanceOn":"click"}}
     Start with a short useful text clause before a large scene. Emit text objects in the canonical order type then text, with no extra fields. Continue with short complete natural-language paragraph units rather than withholding all narration until the whole answer is finished. Never split a JSON object across logical NDJSON lines.
-    Targets require the supplied screenshot and normalized top-left bounds. Never invent a control. Say when ambiguous. Screen guidance is visual instruction, never automatic desktop action. Give only the next currently visible action, wait for the user to act, and verify the next supplied frame before claiming progress. Never predict controls on a page not yet visible. Give a short label (1–4 words), shape roundedRectangle for controls or ellipse for an explanatory circle, and advanceOn click only for the next control the user should click; text entry, explanatory marks and completion use advanceOn manual. At most one click-advancing target per response; up to two secondary manual marks may explain the same current frame. Narration should be brief. A new frame after a click is evidence to inspect, not proof that the click succeeded.
-    For teaching, follow the first short text unit with a coherent relationship in a small scene, then add detail. Generic title or empty page is insufficient. Nodes use stable id; kinds rectangle,ellipse,line,arrow,text,path,mesh,group. Coordinates are in a 900x560 canvas. Each node must include id,kind,x,y,width,height,text,color,fill,strokeWidth,fontSize,points,rotation,opacity,bindings ({}); parentID optional. Default color #2458A6 fill #E6EFFC, opacity 1, strokeWidth 2, fontSize 18, rotation 0, points []. Only kind=text renders text. A rectangle/ellipse/arrow text field is not a visible label: create separate text nodes over or beside shapes. New teaching diagrams need at least two visible text nodes labeling the actual concepts, as well as causal connectors. Text fits node bounds. Width and height must always be nonnegative. For upward or leftward arrows, use signed endpoint coordinates in points; never negative width or height. For arrows/lines set points [{"x":x1,"y":y1},{"x":x2,"y":y2}]. Mesh is a bounded 3D box. Avoid overlap, use clear labels and small diagrams. Existing IDs update the same parts. Never erase unrelated user edits. Give science assumptions, distinguish kinematics from physical simulation. A motor lesson must identify simplified brushed DC. Do not generate code or execute expressions. Do not output audio clock events. Narration remains text; the host controls speech and cancellation. All output belongs to the current generation.
+    Targets require the supplied screenshot and normalized top-left bounds. Never invent a control. Say when ambiguous. Screen guidance is visual instruction, never automatic desktop action. Give only the next currently visible action, wait for the user to act, and verify the next supplied frame before claiming progress. Never predict controls on a page not yet visible. Give a short label (1–4 words). Use shape ellipse to circle compact buttons and icons; roundedRectangle is reserved for text-entry fields or larger regions. Use advanceOn click only for the next control the user should click; text entry, explanatory marks and completion use advanceOn manual. At most one click-advancing target per response; up to two secondary manual marks may explain the same current frame. Narration should be brief. A new frame after a click is evidence to inspect, not proof that the click succeeded.
+    Default to concise conversational text. Do not create or open a notebook for ordinary facts, app navigation, button instructions, or routine questions. A scene is appropriate only for a requested visual or a conceptual explanation that benefits from spatial relationships, a chart, or an interactive model, and only when the current response policy permits it. Never create a scene merely because a previous turn used a notebook. If a useful scene is permitted, follow the first short text unit with a coherent relationship, then add detail. Generic title or empty page is insufficient. Nodes use stable id; kinds rectangle,ellipse,line,arrow,text,path,mesh,group. Coordinates are in a 900x560 canvas. Each node must include id,kind,x,y,width,height,text,color,fill,strokeWidth,fontSize,points,rotation,opacity,bindings ({}); parentID optional. Default color #2458A6 fill #E6EFFC, opacity 1, strokeWidth 2, fontSize 18, rotation 0, points []. Only kind=text renders text. A rectangle/ellipse/arrow text field is not a visible label: create separate text nodes over or beside shapes. New teaching diagrams need at least two visible text nodes labeling the actual concepts, as well as causal connectors. Text fits node bounds. Width and height must always be nonnegative. For upward or leftward arrows, use signed endpoint coordinates in points; never negative width or height. For arrows/lines set points [{"x":x1,"y":y1},{"x":x2,"y":y2}]. Mesh is a bounded 3D box. Avoid overlap, use clear labels and small diagrams. Existing IDs update the same parts. Never erase unrelated user edits. Give science assumptions, distinguish kinematics from physical simulation. A motor lesson must identify simplified brushed DC. Do not generate code or execute expressions. Do not output audio clock events. Narration remains text; the host controls speech and cancellation. All output belongs to the current generation.
     """
 }

@@ -163,6 +163,8 @@ enum CursorCompanionAcceptance {
     model.stop()
     model.busy = true
     model.state = "Thinking"
+    model.configureResponseOutput(
+      .resolve(text: "Show me where to click on this screen", screenGuidanceEnabled: true))
     cursor.beginResponse(generation: model.taskGeneration, isGuidance: true)
     let fixture = ScreenEvidence(
       frameID: UUID(), revision: 1, capturedAt: ProcessInfo.processInfo.systemUptime,

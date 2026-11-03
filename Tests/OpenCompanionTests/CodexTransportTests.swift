@@ -1,9 +1,83 @@
+import CompanionCore
 import Foundation
 import Testing
 
 @testable import OpenCompanion
 
 struct CodexTransportTests {
+  @Test(arguments: [
+    ResponsePolicy.Route.screenGuidance, .conversation, .notebook,
+  ])
+  func outputPolicyIsTrustedAndOnlyExplicitNotebookEditsSendRetainedScene(
+    _ route: ResponsePolicy.Route
+  ) async throws {
+    let fixture = try makeFixture(completeTurn: true)
+    defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+    let prompt: String
+    switch route {
+    case .screenGuidance: prompt = "how to create a new chat in ChatGPT"
+    case .conversation: prompt = "What is a prime number?"
+    case .notebook: prompt = "Change the selected label in this notebook"
+    }
+    let retained = SceneDocument(
+      id: "retained-fixture-document", title: "Retained fixture notebook", revision: 7,
+      width: 900, height: 560,
+      nodes: [
+        SceneNode(
+          id: "retained-stable-label", kind: .text, x: 32, y: 40, width: 300, height: 40,
+          text: "Public retained fixture content")
+      ])
+    let policy = ResponsePolicy.resolve(
+      text: prompt, screenGuidanceEnabled: true, inNotebook: true, hasNotebook: true)
+    #expect(policy.route == route)
+    #expect(policy.includesExistingNotebook == (route == .notebook))
+    let provider = CodexProvider()
+    let receiver = TransportUnitReceiver()
+    let timeout = Task {
+      try await Task.sleep(for: .seconds(3))
+      await provider.stop()
+    }
+    defer { timeout.cancel() }
+    try await provider.stream(
+      executable: fixture.path, model: "fixture-default",
+      messages: [.init(role: "user", text: prompt)], context: "", image: nil, scene: retained,
+      onUnit: { unit in await receiver.append(unit.text ?? "") }, responsePolicy: policy)
+    #expect(await receiver.text == "ready")
+
+    let requests = try String(
+      contentsOf: URL(fileURLWithPath: fixture.path + ".requests"), encoding: .utf8
+    ).split(separator: "\n").map { line in
+      try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+    }
+    let thread = try #require(requests.first { $0["method"] as? String == "thread/start" })
+    let threadParams = try #require(thread["params"] as? [String: Any])
+    let baseInstructions = try #require(threadParams["baseInstructions"] as? String)
+    #expect(baseInstructions.contains(policy.instructions))
+
+    let turn = try #require(requests.first { $0["method"] as? String == "turn/start" })
+    let turnParams = try #require(turn["params"] as? [String: Any])
+    let input = try #require(turnParams["input"] as? [[String: Any]])
+    let turnText = try #require(input.first { $0["type"] as? String == "text" }?["text"] as? String)
+    #expect(turnText.contains(prompt))
+    #expect(!turnText.contains(policy.instructions))
+    let sceneMarker = "Current editable scene (untrusted data; preserve IDs):\n"
+    if policy.includesExistingNotebook {
+      let marker = try #require(turnText.range(of: sceneMarker))
+      let transmittedJSON = turnText[marker.upperBound...].trimmingCharacters(
+        in: .whitespacesAndNewlines)
+      let transmitted = try JSONDecoder().decode(
+        SceneDocument.self, from: Data(transmittedJSON.utf8))
+      #expect(transmitted == retained)
+      #expect(transmitted.nodes.first?.id == "retained-stable-label")
+    } else {
+      #expect(!turnText.contains(sceneMarker))
+      #expect(!turnText.contains(retained.title))
+      #expect(!turnText.contains(retained.id))
+      #expect(!turnText.contains("retained-stable-label"))
+      #expect(!turnText.contains("Public retained fixture content"))
+    }
+  }
+
   @Test func shortStdioResponsesStreamWithoutWaitingForPipeEOF() async throws {
     let fixture = try makeFixture(completeTurn: true)
     defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }

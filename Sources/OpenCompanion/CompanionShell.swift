@@ -523,6 +523,60 @@ private final class ResidentCompanionPanel: NSPanel {
     }
   }
 
+  /// An explicit typed screen-guidance request may come from either the notch
+  /// composer or the utility window. Restore only its expected external app;
+  /// ordinary hover and conversational sends do not enter this path.
+  func prepareScreenGuidance(generation: UInt64, expectedPID: pid_t) async throws {
+    try Task.checkCancellation()
+    guard model.taskGeneration == generation else { throw CancellationError() }
+    let ownPID = ProcessInfo.processInfo.processIdentifier
+    guard expectedPID > 0, expectedPID != ownPID,
+      let application = NSRunningApplication(processIdentifier: expectedPID),
+      !application.isTerminated
+    else {
+      throw ProviderError.message("Bring the app you want help with forward, then ask again.")
+    }
+    let initialPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    guard initialPID == ownPID || initialPID == expectedPID else {
+      throw ProviderError.message("The active app changed. Bring the intended app forward and ask again.")
+    }
+    invalidateInvocations()
+    let invocationID = UUID()
+    pendingInvocationID = invocationID
+    pendingTaskGeneration = generation
+    defer {
+      if pendingInvocationID == invocationID { finishPendingInvocation() }
+    }
+    previousApplication = application
+    hoverPolicy.suppressedUntilExit = true
+    collapse(restoringFocus: true)
+    try Task.checkCancellation()
+    guard invocationPermitted(invocationID, generation: generation) else {
+      throw CancellationError()
+    }
+    let foregroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    guard foregroundPID == ownPID || foregroundPID == expectedPID else {
+      throw ProviderError.message("The active app changed. Bring the intended app forward and ask again.")
+    }
+    if foregroundPID != expectedPID, !application.activate(options: []) {
+      throw ProviderError.message("The intended app could not regain focus. Bring it forward and ask again.")
+    }
+    let deadline = ProcessInfo.processInfo.systemUptime + 1
+    while invocationPermitted(invocationID, generation: generation) {
+      try Task.checkCancellation()
+      let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+      if currentPID == expectedPID { return }
+      guard currentPID == ownPID else {
+        throw ProviderError.message("The active app changed. Bring the intended app forward and ask again.")
+      }
+      guard !application.isTerminated, ProcessInfo.processInfo.systemUptime < deadline else {
+        throw ProviderError.message("The intended app did not regain focus. Bring it forward and ask again.")
+      }
+      try await Task.sleep(for: .milliseconds(16))
+    }
+    throw CancellationError()
+  }
+
   private func invocationPermitted(_ id: UUID, generation: UInt64) -> Bool {
     !Task.isCancelled && pendingInvocationID == id && model.taskGeneration == generation
   }

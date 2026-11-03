@@ -23,6 +23,44 @@ on release. A new hold synchronously clears the previous cursor answer. Escape
 cancels the current operation. Settings → Cursor has independent controls for the
 floating follower, nearby replies and Screen guidance.
 
+## Shared response routes and notebook ownership
+
+Typed messages and completed held-voice requests use the same `ResponsePolicy`
+before generation starts. Its three routes describe permitted output:
+
+| Route | Intended behavior |
+|---|---|
+| Conversation | Routine questions, factual answers and text tasks stay in Chat/nearby replies. No notebook scene is applied. |
+| Screen guidance | Requests for help using a visible app, including “how do I create a new chat in ChatGPT?”, use grounded target annotations. Notebook scenes are not applied. |
+| Notebook | Explicit drawings, plots and diagrams, or mechanism teaching that can benefit from spatial relationships, may use a scene. A scene is permitted when useful, never required. |
+
+This is a bounded English heuristic, not general language understanding. It
+classifies only the current request, with a 32,000 UTF-8-byte limit and covered quoted
+examples excluded from positive intent. Text-only instructions keep the response
+conversational; no-diagram instructions prohibit notebook output. Screen-privacy
+instructions prevent automatic screen access. A privacy preface such as “No
+screenshot. Draw a diagram of a lever” still permits the independent conceptual
+drawing. Disabled Screen guidance falls back to conversation.
+
+The policy is fixed for that turn and supplied as trusted instructions to both
+provider transports. `AppModel` also enforces the notebook capability: scene
+units on conversation/guidance routes are ignored before document mutation,
+undo changes, navigation or notebook presentation. Valid text units can continue.
+Target units outside the screen-guidance route are likewise ignored before
+cursor movement, annotation presentation or instruction/history mutation.
+An old notebook or previous conversation about diagrams cannot grant a new turn
+permission to edit it or reopen its panel.
+
+A permitted new visual starts an independent notebook document on its first
+accepted scene unit. Later scene units in that response patch that same document.
+Existing notebook content is supplied for editing only when the notebook context
+is visible and the current request clearly asks for an edit/reference, such as
+recoloring the selected arrow. Document identity and revision checks still reject
+late responses after a concurrent edit or notebook replacement. The notebook
+panel is presented at most once per visual turn, after an accepted scene; these
+rules do not change explicit New notebook, built-in example, saved-notebook or
+manual editing actions.
+
 ## Conversational cursor
 
 `CursorCompanionCoordinator` owns one transparent, nonactivating, non-key,
@@ -85,28 +123,58 @@ pacing, not measured alignment to spoken words, phonemes or output audio samples
 ## Requested screen guidance
 
 Screen guidance is enabled by default, with backward-compatible saved settings.
-At held-voice submission, `GuidanceIntent` uses a bounded English heuristic to
-recognize requests such as “show me where to click” or “how can I create a table
-in Supabase.” It distinguishes the covered general explanation/diagram cases,
-covers specific screen-privacy opt-out phrases, and rejects input over 32,000
-UTF-8 bytes. This is limited English phrase matching, not a general intent model;
-requests can be missed or misclassified. Manual Add screen remains available in
-Chat. Nonmatching voice questions do not trigger automatic capture.
+The shared response policy uses `GuidanceIntent` for typed and held-voice
+requests such as “show me where to click,” “how can I create a table in Supabase,”
+or the covered new-chat requests in ChatGPT. Recognized spoken ChatGPT spellings
+are normalized. General explanations, authored tutorial wording, quoted examples
+and covered screen-privacy opt-outs are distinguished from requests to inspect
+an app. Requests can still be missed or misclassified. Manual Add screen remains
+available in Chat. Nonmatching questions do not trigger automatic capture.
 
-A recognized, enabled request establishes its new response generation first,
-then captures one fresh active-screen frame inside that turn task. The display
-under the pointer is preferred, with the selected display as fallback. The
-existing capture service excludes OpenCompanion windows and supplies bounded
+A recognized, enabled request without a matching deliberately selected typed
+screen attachment establishes its new response generation first, then captures
+one fresh active-screen frame inside that turn task. Before capture, the app hides
+its utility/notebook panels and tucks the
+notch. If OpenCompanion owns focus, it requests normal activation of the intended
+previous external app and waits at most one second for that exact app. A changed
+external foreground, cancelled task or replaced generation aborts preparation.
+This is focus preparation for the explicit guidance request, never a click or
+typed action in the target app.
+
+The display under the pointer is preferred, with the selected display as fallback.
+The existing capture service excludes OpenCompanion windows and supplies bounded
 AX/OCR context. Publication checks the task, capture generation, request,
 preference, expiry and foreground app before provider delivery. Capture failure
 reports an error rather than continuing with an ungrounded target.
 
-Only this fresh frame's image and semantic text supply selected evidence for the
-guidance turn. Selected file/memory content is omitted and the current notebook
-is not sent or edited by this path. The existing conversation history remains;
-selected context is retained in the UI. Ordinary voice questions retain their
-normal conversation/notebook behavior while omitting selected screen/file/memory
-evidence. There is no continuous screen capture or background AX polling.
+Automatic guidance supplies only that fresh frame's image and semantic text as
+selected evidence. Selected file/memory content is omitted, and the current
+notebook is not sent or edited by this path. The existing conversation history
+remains; selected context is retained in the UI. A typed request can reuse a
+screen attachment only when explicit manual-selection provenance matches the
+current immutable evidence identity. This covers deliberately selected full
+displays, windows, regions and captures made with spatial strokes. It retains
+that exact frame rather than broadening to the display. An old automatic-guidance
+frame does not acquire manual provenance merely by remaining in memory; it
+requires a fresh automatic capture for the next guidance request.
+
+Manual guidance sends only the matching frame's image and semantic text. Selected
+file/memory/context text and raw drawn-stroke vectors are not added to this
+payload. This path also prepares the intended external foreground and tucks/hides
+own panels before provider delivery, without recapturing or broadening the selected
+frame. Cancellation, generation, selected evidence identity and foreground are
+checked again after the preparation wait. Its target still has to pass frame-identity, freshness and foreground
+checks. Automatic click continuation belongs to the fresh-capture request path.
+Cancelling pending capture work invalidates publication tokens and stops that
+work; it is distinct from removing an already published attachment. Remove
+context, replacement selection and display-topology invalidation clear the
+attachment and its selection authority.
+
+Ordinary typed requests can use deliberately attached context. Ordinary voice
+questions omit selected screen/file/memory evidence; notebook inclusion is
+separately controlled by the shared edit policy. Manual Talk still prepares a
+draft for review rather than submitting it. There is no continuous screen capture
+or background AX polling.
 
 ## Target drawing and user-click continuation
 
@@ -116,6 +184,9 @@ before presentation. The cursor flight starts only after validation. Target
 geometry and the capsule share one
 layout model. Rounded rectangles use a dashed red outline; ellipses use an
 original hand-drawn-style red path. Both have a restrained glow and light fill.
+Current provider instructions require an ellipse for a compact button/icon and
+reserve rounded rectangles for fields or larger regions. Live acceptance of this
+tightened shape instruction remains pending.
 The attached label uses pink/light fill and dark text, bounded to 80 graphemes
 and 4,096 UTF-8 bytes. When the model omits a label, its instruction is the
 fixed annotation fallback even if nearby replies are enabled. Target instructions
@@ -130,6 +201,10 @@ edge. After that short presentation it returns smoothly to the real pointer.
 The conversational reply text bubble is suppressed for guidance turns, so the
 fixed label owns the instruction. Reduce Motion presents the final geometry/text
 without the flight/write-on animation.
+
+If a guidance response has no valid target because the scene is ambiguous or the
+task is complete, its completed text explanation can appear as a nearby reply.
+That fallback does not open a notebook or establish a click-advancing target.
 
 Fixed annotations have independent lifetimes of at most 45 seconds. At most
 eight marks from the same frame coexist; appending does not extend older marks.
@@ -198,7 +273,12 @@ displays, fullscreen/Spaces and exact visual parity need separate acceptance.
 
 ## Recorded verification
 
-- Swift suites: 198 tests passed; Python installer/signing suites: 29 passed.
+- Latest completed automated checkpoint: 222 Swift tests and 29 Python
+  installer/signing tests passed. The capture-provenance and target-admission
+  follow-ups require another regression run before extending that evidence.
+- Shared typed/PTT routing, notebook admission/new-document isolation and retained
+  edit regressions passed automated tests; the updated native app built. Live
+  routing and foreground-preparation acceptance for this change is pending.
 - Certificate-signed native bundle built and installed at the canonical path.
 - Installed cursor acceptance passed: unfinished word waits, ordered whole-word
   reveal, one canonical Chat commit, immediate restart, four-row emoji caption,

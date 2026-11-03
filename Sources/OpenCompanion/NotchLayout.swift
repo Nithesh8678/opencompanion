@@ -63,11 +63,19 @@ struct NotchHoverPolicy {
     let retained =
       surface == .tucked ? target : target.union(displayedFrame.insetBy(dx: -6, dy: -6))
     if suppressedUntilExit {
-      if !retained.contains(pointer) { suppressedUntilExit = false }
+      if !containsPointer(pointer, in: retained) { suppressedUntilExit = false }
       return .none
     }
     if surface == .conversation || voiceActive { return .none }
-    if retained.contains(pointer) { return surface == .tucked ? .reveal : .none }
+    if containsPointer(pointer, in: retained) { return surface == .tucked ? .reveal : .none }
     return surface == .peek ? .tuck : .none
+  }
+
+  /// CGRect uses half-open bounds. The system pointer can rest exactly on the
+  /// display's top edge, which is also the clipped camera housing's maxY.
+  private func containsPointer(_ pointer: CGPoint, in rect: CGRect) -> Bool {
+    !rect.isNull && pointer.x.isFinite && pointer.y.isFinite
+      && pointer.x >= rect.minX && pointer.x <= rect.maxX
+      && pointer.y >= rect.minY && pointer.y <= rect.maxY
   }
 }

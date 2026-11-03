@@ -67,6 +67,6 @@ Opt-in live subscription checks consume your signed-in plan:
 OPENCOMPANION_LIVE_CODEX_TEST=1 swift test --filter CodexProviderIntegrationTests
 ```
 
-The app is locally ad-hoc signed. DeveloperID signing, notarization, signed updates, physical multi-display/voice acceptance, installed browser pairing and broad held-out task benchmarks remain release gates. No exact HeyClicky visual or performance parity is claimed.
+Default builds are ad-hoc signed. For local updates that retain a consistent code identity, reuse an existing certificate with the ignored [local signing configuration](docs/LOCAL-SIGNING.md). Developer ID signing, notarization, signed updates, physical multi-display/voice acceptance, installed browser pairing and broad held-out task benchmarks remain release gates. No exact HeyClicky visual or performance parity is claimed.
 
 MIT. Original code/artwork; system frameworks and SQLite. See [notices](THIRD-PARTY-NOTICES.md).

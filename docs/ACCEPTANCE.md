@@ -13,9 +13,10 @@
 - 7 shell capture tests: only fresh matching frames complete an invocation; Stop and superseding captures invalidate late results.
 - 5 shortcut tests: safe modifiers, duplicate actions, corrupted preferences and persistence.
 - 1 capture-sampler test: JPEG color conversion, negative display origins, retained fixtures and invalid controls.
-- 4 notch layout/hover tests: exact cutout footprint, negative display origins, notchless fallback, pointer exit, pinned conversation and hover rearming.
+- 5 notch layout/hover tests: exact cutout footprint, negative display origins, notchless fallback, physical top-edge boundaries, pointer exit, pinned conversation and hover rearming. A separate run-loop test verifies pointer polling without mouse-event delivery, using an injected location source.
 - 11 voice input tests: permission/start/release/Stop ordering, final/deadline races, cancellation after release, old tails after a new hold and typed-draft preservation.
 - 9 modifier-voice tests: Control+Option edges, repeats, extra keys/modifiers, lock-bit policy, cancellation and preference migration.
+- 29 isolated installer/signing tests: verified replacement and rollback, running-app and process-lock refusal, recoverable cleanup, unchanged saved-data fixtures, strict Launch Services errors and local signing configuration.
 - 5 native host tests;6 selfhost relay integration tests;4 browser protocol/scope tests.
 - 10 real Chromium DOM assertions, including shadow DOM, stale document refs, protected/covered controls and fresh post-action evidence. Extension messaging was fixture-driven; this is not installed MV3/native-host pairing.
 - Real Swift browser bridge↔Unix socket↔Python host↔framed-message round trip.
@@ -36,9 +37,11 @@ The app-bundle Keychain acceptance probe saved/read/deleted a unique temporary p
 
 The real signed-to-run-locally bundle launched with **only its collapsed notch panel**, with no normal workspace window. Accessibility inspection found its Expand control; clicking expanded it and focused its message field. Native safe geometry reported display1512×982, safe top32pt, collapsed panel96×48pt.
 
-The corrected notch implementation replaces that earlier floating idle chip: the current display reports a185×32pt cutout at(663,950), and idle matches it exactly. A real panel diagnostic drove synthetic pointer positions through two hover/tuck passes, preserved an unsent fixture draft and the foreground application, and rendered the compact peek and explicit full conversation. This exercises the real window/layout path; physical pointer and voice-key delivery still need installed human acceptance.
+The corrected notch implementation replaces that earlier floating idle chip: the current display reports a185×32pt cutout at(663,950), and idle matches it exactly. A real panel diagnostic drove synthetic pointer positions through two hover/tuck passes, preserved an unsent fixture draft and the foreground application, and rendered the compact peek and explicit full conversation. Synthetic interaction acceptance explicitly disables mouse monitors and pointer polling with `observePointer: false`; normal app shells observe the actual pointer. This exercises the real window/layout path independently of the polling transport; physical pointer and voice-key delivery still need installed human acceptance.
 
 A live question submitted through the expanded notch UI completed with a provider answer, returning the panel to Ready. This verifies the actual UI→provider→UI path.
+
+The user's subsequent physical check failed for both hover and Control+Option. Inspection of that normally launched GUI found Input Monitoring unavailable. The hover target also excluded the display's exact top edge and relied solely on mouse-event delivery. Closed-edge hit testing and a permission-free pointer timer now address hover; the compact HUD exposes voice setup. These corrections still require physical retesting in the updated app. Synthetic geometry tests do not establish that result.
 
 The earlier utility-window test opened/paused/saved the motor notebook and verified its record in Library. Own-window PNG renders of the notch and notebooks were inspected, exposing/fixing the initial dark-appearance contrast issue. These are local view renders, not displayed-FPS or acoustic measurements.
 
@@ -46,8 +49,8 @@ After the user enabled Screen Recording, the updated installed bundle completed 
 
 ## Remaining installed/release acceptance
 
-Screen Recording is allowed and current-display capture/exclusion has been inspected. Accessibility is still unavailable, so installed desktop action acceptance remains pending.
+Screen capture/exclusion was inspected under an earlier installed identity. The later ad-hoc GUI showed Screen Recording and Input Monitoring unavailable. The canonical certificate-signed local build needs its first grants; the same local identity will be reused for subsequent updates. Accessibility and installed desktop action acceptance remain pending.
 
-Microphone capture and acoustic output, route changes, denied/revoked permissions, physical multi-display/fullscreen/Spaces/StageManager, unfamiliar-app three-step tutorials, installed browser pairing, live MCP account, live selfhost upstream, minimum OS/Intel, long sessions and100+ cold/warm latency trials remain unverified. Distribution uses an ad-hoc signature; DeveloperID/notarization/stapling/signed updates remain blocked on release identity and credentials.
+Microphone capture and acoustic output, route changes, denied/revoked permissions, physical multi-display/fullscreen/Spaces/StageManager, unfamiliar-app three-step tutorials, installed browser pairing, live MCP account, live selfhost upstream, minimum OS/Intel, long sessions and100+ cold/warm latency trials remain unverified. Default distribution builds use an ad-hoc signature; the ignored local signing configuration can reuse an existing development certificate. Developer ID/notarization/stapling/signed updates remain release gates.
 
 See FEATURE-STATUS.md for implementation gaps as well as external acceptance gates. This alpha does not satisfy every row in the full research specification.

@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import Combine
 import CoreGraphics
+import OSLog
 
 /// Only modifier categories and a transient ordinary-key count are retained.
 /// Key codes, characters, event objects and typed content are never retained.
@@ -103,6 +104,19 @@ enum VoiceShortcutAvailability: Equatable, Sendable {
   }
 }
 
+/// Bounded metadata only: no characters, key codes, audio, transcripts or events.
+struct VoiceShortcutDiagnostics: Codable, Equatable, Sendable {
+  let bundlePath: String
+  let sourceRevision: String
+  let inputMonitoringAllowed: Bool
+  let accessibilityAllowed: Bool
+  let tapInstalled: Bool
+  let tapEnabled: Bool
+  let observedModifierEvents: UInt64
+  let pressedEdges: UInt64
+  let releasedEdges: UInt64
+}
+
 /// A passive session event tap receives global and own-app modifier transitions.
 /// It never suppresses, edits or reposts keyboard events. This is intentionally
 /// separate from Carbon's configurable text/open shortcut.
@@ -121,6 +135,26 @@ enum VoiceShortcutAvailability: Equatable, Sendable {
   private var onPressed: Action?
   private var onReleased: Action?
   private var onCancelled: CancelAction?
+  private var observedModifierEvents: UInt64 = 0
+  private var pressedEdges: UInt64 = 0
+  private var releasedEdges: UInt64 = 0
+  private let diagnosticsLogger = Logger(subsystem: "org.opencompanion.mac", category: "voice-shortcut")
+
+  var diagnostics: VoiceShortcutDiagnostics {
+    VoiceShortcutDiagnostics(
+      bundlePath: Bundle.main.bundleURL.path,
+      sourceRevision: Bundle.main.object(forInfoDictionaryKey: "OpenCompanionSourceRevision") as? String ?? "unknown",
+      inputMonitoringAllowed: CGPreflightListenEventAccess(), accessibilityAllowed: AXIsProcessTrusted(),
+      tapInstalled: registration != nil && availability.isInstalled,
+      tapEnabled: registration.map { CGEvent.tapIsEnabled(tap: $0.tap) } ?? false,
+      observedModifierEvents: observedModifierEvents, pressedEdges: pressedEdges, releasedEdges: releasedEdges)
+  }
+
+  func logDiagnostics(reason: String) {
+    let value = diagnostics
+    diagnosticsLogger.notice(
+      "phase=\(reason, privacy: .public) path=\(value.bundlePath, privacy: .public) revision=\(value.sourceRevision, privacy: .public) inputMonitoring=\(value.inputMonitoringAllowed) accessibility=\(value.accessibilityAllowed) tapInstalled=\(value.tapInstalled) tapEnabled=\(value.tapEnabled) modifierEvents=\(value.observedModifierEvents) pressedEdges=\(value.pressedEdges) releasedEdges=\(value.releasedEdges)")
+  }
 
   @discardableResult func start(
     enabled: Bool = true, onPressed: @escaping Action, onReleased: @escaping Action,
@@ -130,6 +164,9 @@ enum VoiceShortcutAvailability: Equatable, Sendable {
     self.onPressed = onPressed
     self.onReleased = onReleased
     self.onCancelled = onCancelled
+    observedModifierEvents = 0
+    pressedEdges = 0
+    releasedEdges = 0
     guard enabled else {
       availability = .disabled
       return availability
@@ -150,7 +187,7 @@ enum VoiceShortcutAvailability: Equatable, Sendable {
         userInfo: Unmanaged.passUnretained(context).toOpaque()),
       let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
     else {
-      availability = .unavailable(Self.permissionMessage)
+      availability = .unavailable(Self.tapCreationMessage)
       return availability
     }
     let owned = VoiceTapRegistration(tap: tap, source: source, context: context)
@@ -159,7 +196,7 @@ enum VoiceShortcutAvailability: Equatable, Sendable {
     CGEvent.tapEnable(tap: tap, enable: true)
     guard CGEvent.tapIsEnabled(tap: tap) else {
       registration = nil
-      availability = .unavailable(Self.permissionMessage)
+      availability = .unavailable(Self.tapCreationMessage)
       return availability
     }
     machine.beginObserving(modifiers: .init(flags: CGEventSource.flagsState(.combinedSessionState)))
@@ -201,7 +238,10 @@ enum VoiceShortcutAvailability: Equatable, Sendable {
   @discardableResult static func requestListenPermission() -> Bool { CGRequestListenEventAccess() }
 
   static let permissionMessage =
-    "Global hold-to-talk is unavailable. Enable OpenCompanion in System Settings → Privacy & Security → Input Monitoring, then restart the app. Accessibility access may also be required by macOS. The Talk button and text shortcut still work."
+    "Control + Option needs permission for the current OpenCompanion build. In System Settings → Privacy & Security → Input Monitoring, enable the installed OpenCompanion app, then quit and reopen it. The Talk button and text shortcut remain available."
+
+  private static let tapCreationMessage =
+    "macOS could not install the Control + Option listener, although permission preflight passed. Check the current installed app in Privacy & Security → Input Monitoring, then quit and reopen it. The Talk button remains available."
 
   private nonisolated static let tapCallback: CGEventTapCallBack = { _, type, event, info in
     guard let info else { return Unmanaged.passUnretained(event) }
@@ -224,7 +264,9 @@ enum VoiceShortcutAvailability: Equatable, Sendable {
     guard availability.isInstalled else { return }
     let edge: VoiceHoldEdge?
     switch type {
-    case .flagsChanged: edge = machine.flagsChanged(modifiers)
+    case .flagsChanged:
+      observedModifierEvents &+= 1
+      edge = machine.flagsChanged(modifiers)
     case .keyDown: edge = machine.ordinaryKeyDown(isRepeat: repeated)
     case .keyUp:
       machine.ordinaryKeyUp()
@@ -238,6 +280,7 @@ enum VoiceShortcutAvailability: Equatable, Sendable {
     let generation = lifecycleGeneration
     switch edge {
     case .pressed:
+      pressedEdges &+= 1
       holdSequence &+= 1
       let token = holdSequence
       currentHold = token
@@ -249,6 +292,7 @@ enum VoiceShortcutAvailability: Equatable, Sendable {
         self.onPressed?()
       }
     case .released, .cancelled:
+      if case .released = edge { releasedEdges &+= 1 }
       let token = currentHold
       currentHold = nil
       Task { @MainActor [weak self] in

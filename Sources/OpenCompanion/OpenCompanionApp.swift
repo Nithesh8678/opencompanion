@@ -82,7 +82,8 @@ import SwiftUI
       return
     }
     shell = CompanionShell(
-      model: model, onOpenWorkspace: { [weak self] in self?.openRequestedSurface() })
+      model: model, observePointer: !CommandLine.arguments.contains("--interaction-acceptance"),
+      onOpenWorkspace: { [weak self] in self?.openRequestedSurface() })
     shell?.show(anchor: .notch)
     if let index = CommandLine.arguments.firstIndex(of: "--interaction-acceptance") {
       Task { @MainActor in
@@ -261,12 +262,14 @@ import SwiftUI
       enabled: ShortcutPreferences.load().voiceHoldEnabled,
       onPressed: { [weak self] in
         guard let self else { return }
+        self.voiceShortcut.logDiagnostics(reason: "hold-pressed")
         self.model.beginPushToTalk()
         self.voiceHoldGeneration = self.model.taskGeneration
         self.shell?.showVoiceActivity()
       },
       onReleased: { [weak self] in
         guard let self else { return }
+        self.voiceShortcut.logDiagnostics(reason: "hold-released")
         let generation = self.voiceHoldGeneration
         self.voiceHoldGeneration = nil
         guard generation == self.model.taskGeneration else { return }
@@ -274,11 +277,13 @@ import SwiftUI
       },
       onCancelled: { [weak self] _ in
         guard let self else { return }
+        self.voiceShortcut.logDiagnostics(reason: "hold-cancelled")
         let generation = self.voiceHoldGeneration
         self.voiceHoldGeneration = nil
         guard generation == self.model.taskGeneration else { return }
         self.model.stop()
       })
+    voiceShortcut.logDiagnostics(reason: "registration")
   }
 
   private func installMenus() {

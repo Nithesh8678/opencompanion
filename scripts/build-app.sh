@@ -2,6 +2,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p build/Xcode.noindex dist/.staging.noindex
+signing_settings="$(python3 scripts/signing_settings.py)"
+IFS=$'\t' read -r signing_identity signing_team <<< "$signing_settings"
+signing_arguments=("CODE_SIGN_IDENTITY=$signing_identity")
+if [ -n "$signing_team" ]; then signing_arguments+=("DEVELOPMENT_TEAM=$signing_team"); fi
 if [ ! -f App/AppIcon.icns ]; then
     swift -module-cache-path /tmp/opencompanion-icon-cache scripts/generate-icon.swift build/AppIcon.iconset
     iconutil -c icns build/AppIcon.iconset -o App/AppIcon.icns
@@ -20,7 +24,7 @@ for item in System(Path.cwd()).running():
     if Path(item.get('path','')).resolve() in (product,stage):
         raise InstallError('Quit the build or staging copy of OpenCompanion before rebuilding.')
 PYPREFLIGHT
-xcodebuild -project OpenCompanion.xcodeproj -scheme OpenCompanion -configuration Release -derivedDataPath build/Xcode.noindex CODE_SIGN_IDENTITY=- OPENCOMPANION_SOURCE_REVISION="$source_revision" build
+xcodebuild -project OpenCompanion.xcodeproj -scheme OpenCompanion -configuration Release -derivedDataPath build/Xcode.noindex "${signing_arguments[@]}" OPENCOMPANION_SOURCE_REVISION="$source_revision" build
 
 python3 - "$source_revision" <<'PYRECEIPT'
 import hashlib,json,plistlib,re,subprocess,sys,zipfile
@@ -57,7 +61,14 @@ temporary.replace(archive)
 for previous in Path('dist').glob('OpenCompanion-*.zip'):
     if previous != archive and re.fullmatch(r'OpenCompanion-\d+(?:\.\d+){1,3}-(?:arm64|x86_64|universal)\.zip',previous.name):
         previous.unlink()
-receipt={'sourceRevision':sys.argv[1],'binarySHA256':hashlib.sha256(binary.read_bytes()).hexdigest(),'bundleID':info['CFBundleIdentifier'],'version':info['CFBundleShortVersionString'],'signing':'ad-hoc, for local use','notarized':False,'architecture':subprocess.check_output(['lipo','-archs',str(binary)],text=True).strip()}
+signature=subprocess.run(['/usr/bin/codesign','-d','--verbose=4',str(stage)],capture_output=True,text=True,check=True)
+signature_lines=(signature.stdout+'\n'+signature.stderr).splitlines()
+team=next((line.split('=',1)[1] for line in signature_lines if line.startswith('TeamIdentifier=')),None)
+authorities=[line.split('=',1)[1] for line in signature_lines if line.startswith('Authority=')]
+requirement=subprocess.run(['/usr/bin/codesign','-d','-r-',str(stage)],capture_output=True,text=True,check=True)
+requirement_lines=(requirement.stdout+'\n'+requirement.stderr).splitlines()
+designated=next((line.split('=>',1)[1].strip() for line in requirement_lines if 'designated =>' in line),None)
+receipt={'sourceRevision':sys.argv[1],'binarySHA256':digest,'bundleID':info['CFBundleIdentifier'],'version':info['CFBundleShortVersionString'],'signing':'ad-hoc, for local use' if 'Signature=adhoc' in signature_lines else 'certificate-signed, for local use','signingTeam':team,'signingAuthorities':authorities,'designatedRequirement':designated,'notarized':False,'architecture':subprocess.check_output(['lipo','-archs',str(binary)],text=True).strip()}
 Path('dist/BUILD-RECEIPT.json').write_text(json.dumps(receipt,indent=2)+'\n')
 print(f'Built: {stage}')
 print(f'Archive: {archive.resolve()}')

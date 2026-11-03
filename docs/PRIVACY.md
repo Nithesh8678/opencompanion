@@ -4,6 +4,8 @@ Microphone input starts only on explicit invocation. Holding Control + Option st
 
 The global voice shortcut uses a passive event observer for modifier transitions and ordinary-key press/release categories so other shortcuts can cancel recording. It does not suppress events or read/store typed characters or key codes. macOS Input Monitoring or Accessibility permission is required; Settings reports whether the observer was actually installed.
 
+While the notch surface is visible, a local timer reads the logical pointer position to detect hover even when the camera housing does not deliver mouse events. It does not capture pixels, observe keyboard content or retain a pointer history.
+
 Add screen captures one selected display frame using ScreenCaptureKit. It excludes OpenCompanion's app windows. AX/OCR are bounded; secure AX fields are omitted. The selected image and extracted evidence are sent only with a user question. Frames are held in memory and can be removed. Region/scribble mode is explicit. Actual capture-exclusion acceptance is still required; see feature status.
 
 Selected file content is read directly within its granted path. Text/PDF chunks contain path/page/line and current content hash. Screenshots do not stand in for offscreen file content. Images currently supply metadata, not visual interpretation.

@@ -7,11 +7,14 @@ import Speech
 /// pointer locations. It does not inject OS input, record audio, or call a model.
 enum NotchAcceptance {
   @MainActor static func run(shell: CompanionShell, model: AppModel, output: URL) async throws {
+    guard !shell.observesPointer else {
+      throw Failure.message("Synthetic interaction acceptance requires observePointer: false.")
+    }
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
     let initial = shell.geometry
     let originalForeground = NSWorkspace.shared.frontmostApplication?.processIdentifier
     guard initial.surface == "tucked" else {
-      throw Failure.message("The acceptance pointer must start outside the notch.")
+      throw Failure.message("The synthetic acceptance panel must start tucked.")
     }
     if let cutout = initial.cutoutFrame {
       guard initial.frame == cutout, cutout.maxY == initial.displayFrame.maxY else {
@@ -54,6 +57,7 @@ enum NotchAcceptance {
     let receipt = Receipt(
       initial: initial, peek: peek, hoverFocusPreserved: true,
       repeatedHoverAndDraftPreserved: true, inputMonitoringAllowed: CGPreflightListenEventAccess(),
+      physicalPointerObservationEnabled: shell.observesPointer,
       accessibilityAllowed: AXIsProcessTrusted(), eventTapInstalled: availability.isInstalled,
       eventTapStatus: availability.statusText,
       microphoneAuthorization: AVCaptureDevice.authorizationStatus(for: .audio).rawValue,
@@ -78,6 +82,7 @@ enum NotchAcceptance {
     let hoverFocusPreserved: Bool
     let repeatedHoverAndDraftPreserved: Bool
     let inputMonitoringAllowed: Bool
+    let physicalPointerObservationEnabled: Bool
     let accessibilityAllowed: Bool
     let eventTapInstalled: Bool
     let eventTapStatus: String

@@ -67,4 +67,37 @@ import Testing
         pointer: CGPoint(x: frame.midX, y: frame.midY), layout: layout,
         surface: .tucked, displayedFrame: frame, voiceActive: false) == .reveal)
   }
+
+  @Test func physicalCameraHoverIncludesTheVeryTopDisplayEdge() throws {
+    let physical = NotchLayout(
+      display: CGRect(x: 0, y: 0, width: 1512, height: 982),
+      visible: CGRect(x: 0, y: 0, width: 1512, height: 950), safeTop: 32,
+      left: CGRect(x: 0, y: 950, width: 663, height: 32),
+      right: CGRect(x: 848, y: 950, width: 664, height: 32))
+    #expect(physical.cutout == CGRect(x: 663, y: 950, width: 185, height: 32))
+    var policy = NotchHoverPolicy()
+    for point in [
+      CGPoint(x: 755.5, y: 982), CGPoint(x: 663, y: 982), CGPoint(x: 848, y: 982),
+      CGPoint(x: 755.5, y: 950), CGPoint(x: 755.5, y: 945),
+    ] {
+      #expect(
+        policy.action(
+          pointer: point, layout: physical, surface: .tucked,
+          displayedFrame: physical.frame(for: .tucked), voiceActive: false) == .reveal)
+    }
+    for point in [
+      CGPoint(x: 755.5, y: 983), CGPoint(x: 755.5, y: 944), CGPoint(x: 650, y: 970),
+      CGPoint(x: CGFloat.nan, y: 982),
+    ] {
+      #expect(
+        policy.action(
+          pointer: point, layout: physical, surface: .tucked,
+          displayedFrame: physical.frame(for: .tucked), voiceActive: false) == .none)
+    }
+    policy.suppressedUntilExit = true
+    _ = policy.action(
+      pointer: CGPoint(x: 755.5, y: 982), layout: physical, surface: .tucked,
+      displayedFrame: physical.frame(for: .tucked), voiceActive: false)
+    #expect(policy.suppressedUntilExit)
+  }
 }

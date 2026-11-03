@@ -48,10 +48,10 @@ struct ShellCaptureExpectation {
 
 private enum ShellPalette {
   static let background = Color.black
-  static let inset = Color(red: 0.075, green: 0.095, blue: 0.13)
-  static let text = Color(red: 0.95, green: 0.97, blue: 1)
-  static let secondary = Color(red: 0.61, green: 0.67, blue: 0.77)
-  static let blue = Color(red: 0.52, green: 0.71, blue: 1)
+  static let inset = Color(white: 0.065)
+  static let text = Color(white: 0.95)
+  static let secondary = Color(white: 0.61)
+  static let accent = Color(white: 0.86)
 }
 
 @MainActor private final class ShellPresentation: ObservableObject {
@@ -72,6 +72,9 @@ private final class ResidentCompanionPanel: NSPanel {
 /// A resident companion surface. The ordinary workspace is opened only by an
 /// explicit utility action; collapsing leaves the foreground app's typing alone.
 @MainActor final class CompanionShell {
+  /// Synthetic panel acceptance opts out explicitly; ordinary app instances
+  /// always observe the real pointer independently of the model's test mode.
+  let observesPointer: Bool
   private let model: AppModel
   private let onOpenWorkspace: () -> Void
   private let presentation = ShellPresentation()
@@ -89,16 +92,18 @@ private final class ResidentCompanionPanel: NSPanel {
   private var pendingInvocation: Task<Void, Never>?
   private var globalPointerMonitor: Any?
   private var localPointerMonitor: Any?
+  private var pointerPolling: NotchPointerPolling?
   private var hoverTransition: Task<Void, Never>?
   private var hoverTransitionID: UUID?
   private var hoverAction = NotchHoverPolicy.Action.none
   private var hoverPolicy = NotchHoverPolicy()
-  private var lastPointer = NSEvent.mouseLocation
+  private var lastPointer = CGPoint.zero
   private var voicePresentation = false
   private var voiceTuck: Task<Void, Never>?
   private let dockArt = CompanionDockTileView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
 
-  init(model: AppModel, onOpenWorkspace: @escaping () -> Void) {
+  init(model: AppModel, observePointer: Bool = true, onOpenWorkspace: @escaping () -> Void) {
+    self.observesPointer = observePointer
     self.model = model
     self.onOpenWorkspace = onOpenWorkspace
     panel = ResidentCompanionPanel(
@@ -138,16 +143,22 @@ private final class ResidentCompanionPanel: NSPanel {
           self.position(animated: false)
         }
       }.store(in: &subscriptions)
-    globalPointerMonitor = NSEvent.addGlobalMonitorForEvents(matching: [
-      .mouseMoved, .leftMouseDragged,
-    ]) { [weak self] _ in
-      MainActor.assumeIsolated { self?.pointerMoved(to: NSEvent.mouseLocation) }
-    }
-    localPointerMonitor = NSEvent.addLocalMonitorForEvents(matching: [
-      .mouseMoved, .leftMouseDragged,
-    ]) { [weak self] event in
-      MainActor.assumeIsolated { self?.pointerMoved(to: NSEvent.mouseLocation) }
-      return event
+    if observePointer {
+      globalPointerMonitor = NSEvent.addGlobalMonitorForEvents(matching: [
+        .mouseMoved, .leftMouseDragged,
+      ]) { [weak self] _ in
+        MainActor.assumeIsolated { self?.observeCurrentPointer() }
+      }
+      localPointerMonitor = NSEvent.addLocalMonitorForEvents(matching: [
+        .mouseMoved, .leftMouseDragged,
+      ]) { [weak self] event in
+        MainActor.assumeIsolated { self?.observeCurrentPointer() }
+        return event
+      }
+      pointerPolling = NotchPointerPolling { [weak self] location in
+        guard let self, self.panel.isVisible, self.presentation.anchor == .notch else { return }
+        self.pointerMoved(to: location)
+      }
     }
   }
 
@@ -156,8 +167,9 @@ private final class ResidentCompanionPanel: NSPanel {
     screen = preferredScreen()
     position(animated: false)
     panel.orderFrontRegardless()
+    if anchor == .notch { pointerPolling?.start() } else { pointerPolling?.stop() }
     updateState()
-    pointerMoved(to: NSEvent.mouseLocation)
+    observeCurrentPointer()
   }
 
   var geometry: CompanionShellGeometry {
@@ -194,6 +206,7 @@ private final class ResidentCompanionPanel: NSPanel {
   }
 
   func shutdown() {
+    pointerPolling?.stop()
     hoverTransition?.cancel()
     voiceTuck?.cancel()
     motion.stop()
@@ -210,6 +223,11 @@ private final class ResidentCompanionPanel: NSPanel {
     panel.permitsKeyboard = false
     position(animated: true)
     panel.orderFrontRegardless()
+  }
+
+  private func observeCurrentPointer() {
+    guard observesPointer else { return }
+    pointerMoved(to: NSEvent.mouseLocation)
   }
 
   func pointerMoved(to location: CGPoint) {
@@ -249,7 +267,13 @@ private final class ResidentCompanionPanel: NSPanel {
           voiceActive: self.voicePresentation) == action
       else { return }
       self.hoverAction = .none
-      if action == .reveal { self.presentPeek() } else { self.collapse(restoringFocus: false) }
+      if action == .reveal {
+        self.model.record("notch.hoverRevealed")
+        self.presentPeek()
+      } else {
+        self.model.record("notch.hoverTucked")
+        self.collapse(restoringFocus: false)
+      }
     }
   }
 
@@ -515,7 +539,7 @@ private final class ResidentCompanionPanel: NSPanel {
         guard let self, !self.voiceIsActive else { return }
         self.voicePresentation = false
         self.voiceTuck = nil
-        self.pointerMoved(to: NSEvent.mouseLocation)
+        self.observeCurrentPointer()
       }
     } else if voiceIsActive {
       voiceTuck?.cancel()
@@ -722,6 +746,7 @@ private struct CompanionShellView: View {
       .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: presentation.expanded)
     }
     .preferredColorScheme(.dark)
+    .tint(ShellPalette.accent)
     .onChange(of: presentation.focusEpoch) { _, _ in inputFocused = true }
     .onChange(of: presentation.expanded) { _, expanded in if !expanded { inputFocused = false } }
     .onExitCommand {
@@ -786,7 +811,7 @@ private struct CompanionShellView: View {
       }
       Group {
         if let error = model.error {
-          Text(error).foregroundStyle(Color(red: 1, green: 0.72, blue: 0.56))
+          Text(error).foregroundStyle(ShellPalette.text)
         } else if let notice = model.voiceNotice {
           Text(notice).foregroundStyle(ShellPalette.secondary)
         } else if !model.voiceTranscript.isEmpty
@@ -799,6 +824,9 @@ private struct CompanionShellView: View {
           model.state == "Speaking"
         {
           Text(answer.text).foregroundStyle(ShellPalette.text)
+        } else if !model.voiceShortcutAvailable {
+          Text("The voice shortcut needs setup. Open Settings to enable it.")
+            .foregroundStyle(ShellPalette.secondary)
         } else {
           Text("Ask out loud, or open your conversation.").foregroundStyle(ShellPalette.secondary)
         }
@@ -806,11 +834,14 @@ private struct CompanionShellView: View {
         maxWidth: .infinity, minHeight: 30, alignment: .leading)
       HStack(spacing: 14) {
         Button("Open chat", action: expand)
+        if !model.voiceShortcutAvailable {
+          Button("Set up voice") { open("Settings") }
+        }
         if model.scene != nil { Button("Notebook") { open("Notebook") } }
         Button("Library") { open("Library") }
         Spacer(minLength: 0)
       }.font(.system(size: 11, weight: .medium)).buttonStyle(.plain).foregroundStyle(
-        ShellPalette.blue)
+        ShellPalette.accent)
     }.padding(.horizontal, 19).padding(.vertical, 11)
   }
   private var expandedContent: some View {
@@ -821,7 +852,7 @@ private struct CompanionShellView: View {
           Text(stateTitle).font(.system(size: 14, weight: .semibold)).foregroundStyle(
             ShellPalette.text)
           HStack(spacing: 5) {
-            Circle().fill(active ? ShellPalette.blue : ShellPalette.secondary.opacity(0.7)).frame(
+            Circle().fill(active ? ShellPalette.accent : ShellPalette.secondary.opacity(0.7)).frame(
               width: 4, height: 4)
             Text(
               model.listening
@@ -852,8 +883,7 @@ private struct CompanionShellView: View {
       conversation.padding(.horizontal, 21).frame(maxWidth: .infinity, maxHeight: .infinity)
       if let error = model.error {
         HStack(alignment: .top, spacing: 7) {
-          Image(systemName: "exclamationmark.circle").foregroundStyle(
-            Color(red: 1, green: 0.7, blue: 0.52))
+          Image(systemName: "exclamationmark.circle").foregroundStyle(ShellPalette.accent)
           Text(error).lineLimit(2).font(.system(size: 10.5)).foregroundStyle(ShellPalette.text)
           Spacer(minLength: 0)
           Button {
@@ -880,7 +910,7 @@ private struct CompanionShellView: View {
           } label: {
             Label("Open explanation", systemImage: "rectangle.and.pencil.and.ellipsis").font(
               .system(size: 11, weight: .medium))
-          }.buttonStyle(.plain).foregroundStyle(ShellPalette.blue)
+          }.buttonStyle(.plain).foregroundStyle(ShellPalette.accent)
         }
       }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     } else {
@@ -891,7 +921,7 @@ private struct CompanionShellView: View {
               VStack(alignment: .leading, spacing: 4) {
                 if message.role == "user" {
                   Text("You").font(.system(size: 10, weight: .medium)).foregroundStyle(
-                    ShellPalette.blue)
+                    ShellPalette.accent)
                 }
                 Text(message.text).font(.system(size: 13)).lineSpacing(3).foregroundStyle(
                   message.role == "user" ? ShellPalette.secondary : ShellPalette.text
@@ -904,7 +934,7 @@ private struct CompanionShellView: View {
               } label: {
                 Label("Open explanation", systemImage: "rectangle.and.pencil.and.ellipsis").font(
                   .system(size: 11, weight: .medium))
-              }.buttonStyle(.plain).foregroundStyle(ShellPalette.blue)
+              }.buttonStyle(.plain).foregroundStyle(ShellPalette.accent)
             }
           }.padding(.vertical, 13)
         }.scrollIndicators(.hidden).onChange(of: model.messages.count) { _, _ in
@@ -929,7 +959,7 @@ private struct CompanionShellView: View {
             Image(systemName: "xmark.circle.fill").font(.system(size: 10))
           }.buttonStyle(.plain).accessibilityLabel("Remove selected context")
           Spacer()
-        }.foregroundStyle(ShellPalette.blue).padding(.horizontal, 5)
+        }.foregroundStyle(ShellPalette.accent).padding(.horizontal, 5)
       }
       HStack(alignment: .center, spacing: 8) {
         TextField(
@@ -953,7 +983,7 @@ private struct CompanionShellView: View {
           Button(action: send) {
             Image(systemName: "arrow.up").font(.system(size: 12, weight: .semibold)).frame(
               width: 27, height: 27
-            ).background(ShellPalette.blue, in: Circle()).foregroundStyle(ShellPalette.background)
+            ).background(ShellPalette.accent, in: Circle()).foregroundStyle(ShellPalette.background)
           }.buttonStyle(.plain).disabled(
             model.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
           ).opacity(model.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.4 : 1)
@@ -982,7 +1012,7 @@ private struct CompanionShellView: View {
         } label: {
           Label(
             model.listening ? "Finish" : "Talk", systemImage: model.listening ? "waveform" : "mic")
-        }.foregroundStyle(model.listening ? ShellPalette.blue : ShellPalette.secondary).help(
+        }.foregroundStyle(model.listening ? ShellPalette.accent : ShellPalette.secondary).help(
           "Start listening, then press again to finish")
       }.font(.system(size: 10.5, weight: .medium)).buttonStyle(.plain).foregroundStyle(
         ShellPalette.secondary
@@ -1028,7 +1058,7 @@ private struct CompanionMote: View {
         body.addCurve(
           to: CGPoint(x: 5, y: 15), control1: CGPoint(x: 3, y: 22), control2: CGPoint(x: 4, y: 18))
         body.closeSubpath()
-        context.fill(body, with: .color(ShellPalette.blue))
+        context.fill(body, with: .color(ShellPalette.accent))
         var fold = Path()
         fold.move(to: CGPoint(x: 25, y: 7))
         fold.addQuadCurve(to: CGPoint(x: 33, y: 16), control: CGPoint(x: 29, y: 13))
@@ -1055,7 +1085,7 @@ private struct ShellSignal: View {
       let time = reduceMotion ? 0 : ProcessInfo.processInfo.systemUptime
       HStack(alignment: .center, spacing: 2.5) {
         ForEach(0..<3) { index in
-          Capsule().fill(ShellPalette.blue.opacity(0.8)).frame(
+          Capsule().fill(ShellPalette.accent.opacity(0.8)).frame(
             width: 2, height: reduceMotion ? 7 : 4 + abs(sin(time * 3.5 + Double(index) * 0.9)) * 10
           )
         }
@@ -1075,7 +1105,7 @@ private struct ShellSignal: View {
     let transform = NSAffineTransform()
     transform.scale(by: scale)
     transform.concat()
-    NSColor(calibratedRed: 0.025, green: 0.035, blue: 0.055, alpha: 1).setFill()
+    NSColor.black.setFill()
     NSBezierPath(
       roundedRect: NSRect(x: 10, y: 9, width: 108, height: 110), xRadius: 27, yRadius: 27
     ).fill()
@@ -1104,9 +1134,9 @@ private struct ShellSignal: View {
       to: NSPoint(x: 30, y: 76), controlPoint1: NSPoint(x: 26, y: 61),
       controlPoint2: NSPoint(x: 29, y: 69))
     shape.close()
-    NSColor(calibratedRed: 0.52, green: 0.71, blue: 1, alpha: 1).setFill()
+    NSColor(white: 0.86, alpha: 1).setFill()
     shape.fill()
-    NSColor(calibratedRed: 0.025, green: 0.035, blue: 0.055, alpha: 1).setFill()
+    NSColor.black.setFill()
     let eyeHeight: CGFloat = state == "Listening" ? 19 : 14
     for x: CGFloat in [48, 75] {
       NSBezierPath(

@@ -15,8 +15,10 @@ Apple Silicon; macOS14.2+; Xcode with Swift6. Current local verification uses ma
 ```sh
 swift test
 scripts/build-app.sh
-open dist/OpenCompanion.app
+scripts/install.sh
 ```
+
+Open **OpenCompanion** from `/Applications/OpenCompanion.app`. Every update replaces that same app. Quit OpenCompanion before installing; the installer preserves your library and settings, verifies the new bundle, and moves verified older copies to Trash. Build copies stay in temporary, unindexed staging and are removed after installation. `dist/OpenCompanion-latest.zip` is the latest distributable archive.
 
 Hover over the camera notch for a quick peek; move away to tuck it without losing your draft. Click **Open chat** or press **⌘⇧Space** for the full conversation. Hold **Control + Option**, wait for Listening, speak, and release either key to submit. The reply is spoken for that turn. **Escape** stops output. A notchless display gets a compact capsule below its menu bar.
 
@@ -53,6 +55,7 @@ Some components are tested in isolation and still need complete installed accept
 
 ```sh
 swift test
+python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 python3 -m unittest discover -s NativeBrowserHost -p 'test_*.py'
 python3 -m unittest discover -s Server -p 'test_*.py'
 node --test BrowserExtension/test_protocol.mjs BrowserExtension/test_service.mjs

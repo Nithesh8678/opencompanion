@@ -4,7 +4,8 @@ cd "$(dirname "$0")/.."
 mkdir -p build/Xcode.noindex dist/.staging.noindex
 signing_settings="$(python3 scripts/signing_settings.py)"
 IFS=$'\t' read -r signing_identity signing_team <<< "$signing_settings"
-signing_arguments=("CODE_SIGN_IDENTITY=$signing_identity")
+# Package resource targets also need manual style when an explicit certificate is selected.
+signing_arguments=("CODE_SIGN_IDENTITY=$signing_identity" "CODE_SIGN_STYLE=Manual")
 if [ -n "$signing_team" ]; then signing_arguments+=("DEVELOPMENT_TEAM=$signing_team"); fi
 if [ ! -f App/AppIcon.icns ]; then
     swift -module-cache-path /tmp/opencompanion-icon-cache scripts/generate-icon.swift build/AppIcon.iconset

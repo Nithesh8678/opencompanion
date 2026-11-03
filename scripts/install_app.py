@@ -118,8 +118,20 @@ class System:
         self.helper_call("trash", str(path))
 
     def register(self, path: Path, *, remove: bool = False) -> None:
-        subprocess.run([LSREGISTER, "-u" if remove else "-f", str(path)], check=True,
-                       stdout=subprocess.DEVNULL)
+        command = [LSREGISTER, "-u" if remove else "-f", str(path)]
+        result = subprocess.run(command, capture_output=True, text=True, check=False)
+        if result.returncode == 0:
+            return
+        diagnostic = [line.strip() for output in (result.stdout, result.stderr)
+                      for line in output.splitlines() if line.strip()]
+        # Unindexed staging bundles may never have had a Launch Services entry.
+        # Only this exact -u/path/application-not-found result is idempotent;
+        # permission, malformed-bundle and canonical registration errors remain fatal.
+        absent = f"failed to scan {path}: -10814"
+        if remove and result.returncode == 1 and diagnostic in ([absent], [absent, "from spotlight"]):
+            return
+        raise subprocess.CalledProcessError(result.returncode, command,
+                                            output=result.stdout, stderr=result.stderr)
 
     def open(self, path: Path) -> None:
         subprocess.run(["/usr/bin/open", str(path)], check=True)

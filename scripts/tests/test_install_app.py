@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "install_app.py"
 SPEC = importlib.util.spec_from_file_location("opencompanion_install_fixture", MODULE_PATH)
@@ -329,6 +330,73 @@ print("INDEPENDENT_PROCESS_LOCK_REFUSAL_PASSED")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("INDEPENDENT_PROCESS_LOCK_REFUSAL_PASSED", result.stdout)
         self.assert_old_install_intact()
+
+
+class LaunchServicesAdapterTests(unittest.TestCase):
+    """Exercise only the subprocess adapter; no Launch Services calls occur."""
+
+    def setUp(self):
+        self.system = installer.System(Path("/fixture/repo"))
+        self.bundle = Path("/fixture/Applications/OpenCompanion.app")
+        self.absent = f"failed to scan {self.bundle}: -10814"
+
+    def test_success_accepts_register_and_unregister(self):
+        for remove in (False, True):
+            with self.subTest(remove=remove):
+                result = subprocess.CompletedProcess([], 0, "", "")
+                with mock.patch.object(installer.subprocess, "run", return_value=result) as run:
+                    self.system.register(self.bundle, remove=remove)
+                run.assert_called_once_with(
+                    [installer.LSREGISTER, "-u" if remove else "-f", str(self.bundle)],
+                    capture_output=True, text=True, check=False)
+
+    def test_unregister_accepts_only_exact_absent_diagnostic_with_optional_spotlight_line(self):
+        diagnostics = (
+            (self.absent, ""),
+            ("", self.absent),
+            (f"  {self.absent}  \n\n from spotlight \n", ""),
+            ("", f"\n\t{self.absent}\t\n from spotlight \n"),
+            (self.absent, "from spotlight"),
+        )
+        for stdout, stderr in diagnostics:
+            with self.subTest(stdout=stdout, stderr=stderr):
+                result = subprocess.CompletedProcess([], 1, stdout, stderr)
+                with mock.patch.object(installer.subprocess, "run", return_value=result) as run:
+                    self.system.register(self.bundle, remove=True)
+                run.assert_called_once_with(
+                    [installer.LSREGISTER, "-u", str(self.bundle)],
+                    capture_output=True, text=True, check=False)
+
+    def test_unregister_rejects_unexpected_failure_and_preserves_diagnostics(self):
+        failures = (
+            (2, "", self.absent),
+            (1, "", "failed to scan /another/OpenCompanion.app: -10814"),
+            (1, "", self.absent.replace("-10814", "-10811")),
+            (1, "", self.absent + "\nPermission denied"),
+            (1, "Unrelated warning", self.absent),
+            (1, "", self.absent + " from spotlight"),
+            (1, "", "from spotlight\n" + self.absent),
+            (1, "", ""),
+        )
+        for code, stdout, stderr in failures:
+            with self.subTest(code=code, stdout=stdout, stderr=stderr):
+                result = subprocess.CompletedProcess([], code, stdout, stderr)
+                with mock.patch.object(installer.subprocess, "run", return_value=result):
+                    with self.assertRaises(subprocess.CalledProcessError) as raised:
+                        self.system.register(self.bundle, remove=True)
+                self.assertEqual(raised.exception.returncode, code)
+                self.assertEqual(raised.exception.cmd, [installer.LSREGISTER, "-u", str(self.bundle)])
+                self.assertEqual(raised.exception.output, stdout)
+                self.assertEqual(raised.exception.stderr, stderr)
+
+    def test_canonical_registration_rejects_absent_diagnostic(self):
+        result = subprocess.CompletedProcess([], 1, "", self.absent + "\nfrom spotlight")
+        with mock.patch.object(installer.subprocess, "run", return_value=result) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.system.register(self.bundle)
+        run.assert_called_once_with(
+            [installer.LSREGISTER, "-f", str(self.bundle)],
+            capture_output=True, text=True, check=False)
 
 
 if __name__ == "__main__":

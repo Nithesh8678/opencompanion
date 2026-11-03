@@ -1,0 +1,15 @@
+.build/
+.swiftpm/
+build/
+dist/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.xcuserstate
+xcuserdata/
+__pycache__/
+*.pyc
+runtime/
+*.sqlite*
+*.trace.jsonl

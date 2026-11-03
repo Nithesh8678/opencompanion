@@ -41,7 +41,7 @@ import Testing
     var state = NotchPresentationState()
     for destination in [NotchDestination.chat, .settings] {
       state.open(destination)
-      #expect(state.exposure == .pinned && state.destination == destination)
+      #expect(state.exposure == .interactive && state.destination == destination)
       state.tuck()
       state.revealHome()
       #expect(state.exposure == .hover && state.destination == .home)

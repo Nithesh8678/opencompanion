@@ -3,7 +3,7 @@ import Foundation
 enum NotchSurface: String, Sendable { case tucked, peek, conversation, settings }
 
 enum NotchDestination: String, Sendable { case home, chat, settings }
-enum NotchExposure: Sendable, Equatable { case tucked, hover, pinned }
+enum NotchExposure: Sendable, Equatable { case tucked, hover, interactive }
 
 /// Content selection does not implicitly acquire focus or change exposure.
 struct NotchPresentationState: Sendable {
@@ -15,7 +15,7 @@ struct NotchPresentationState: Sendable {
   }
   mutating func open(_ destination: NotchDestination) {
     self.destination = destination
-    exposure = .pinned
+    exposure = .interactive
   }
   mutating func tuck() { exposure = .tucked }
 }
@@ -48,6 +48,15 @@ struct NotchLayout: Sendable {
       .intersection(display)
   }
 
+  func containsPointer(_ pointer: CGPoint, surface: NotchSurface, displayedFrame: CGRect) -> Bool {
+    let retained =
+      surface == .tucked
+      ? hoverTarget : hoverTarget.union(displayedFrame.insetBy(dx: -6, dy: -6))
+    return !retained.isNull && pointer.x.isFinite && pointer.y.isFinite
+      && pointer.x >= retained.minX && pointer.x <= retained.maxX
+      && pointer.y >= retained.minY && pointer.y <= retained.maxY
+  }
+
   func frame(for surface: NotchSurface) -> CGRect {
     if surface == .tucked, let cutout { return cutout }
     let requested: CGSize
@@ -71,33 +80,22 @@ struct NotchLayout: Sendable {
   }
 }
 
-/// Pure hover policy. A click/keyboard-opened conversation remains pinned;
-/// explicit dismissal must see a pointer exit before hover can open it again.
+/// Cursor presence owns exposure, including during voice and text interaction.
+/// Explicit dismissal must see an exit before hover can open the shell again.
 struct NotchHoverPolicy {
   enum Action: Equatable { case none, reveal, tuck }
   var suppressedUntilExit = false
 
   mutating func action(
     pointer: CGPoint, layout: NotchLayout, surface: NotchSurface,
-    displayedFrame: CGRect, voiceActive: Bool
+    displayedFrame: CGRect
   ) -> Action {
-    let target = layout.hoverTarget
-    let retained =
-      surface == .tucked ? target : target.union(displayedFrame.insetBy(dx: -6, dy: -6))
+    let inside = layout.containsPointer(pointer, surface: surface, displayedFrame: displayedFrame)
     if suppressedUntilExit {
-      if !containsPointer(pointer, in: retained) { suppressedUntilExit = false }
+      if !inside { suppressedUntilExit = false }
       return .none
     }
-    if surface == .conversation || surface == .settings || voiceActive { return .none }
-    if containsPointer(pointer, in: retained) { return surface == .tucked ? .reveal : .none }
-    return surface == .peek ? .tuck : .none
-  }
-
-  /// CGRect uses half-open bounds. The system pointer can rest exactly on the
-  /// display's top edge, which is also the clipped camera housing's maxY.
-  private func containsPointer(_ pointer: CGPoint, in rect: CGRect) -> Bool {
-    !rect.isNull && pointer.x.isFinite && pointer.y.isFinite
-      && pointer.x >= rect.minX && pointer.x <= rect.maxX
-      && pointer.y >= rect.minY && pointer.y <= rect.maxY
+    if inside { return surface == .tucked ? .reveal : .none }
+    return surface == .tucked ? .none : .tuck
   }
 }

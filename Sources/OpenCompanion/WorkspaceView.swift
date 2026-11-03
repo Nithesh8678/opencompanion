@@ -108,6 +108,7 @@ struct WorkspaceView: View {
         Image(systemName: "sparkle").font(.system(size: 22, weight: .light))
           .foregroundStyle(blue)
         Text("OpenCompanion").font(.system(size: 14, weight: .semibold, design: .rounded))
+          .lineLimit(1).minimumScaleFactor(0.8)
         Spacer(minLength: 0)
         Menu {
           Button("New notebook", action: model.newNotebook)

@@ -2,8 +2,9 @@
 
 Home, Chat and Settings now share the resident black surface. Hovering at the
 physical camera cutout reveals Home without activating the app. Leaving tucks
-the hover surface away. Clicking a destination pins it for interaction; Escape
-tucks it away, and an outside click dismisses a pinned surface. A dismissed
+the surface away, including Chat and Settings. Clicking a destination permits
+keyboard interaction while the pointer remains in its surface. Escape tucks it
+away, and an outside click also dismisses it. A dismissed
 surface needs a pointer exit before hovering can open it again.
 
 The Home footer opens the real local library/notebook and connection tools.
@@ -18,7 +19,11 @@ the live edge; a Latest button returns to it.
 
 ## Voice and context
 
-Hold Control + Option, speak and release to submit and hear the reply. The Talk
+Hold Control + Option, speak and release to submit and hear the reply. This
+shortcut does not expand the notch: background voice remains visually tucked
+unless the pointer is in the notch or revealed surface. Voice, errors and
+responses never hold the surface open after the pointer leaves. Other notch
+open shortcuts also respect pointer presence. The Talk
 button records for review before sending. These remain separate flows. Existing
 typed drafts survive held voice turns. PTT still excludes the selected screen,
 file and memory context; the visual redesign does not expand what it sends.
@@ -35,13 +40,13 @@ the level. This is activity feedback, not a calibrated sound meter.
 
 ## Presentation and motion
 
-Content destination, tucked/hover/pinned exposure and voice activity are
+Content destination, tucked/hover/interactive exposure and voice activity are
 independent state. Existing capture/task/document identities and focus checks
 remain in place. Hover cannot become key; an explicit Chat open focuses its
 composer. Hidden Chat and Settings controls are disabled, and a destination
 change releases hidden text focus. Settings utility actions collapse the notch
-before opening the full workspace. A transient voice pin is retired independently
-of explicit navigation.
+before opening the full workspace. Voice has no presentation pin. Completed
+voice errors/notices can be dismissed directly on Home.
 
 The measured reference proportions informed a 516 x 160-point Home body and
 an 800 x 650-point Settings body, with seven-point attachment shoulders at each

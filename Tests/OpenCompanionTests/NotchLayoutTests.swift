@@ -34,26 +34,24 @@ import Testing
     #expect(plain.frame(for: .peek).maxY == plain.visible.maxY - 5)
     #expect(plain.display.contains(plain.frame(for: .conversation)))
   }
-  @Test func hoverPeekTucksOnExitAndNeverUnpinsExplicitConversationOrVoice() {
+  @Test func everySurfaceTucksOnPointerExit() {
     var policy = NotchHoverPolicy()
     let overNotch = CGPoint(x: -756, y: 1085)
     #expect(
       policy.action(
         pointer: overNotch, layout: layout, surface: .tucked,
-        displayedFrame: layout.frame(for: .tucked), voiceActive: false) == .reveal)
+        displayedFrame: layout.frame(for: .tucked)) == .reveal)
     let outside = CGPoint(x: -1300, y: 500)
     #expect(
       policy.action(
         pointer: outside, layout: layout, surface: .peek,
-        displayedFrame: layout.frame(for: .peek), voiceActive: false) == .tuck)
-    #expect(
-      policy.action(
-        pointer: outside, layout: layout, surface: .conversation,
-        displayedFrame: layout.frame(for: .conversation), voiceActive: false) == .none)
-    #expect(
-      policy.action(
-        pointer: outside, layout: layout, surface: .peek,
-        displayedFrame: layout.frame(for: .peek), voiceActive: true) == .none)
+        displayedFrame: layout.frame(for: .peek)) == .tuck)
+    for surface in [NotchSurface.conversation, .settings] {
+      #expect(
+        policy.action(
+          pointer: outside, layout: layout, surface: surface,
+          displayedFrame: layout.frame(for: surface)) == .tuck)
+    }
   }
   @Test func dismissalNeedsPointerExitBeforeRearmingHover() {
     var policy = NotchHoverPolicy(suppressedUntilExit: true)
@@ -61,16 +59,16 @@ import Testing
     #expect(
       policy.action(
         pointer: CGPoint(x: frame.midX, y: frame.midY), layout: layout,
-        surface: .tucked, displayedFrame: frame, voiceActive: false) == .none)
+        surface: .tucked, displayedFrame: frame) == .none)
     #expect(policy.suppressedUntilExit)
     _ = policy.action(
       pointer: CGPoint(x: -1300, y: 500), layout: layout,
-      surface: .tucked, displayedFrame: frame, voiceActive: false)
+      surface: .tucked, displayedFrame: frame)
     #expect(!policy.suppressedUntilExit)
     #expect(
       policy.action(
         pointer: CGPoint(x: frame.midX, y: frame.midY), layout: layout,
-        surface: .tucked, displayedFrame: frame, voiceActive: false) == .reveal)
+        surface: .tucked, displayedFrame: frame) == .reveal)
   }
 
   @Test func physicalCameraHoverIncludesTheVeryTopDisplayEdge() throws {
@@ -88,7 +86,7 @@ import Testing
       #expect(
         policy.action(
           pointer: point, layout: physical, surface: .tucked,
-          displayedFrame: physical.frame(for: .tucked), voiceActive: false) == .reveal)
+          displayedFrame: physical.frame(for: .tucked)) == .reveal)
     }
     for point in [
       CGPoint(x: 755.5, y: 983), CGPoint(x: 755.5, y: 944), CGPoint(x: 650, y: 970),
@@ -97,12 +95,12 @@ import Testing
       #expect(
         policy.action(
           pointer: point, layout: physical, surface: .tucked,
-          displayedFrame: physical.frame(for: .tucked), voiceActive: false) == .none)
+          displayedFrame: physical.frame(for: .tucked)) == .none)
     }
     policy.suppressedUntilExit = true
     _ = policy.action(
       pointer: CGPoint(x: 755.5, y: 982), layout: physical, surface: .tucked,
-      displayedFrame: physical.frame(for: .tucked), voiceActive: false)
+      displayedFrame: physical.frame(for: .tucked))
     #expect(policy.suppressedUntilExit)
   }
 }

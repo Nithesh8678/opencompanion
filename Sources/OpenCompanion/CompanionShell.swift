@@ -66,7 +66,7 @@ private enum ShellPalette {
 
 @MainActor private final class ShellPresentation: ObservableObject {
   @Published var state = NotchPresentationState()
-  var expanded: Bool { state.exposure == .pinned }
+  var expanded: Bool { state.exposure == .interactive }
   var peeked: Bool { state.exposure == .hover }
   var destination: NotchDestination { state.destination }
   @Published var contentSize = CGSize(width: 516, height: 160)
@@ -113,8 +113,6 @@ private final class ResidentCompanionPanel: NSPanel {
   private var hoverAction = NotchHoverPolicy.Action.none
   private var hoverPolicy = NotchHoverPolicy()
   private var lastPointer = CGPoint.zero
-  private var voicePresentation = false
-  private var voiceTuck: Task<Void, Never>?
   private let dockArt = CompanionDockTileView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
 
   init(model: AppModel, observePointer: Bool = true, onOpenWorkspace: @escaping () -> Void) {
@@ -139,6 +137,7 @@ private final class ResidentCompanionPanel: NSPanel {
       model: model, presentation: presentation, expand: { [weak self] in self?.expand() },
       navigate: { [weak self] destination in self?.navigate(to: destination) },
       collapse: { [weak self] in self?.collapse() },
+      dismissFeedback: { [weak self] in self?.dismissFeedback() },
       capture: { [weak self] source in self?.captureScreen(source) },
       send: { [weak self] in self?.send() },
       selectWindow: { [weak self] window in self?.selectWindow(window) },
@@ -176,8 +175,7 @@ private final class ResidentCompanionPanel: NSPanel {
       ]) {
         [weak self] _ in
         MainActor.assumeIsolated {
-          guard let self, self.presentation.expanded, !self.voicePresentation,
-            !self.model.showingWindowPicker
+          guard let self, self.presentation.expanded, !self.model.showingWindowPicker
           else { return }
           self.collapse()
         }
@@ -232,17 +230,12 @@ private final class ResidentCompanionPanel: NSPanel {
       ?? NSScreen.main ?? NSScreen.screens.first
   }
 
-  /// Reveal without activating the app or taking the foreground application's keyboard.
-  func showVoiceActivity() {
-    voiceTuck?.cancel()
-    voicePresentation = true
-    if !presentation.expanded { presentPeek() }
-  }
+  /// The hold shortcut owns audio only. Pointer presence alone owns the HUD.
+  func showVoiceActivity() { observeCurrentPointer() }
 
   func shutdown() {
     pointerPolling?.stop()
     hoverTransition?.cancel()
-    voiceTuck?.cancel()
     motion.stop()
     if let globalPointerMonitor { NSEvent.removeMonitor(globalPointerMonitor) }
     if let localPointerMonitor { NSEvent.removeMonitor(localPointerMonitor) }
@@ -271,7 +264,7 @@ private final class ResidentCompanionPanel: NSPanel {
     guard presentation.anchor == .notch, let layout else { return }
     let action = hoverPolicy.action(
       pointer: location, layout: layout, surface: surface,
-      displayedFrame: panel.frame, voiceActive: voicePresentation || presentation.expanded)
+      displayedFrame: panel.frame)
     if action == .none {
       hoverTransition?.cancel()
       hoverTransition = nil
@@ -299,8 +292,7 @@ private final class ResidentCompanionPanel: NSPanel {
       guard !Task.isCancelled, let currentLayout = self.layout,
         self.hoverPolicy.action(
           pointer: self.lastPointer, layout: currentLayout, surface: self.surface,
-          displayedFrame: self.panel.frame,
-          voiceActive: self.voicePresentation || self.presentation.expanded) == action
+          displayedFrame: self.panel.frame) == action
       else { return }
       self.hoverAction = .none
       if action == .reveal {
@@ -308,7 +300,7 @@ private final class ResidentCompanionPanel: NSPanel {
         self.presentPeek()
       } else {
         self.model.record("notch.hoverTucked")
-        self.collapse(restoringFocus: false)
+        self.collapse(restoringFocus: self.presentation.expanded)
       }
     }
   }
@@ -333,8 +325,6 @@ private final class ResidentCompanionPanel: NSPanel {
   func collapse() {
     invalidateInvocations()
     hoverPolicy.suppressedUntilExit = true
-    voicePresentation = false
-    voiceTuck?.cancel()
     collapse(restoringFocus: true)
   }
 
@@ -370,11 +360,15 @@ private final class ResidentCompanionPanel: NSPanel {
   func openSettings() { navigate(to: .settings) }
 
   func navigate(to destination: NotchDestination) {
+    // External keyboard/menu invocations must not reveal a HUD away from the
+    // notch. Synthetic acceptance opts out of physical pointer observation.
+    if observesPointer && presentation.anchor == .notch, let layout,
+      !layout.containsPointer(NSEvent.mouseLocation, surface: surface, displayedFrame: panel.frame)
+    {
+      return
+    }
     hoverTransition?.cancel()
     hoverAction = .none
-    voiceTuck?.cancel()
-    voiceTuck = nil
-    voicePresentation = false
     if let foreground = NSWorkspace.shared.frontmostApplication,
       foreground.processIdentifier != ProcessInfo.processInfo.processIdentifier
     {
@@ -394,6 +388,14 @@ private final class ResidentCompanionPanel: NSPanel {
     collapse(restoringFocus: false)
     model.section = section
     onOpenWorkspace()
+  }
+
+  private func dismissFeedback() {
+    model.error = nil
+    model.voiceNotice = nil
+    if !voiceIsActive {
+      observeCurrentPointer()
+    }
   }
 
   private func captureScreen(_ source: ShellCaptureSource) {
@@ -571,25 +573,6 @@ private final class ResidentCompanionPanel: NSPanel {
     dockArt.active = model.busy || model.listening || model.state == "Speaking"
     dockArt.needsDisplay = true
     NSApp.dockTile.display()
-    if voicePresentation && !voiceIsActive && presentation.expanded {
-      voicePresentation = false
-      voiceTuck?.cancel()
-      voiceTuck = nil
-    }
-    if voicePresentation && !voiceIsActive && model.error == nil && !presentation.expanded
-      && voiceTuck == nil
-    {
-      voiceTuck = Task { @MainActor [weak self] in
-        do { try await Task.sleep(for: .milliseconds(1200)) } catch { return }
-        guard let self, !self.voiceIsActive else { return }
-        self.voicePresentation = false
-        self.voiceTuck = nil
-        self.observeCurrentPointer()
-      }
-    } else if voiceIsActive {
-      voiceTuck?.cancel()
-      voiceTuck = nil
-    }
     if let pendingTaskGeneration, pendingTaskGeneration != model.taskGeneration {
       invalidateInvocations()
     }
@@ -836,6 +819,7 @@ private struct CompanionShellView: View {
   let expand: () -> Void
   let navigate: (NotchDestination) -> Void
   let collapse: () -> Void
+  let dismissFeedback: () -> Void
   let capture: (ShellCaptureSource) -> Void
   let send: () -> Void
   let selectWindow: (CaptureWindow) -> Void
@@ -897,7 +881,7 @@ private struct CompanionShellView: View {
     .onChange(of: presentation.destination) { _, value in if value != .chat { inputFocused = false }
     }
     .onChange(of: presentation.state.exposure) { _, value in
-      if value != .pinned { inputFocused = false }
+      if value != .interactive { inputFocused = false }
     }
     .onExitCommand {
       model.stop()
@@ -990,6 +974,12 @@ private struct CompanionShellView: View {
               ShellSignal(level: model.microphoneLevel).frame(width: 28, height: 21)
             } else if model.busy {
               ProgressView().controlSize(.small)
+            }
+            if !active && (model.error != nil || model.voiceNotice != nil) {
+              Button(action: dismissFeedback) {
+                Image(systemName: "xmark.circle.fill").font(.system(size: 13))
+                  .foregroundStyle(ShellPalette.secondary)
+              }.buttonStyle(.plain).accessibilityLabel("Dismiss voice feedback")
             }
           }
           Text(homeFeedback).font(.system(size: 12, weight: .medium, design: .rounded))

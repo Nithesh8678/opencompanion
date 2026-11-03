@@ -22,6 +22,15 @@ enum NotchAcceptance {
       }
     }
     model.input = "An unsent draft stays here."
+    model.listening = true
+    model.state = "Listening"
+    shell.showVoiceActivity()
+    try await Task.sleep(for: .milliseconds(120))
+    guard shell.geometry.surface == "tucked" else {
+      throw Failure.message("Background voice activity revealed the notch without a pointer.")
+    }
+    model.listening = false
+    model.state = "Ready"
     let monitor = VoiceShortcutMonitor()
     let availability = monitor.start(onPressed: {}, onReleased: {}, onCancelled: { _ in })
     model.voiceShortcutAvailable = availability.isInstalled
@@ -87,6 +96,11 @@ enum NotchAcceptance {
       throw Failure.message("Settings did not share the shell or preserve the chat draft.")
     }
     try await shell.exportLiveSnapshot(to: output.appendingPathComponent("notch-settings.png"))
+    shell.pointerMoved(to: outside)
+    try await Task.sleep(for: .milliseconds(650))
+    guard shell.geometry.surface == "tucked" else {
+      throw Failure.message("Interactive Settings stayed visible after the pointer left.")
+    }
     try encoder.encode(shell.motionStatistics).write(
       to: output.appendingPathComponent("display-link-callbacks.json"))
     print(

@@ -68,6 +68,49 @@ Matching their retained frame owner prevents cross-turn reuse but does not prove
 the interface stayed unchanged during enrichment. The model must corroborate
 labels with the image; fresh user workflow acceptance remains necessary.
 
+### Slow-response admission
+
+The subsequent normal GUI retry failed with “Screen target expired or was
+invalid.” Its timing-only export showed captures completing in about 0.46 s,
+then targets arriving roughly 22–26 s later, beyond the unchanged 15 s admission
+guard. The authored-image checks had not exercised that real path.
+
+Guidance now uses a concise target-only protocol, the current goal and preceding
+step rather than unrelated chat history, and a supported per-turn lower effort
+advertised by the selected Codex model. The adapter prefers low, then minimal,
+then none only when advertised; otherwise it omits the override. It preserves
+the selected model, account and global configuration. The protocol is documented
+in the official [Codex app-server reference](https://learn.chatgpt.com/docs/app-server).
+
+For late targets, one immutable turn binding resolves the original candidate
+first, then permits at most one actual recapture of that exact display/window/
+crop. It never reactivates an app or changes the old frame's time. Local detached
+verification checks source identities, image dimensions, fresh timestamps, a
+256×160 scene sample and a 96×96 target region expanded by 12 logical points.
+Both grayscale and RGB checks use conservative difference thresholds. A changed
+scene/target, lost ownership, cancellation or failed capture rejects admission.
+Only verified geometry survives; the old candidate ID is removed, and native
+validation still requires evidence younger than 15 s. Later marks from the same
+response retain the immutable original source and share the single refresh
+budget. Original images older than 90 s are never transferred to a new capture.
+
+This is conservative visual corroboration, not semantic identity proof or a
+guarantee against every small screen change. It does not send the fresh image to
+the model or create a provider retry loop. The first app test run aborted in a
+sandboxed Launch Services notification registration; isolated acceptance models
+now omit those unneeded workspace observers. The next complete run passed all
+297 Swift tests, including changed pixels, source identities, delayed output,
+original candidate IDs, ownership loss and cancellation. Normal GUI acceptance
+of this later fix remains separate.
+
+The repeated five-case signed-bundle/live-provider run passed with one target
+and no scene in every case; complete trial times were 3.78–7.13 s. The New task
+native render was inspected again, and cursor/error-feedback native acceptance
+passed after asynchronous admission was integrated. These results still do not
+exercise a real late capture through AppModel. CI's older Swift compiler exposed
+an implicit local-function Sendable conversion; ownership/capture callbacks now
+use explicit MainActor/Sendable closure types, and the local suite passes again.
+
 ## Reference and implementation
 
 The supplied reference recordings informed the separate system pointer and

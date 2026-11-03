@@ -463,10 +463,11 @@ struct ResponseInputPlan: Sendable {
     setGuidanceStage(.target, generation: generation)
     let previous = ScreenEvidenceIdentity(binding.current)
     let request = activeGuidanceRequest
-    func stillOwned() -> Bool {
-      generation == self.generation
-        && captureGate.permits(captureToken, cancelled: Task.isCancelled)
-        && previous.matches(evidence) && activeGuidanceRequest == request
+    let stillOwned: @MainActor @Sendable () -> Bool = { [weak self] in
+      guard let self else { return false }
+      return generation == self.generation
+        && self.captureGate.permits(captureToken, cancelled: Task.isCancelled)
+        && previous.matches(self.evidence) && self.activeGuidanceRequest == request
         && CursorCompanionPreferences.load().screenGuidanceEnabled
         && (request.map { ProcessInfo.processInfo.systemUptime < $0.expires } ?? true)
     }

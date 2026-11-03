@@ -30,7 +30,7 @@ import Testing
     let fresh = try frame(age: 0, revision: 2, image: source.image)
     let binding = ScreenGuidanceTurnBinding(source: source)
     var captures = 0
-    func refresh() async throws -> ScreenEvidence {
+    let refresh: @MainActor @Sendable () async throws -> ScreenEvidence = {
       captures += 1
       return fresh
     }
@@ -81,7 +81,7 @@ import Testing
     let changed = try frame(age: 0, revision: 2, image: jpeg(movedControl: true))
     let binding = ScreenGuidanceTurnBinding(source: source)
     var captures = 0
-    func refresh() async throws -> ScreenEvidence {
+    let refresh: @MainActor @Sendable () async throws -> ScreenEvidence = {
       captures += 1
       return changed
     }
@@ -100,7 +100,7 @@ import Testing
     let source = try frame(age: 30)
     let binding = ScreenGuidanceTurnBinding(source: source)
     var captures = 0
-    func refresh() async throws -> ScreenEvidence {
+    let refresh: @MainActor @Sendable () async throws -> ScreenEvidence = {
       captures += 1
       throw ProviderError.message("Public refresh failure")
     }

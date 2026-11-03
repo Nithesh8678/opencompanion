@@ -34,14 +34,17 @@ import SwiftUI
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
-    NSApp.appearance = NSAppearance(named: .aqua)
+    NSApp.appearance = NSAppearance(named: .darkAqua)
     let acceptanceMode = [
       "--keychain-acceptance", "--smoke-test-codex", "--render-acceptance", "--capture-acceptance",
       "--interaction-acceptance",
     ].contains(where: CommandLine.arguments.contains)
     model = AppModel(acceptanceMode: acceptanceMode)
     model.onOpen = { [weak self] in self?.openRequestedSurface() }
-    model.onCompanionRequested = { [weak self] in self?.shell?.open() }
+    model.onCompanionRequested = { [weak self] in
+      self?.utilityWindow?.orderOut(nil)
+      self?.shell?.open()
+    }
     model.onSceneReady = { [weak self] in self?.showExplanation(focus: false) }
     installMenus()
     if CommandLine.arguments.contains("--keychain-acceptance") {
@@ -344,7 +347,7 @@ import SwiftUI
       panel.minSize = CGSize(width: 760, height: 580)
       panel.collectionBehavior = [.fullScreenAuxiliary]
       panel.contentView = NSHostingView(
-        rootView: WorkspaceView(model: model, notebookOnly: true).preferredColorScheme(.light))
+        rootView: WorkspaceView(model: model, notebookOnly: true).preferredColorScheme(.dark))
       panel.center()
       explanationPanel = panel
     }
@@ -362,10 +365,12 @@ import SwiftUI
         styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered,
         defer: false)
       window.title = "OpenCompanion"
+      window.titlebarAppearsTransparent = true
+      window.backgroundColor = NSColor(white: 0.075, alpha: 1)
       window.isReleasedWhenClosed = false
       window.minSize = CGSize(width: 1000, height: 680)
       window.contentView = NSHostingView(
-        rootView: WorkspaceView(model: model).preferredColorScheme(.light))
+        rootView: WorkspaceView(model: model).preferredColorScheme(.dark))
       window.center()
       utilityWindow = window
     }
@@ -375,8 +380,7 @@ import SwiftUI
   @objc private func toggleCompanion() { shell?.toggle() }
   @objc private func openWorkspace() { showWorkspace() }
   @objc private func openSettings() {
-    model.section = "Settings"
-    showWorkspace()
+    shell?.openSettings()
   }
   @objc private func stop() {
     voiceShortcut.cancelActive(reason: .manualStop)

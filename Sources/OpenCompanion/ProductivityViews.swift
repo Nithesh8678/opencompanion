@@ -124,7 +124,7 @@ struct BrowserConnectionView: View {
         Text(result.isEmpty ? "A connected snapshot will appear here." : result).font(
           .system(size: 11, design: .monospaced)
         ).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(14)
-      }.background(.white, in: RoundedRectangle(cornerRadius: 8))
+      }.background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8))
     }.padding(20)
   }
   private func request(_ operation: String, payload: Data = Data("{}".utf8)) {

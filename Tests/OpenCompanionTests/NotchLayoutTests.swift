@@ -15,10 +15,15 @@ import Testing
     let cutout = try #require(layout.cutout)
     #expect(layout.frame(for: .tucked) == cutout)
     #expect(cutout == CGRect(x: -858, y: 1070, width: 204, height: 32))
-    for surface in [NotchSurface.peek, .conversation] {
+    for surface in [NotchSurface.peek, .conversation, .settings] {
       #expect(layout.frame(for: surface).maxY == layout.display.maxY)
       #expect(layout.frame(for: surface).midX == cutout.midX)
     }
+  }
+  @Test func measuredBodyProportionsIncludeOnlyTheAdditionalShoulders() {
+    #expect(layout.frame(for: .peek).size == CGSize(width: 530, height: 160))
+    #expect(layout.frame(for: .settings).size == CGSize(width: 814, height: 650))
+    #expect(layout.frame(for: .conversation).width == 614)
   }
   @Test func notchlessFallbackKeepsControlsBelowMenuBar() {
     let plain = NotchLayout(

@@ -1,6 +1,24 @@
 import Foundation
 
-enum NotchSurface: String, Sendable { case tucked, peek, conversation }
+enum NotchSurface: String, Sendable { case tucked, peek, conversation, settings }
+
+enum NotchDestination: String, Sendable { case home, chat, settings }
+enum NotchExposure: Sendable, Equatable { case tucked, hover, pinned }
+
+/// Content selection does not implicitly acquire focus or change exposure.
+struct NotchPresentationState: Sendable {
+  var destination: NotchDestination = .home
+  var exposure: NotchExposure = .tucked
+  mutating func revealHome() {
+    destination = .home
+    exposure = .hover
+  }
+  mutating func open(_ destination: NotchDestination) {
+    self.destination = destination
+    exposure = .pinned
+  }
+  mutating func tuck() { exposure = .tucked }
+}
 
 /// AppKit global logical points. The camera housing comes from the display's
 /// actual auxiliary areas; content never occupies that physical cutout.
@@ -35,8 +53,12 @@ struct NotchLayout: Sendable {
     let requested: CGSize
     switch surface {
     case .tucked: requested = CGSize(width: 96, height: 36)
-    case .peek: requested = CGSize(width: 380, height: 142 + topInset)
-    case .conversation: requested = CGSize(width: 430, height: 330 + topInset)
+    // Seven-point shoulders sit outside the straight body on each side.
+    // These endpoint proportions follow the measured reference, not its
+    // unmeasured private animation implementation.
+    case .peek: requested = CGSize(width: 530, height: max(160, topInset + 128))
+    case .conversation: requested = CGSize(width: 614, height: max(480, topInset + 420))
+    case .settings: requested = CGSize(width: 814, height: max(650, topInset + 560))
     }
     let size = CGSize(
       width: min(requested.width, display.width - 12),
@@ -66,7 +88,7 @@ struct NotchHoverPolicy {
       if !containsPointer(pointer, in: retained) { suppressedUntilExit = false }
       return .none
     }
-    if surface == .conversation || voiceActive { return .none }
+    if surface == .conversation || surface == .settings || voiceActive { return .none }
     if containsPointer(pointer, in: retained) { return surface == .tucked ? .reveal : .none }
     return surface == .peek ? .tuck : .none
   }

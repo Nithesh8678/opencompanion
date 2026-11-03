@@ -54,6 +54,18 @@ enum NotchAcceptance {
     guard shell.geometry.surface == "tucked" else {
       throw Failure.message("Repeated hover failed to tuck.")
     }
+    for _ in 0..<20 {
+      shell.pointerMoved(to: CGPoint(x: target.midX, y: target.midY))
+      try await Task.sleep(for: .milliseconds(420))
+      guard shell.geometry.surface == "peek", NSApp.keyWindow == nil else {
+        throw Failure.message("Repeated hover changed exposure or keyboard focus.")
+      }
+      shell.pointerMoved(to: outside)
+      try await Task.sleep(for: .milliseconds(560))
+      guard shell.geometry.surface == "tucked", model.input == "An unsent draft stays here." else {
+        throw Failure.message("Repeated reveal/tuck lost the draft or failed to tuck.")
+      }
+    }
     let receipt = Receipt(
       initial: initial, peek: peek, hoverFocusPreserved: true,
       repeatedHoverAndDraftPreserved: true, inputMonitoringAllowed: CGPreflightListenEventAccess(),
@@ -69,6 +81,14 @@ enum NotchAcceptance {
     shell.open()
     try await Task.sleep(for: .milliseconds(380))
     try await shell.exportLiveSnapshot(to: output.appendingPathComponent("notch-conversation.png"))
+    shell.openSettings()
+    try await Task.sleep(for: .milliseconds(650))
+    guard shell.geometry.surface == "settings", model.input == "An unsent draft stays here." else {
+      throw Failure.message("Settings did not share the shell or preserve the chat draft.")
+    }
+    try await shell.exportLiveSnapshot(to: output.appendingPathComponent("notch-settings.png"))
+    try encoder.encode(shell.motionStatistics).write(
+      to: output.appendingPathComponent("display-link-callbacks.json"))
     print(
       "NOTCH_ACCEPTANCE_PASSED · cutout placement, repeated synthetic hover, draft and foreground focus"
     )

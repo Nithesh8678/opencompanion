@@ -14,7 +14,7 @@ final class AnnotationPanel: NSPanel {
     panels.forEach { $0.orderOut(nil) }
     panels.removeAll()
   }
-  func show(target: ProviderTarget, evidence: ScreenEvidence) throws {
+  func show(target: ProviderTarget, evidence: ScreenEvidence, showInstruction: Bool = true) throws {
     guard target.x.isFinite, target.y.isFinite, target.width.isFinite, target.height.isFinite,
       target.x >= 0, target.y >= 0, target.width > 0, target.height > 0,
       target.x + target.width <= 1.001, target.y + target.height <= 1.001,
@@ -39,7 +39,7 @@ final class AnnotationPanel: NSPanel {
       x: target.x * display.width, y: target.y * display.height,
       width: target.width * display.width, height: target.height * display.height)
     panel.contentView = NSHostingView(
-      rootView: AnnotationView(rect: rect, text: target.instruction))
+      rootView: AnnotationView(rect: rect, text: showInstruction ? target.instruction : ""))
     panel.orderFrontRegardless()
     panels.append(panel)
     expiry = Task { @MainActor [weak self] in
@@ -62,13 +62,16 @@ struct AnnotationView: View {
   var body: some View {
     GeometryReader { geometry in
       ZStack(alignment: .topLeading) {
-        RoundedRectangle(cornerRadius: 8).stroke(Color.blue, lineWidth: 3.5).shadow(
-          color: .blue.opacity(0.5), radius: 10
+        RoundedRectangle(cornerRadius: 8).stroke(Color.red, lineWidth: 3.5).shadow(
+          color: .red.opacity(0.5), radius: 10
         ).frame(width: rect.width, height: rect.height).offset(x: rect.minX, y: rect.minY)
-        Text(text).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white).padding(10)
-          .background(.blue, in: RoundedRectangle(cornerRadius: 9)).frame(
-            maxWidth: 330, alignment: .leading
-          ).offset(x: min(rect.minX, max(0, geometry.size.width - 340)), y: max(8, rect.minY - 58))
+        if !text.isEmpty {
+          Text(text).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white).padding(10)
+            .background(.red, in: RoundedRectangle(cornerRadius: 9)).frame(
+              maxWidth: 330, alignment: .leading
+            ).offset(
+              x: min(rect.minX, max(0, geometry.size.width - 340)), y: max(8, rect.minY - 58))
+        }
       }
     }.allowsHitTesting(false)
   }

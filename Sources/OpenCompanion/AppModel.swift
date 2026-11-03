@@ -70,6 +70,7 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
   @Published var windowPickerHost: CapturePickerHost = .workspace
   var lastExternalPID: pid_t = 0
   private var workspaceObserver: NSObjectProtocol?
+  private var displayObserver: NSObjectProtocol?
   @Published var selectedDisplay: CGDirectDisplayID?
   @Published var memoryTitle = ""
   @Published var memoryBody = ""
@@ -94,6 +95,12 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
   var taskGeneration: UInt64 { generation }
   /// Only a successfully recognized held utterance transfers compact HUD ownership.
   var onVoiceResponseSubmitted: ((UInt64, UInt64) -> Void)?
+  var onCursorInputStarted: ((UInt64) -> Void)?
+  var onCursorResponseStarted: ((UInt64) -> Void)?
+  var onCursorTextPreview: ((UInt64, ProviderTextPreview) -> Void)?
+  var onCursorTargetAccepted: ((UInt64, ProviderTarget, ScreenEvidence) -> Void)?
+  var onCursorCancelled: ((UInt64) -> Void)?
+  private var receivedTextPreview = false
   var capturePublicationRevision: UInt64 { captureGate.generation }
   var captureResultID: UUID? { evidence?.frameID }
   private var scenePresentedForTurn = false
@@ -175,6 +182,11 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
         self.overlay.clear()
       }
     }
+    displayObserver = NotificationCenter.default.addObserver(
+      forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      MainActor.assumeIsolated { self?.invalidateScreenEvidence() }
+    }
     if !acceptanceMode {
       Task {
         await reload()
@@ -253,6 +265,8 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
     scenePresentedForTurn = false
     busy = true
     state = "Thinking"
+    receivedTextPreview = false
+    onCursorResponseStarted?(current)
     if voiceOnly { onVoiceResponseSubmitted?(sourceGeneration, current) }
     updateBadge()
     record("turn.declaredEnd.textSubmit")
@@ -272,16 +286,20 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
           try Task.checkCancellation()
           try await self?.accept(unit, generation: current, expectedEvidence: turnEvidence)
         }
+        let preview: @Sendable (ProviderTextPreview) async throws -> Void = { [weak self] value in
+          try Task.checkCancellation()
+          try await self?.acceptTextPreview(value, generation: current)
+        }
         if self.providerMode == "ChatGPT via Codex" {
           let adapter = CodexProvider()
           self.codex = adapter
           try await adapter.stream(
             executable: self.codexPath, model: self.codexModel, messages: history, context: context,
-            image: screenshot, scene: activeScene, onUnit: handler)
+            image: screenshot, scene: activeScene, onUnit: handler, onText: preview)
         } else {
           try await self.provider.stream(
             configuration: config, key: key, messages: history, context: context, image: screenshot,
-            scene: activeScene, onUnit: handler)
+            scene: activeScene, onUnit: handler, onText: preview)
         }
         guard current == self.generation else { return }
         self.record("generation.completed")
@@ -295,9 +313,20 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
         self.state = "Ready"
         self.updateBadge()
         if !(error is CancellationError) { self.showError(error) }
+        self.onCursorCancelled?(current)
         self.record("turn.failed")
       }
     }
+  }
+  private func acceptTextPreview(_ preview: ProviderTextPreview, generation: UInt64) throws {
+    guard generation == self.generation else { throw CancellationError() }
+    // Inert presentation only. Chat, speech, scenes and actions still wait for
+    // a complete validated ProviderUnit through accept(_:generation:...).
+    if !receivedTextPreview && !preview.text.isEmpty {
+      receivedTextPreview = true
+      record("cursor.firstTextPreview.received")
+    }
+    onCursorTextPreview?(generation, preview)
   }
   func accept(_ unit: ProviderUnit, generation: UInt64, expectedEvidence: ScreenEvidenceIdentity?)
     throws
@@ -331,13 +360,17 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
       }
       record("visual.accepted")
     case "target":
-      guard let target = unit.target, let evidence,
+      guard let target = unit.target, target.instruction.utf8.count <= 32_000, let evidence,
         let expectedEvidence, expectedEvidence.matches(evidence)
       else {
         throw ProviderError.message(
           "The selected screen evidence changed. Capture again before requesting guidance.")
       }
-      try overlay.show(target: target, evidence: evidence)
+      let cursorPreferences = CursorCompanionPreferences.load()
+      try overlay.show(
+        target: target, evidence: evidence,
+        showInstruction: !(cursorPreferences.enabled && cursorPreferences.showReplies))
+      onCursorTargetAccepted?(generation, target, evidence)
       messages.append(ChatLine(role: "assistant", text: target.instruction))
       record("guidance.presented.awaitingUser")
     default: throw ProviderError.message("Unsupported model output kind: \(unit.type)")
@@ -345,6 +378,7 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
   }
   func stop() {
     generation += 1
+    onCursorCancelled?(generation)
     invalidateCapture()
     cancelWindowPicker()
     outputSceneBinding = nil
@@ -411,6 +445,7 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
     voiceDraftGuard = VoiceDraftGuard(draft: input)
     record(mode == .pushToTalk ? "keyDown.ptt" : "manualVoice.started")
     voice.beginInput(id: id, mode: mode)
+    onCursorInputStarted?(generation)
     voiceStartTask = Task { [weak self] in
       guard let self else { return }
       do { try await self.voice.startListening(id: id) } catch {
@@ -486,6 +521,20 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
     captureGate.invalidate()
     captureTask?.cancel()
     captureTask = nil
+  }
+  /// Display rearrangement changes the coordinate authority even if an older
+  /// screenshot is young and its former foreground application is still active.
+  func invalidateScreenEvidence() {
+    invalidateCapture()
+    cancelWindowPicker()
+    spatialSelector.cancel()
+    if evidence != nil {
+      evidence = nil
+      selectedContext = ""
+      contextTitle = ""
+    }
+    overlay.clear()
+    record("capture.displayTopologyInvalidated")
   }
   @discardableResult private func beginContextSelection() -> UInt64 {
     invalidateCapture()

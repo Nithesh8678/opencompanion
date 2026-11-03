@@ -72,7 +72,8 @@ actor CodexProvider {
   func stream(
     executable: String, model: String, messages: [ChatLine], context: String, image: Data?,
     scene: SceneDocument?,
-    onUnit: @escaping @Sendable (ProviderUnit) async throws -> Void
+    onUnit: @escaping @Sendable (ProviderUnit) async throws -> Void,
+    onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil
   ) async throws {
     guard activeSession == nil else {
       throw ProviderError.message(
@@ -183,9 +184,8 @@ actor CodexProvider {
           "threadId": .string(threadID), "input": .array(input), "model": .string(selectedModel),
           "approvalPolicy": .string("never"),
         ]))
-      var buffer = ""
+      var decoder = ProviderTextStreamDecoder()
       var totalBytes = 0
-      var units = 0
       var sawCompleted = false
       while let message = try await iterator.next() {
         try Task.checkCancellation()
@@ -217,18 +217,7 @@ actor CodexProvider {
           guard totalBytes <= 2_000_000 else {
             throw ProviderError.message("Codex output exceeded the bounded response budget.")
           }
-          buffer += delta
-          while let newline = buffer.firstIndex(of: "\n") {
-            let line = String(buffer[..<newline])
-            buffer.removeSubrange(...newline)
-            if let unit = try Self.decodeUnit(line) {
-              try await onUnit(unit)
-              units += 1
-            }
-          }
-          guard buffer.utf8.count <= 262_144 else {
-            throw ProviderError.message("A Codex output unit exceeded 256 KiB.")
-          }
+          try await decoder.append(delta, onUnit: onUnit, onText: onText)
         }
         if method == "turn/completed" {
           guard params?["turn"]?["status"]?.string == "completed" else {
@@ -240,11 +229,8 @@ actor CodexProvider {
           break
         }
       }
-      if let unit = try Self.decodeUnit(buffer) {
-        try await onUnit(unit)
-        units += 1
-      }
-      guard sawCompleted, units > 0 else {
+      try await decoder.finish(onUnit: onUnit, onText: onText)
+      guard sawCompleted, decoder.acceptedUnits > 0 else {
         throw ProviderError.message("Codex ended before a complete teaching response was accepted.")
       }
     } onCancel: {
@@ -275,15 +261,6 @@ actor CodexProvider {
       return result
     }
     throw ProviderError.message("Codex app-server disconnected before initialization finished.")
-  }
-  private static func decodeUnit(_ text: String) throws -> ProviderUnit? {
-    let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !line.isEmpty else { return nil }
-    do { return try JSONDecoder().decode(ProviderUnit.self, from: Data(line.utf8)) } catch {
-      throw ProviderError.message(
-        "Codex output did not match the teaching line protocol. Earlier accepted content was retained."
-      )
-    }
   }
 }
 

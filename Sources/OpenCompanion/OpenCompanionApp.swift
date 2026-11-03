@@ -16,6 +16,7 @@ import SwiftUI
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
   private var model: AppModel!
   private var shell: CompanionShell?
+  private var cursor: CursorCompanionCoordinator?
   private var utilityWindow: NSWindow?
   private var explanationPanel: NSPanel?
   private let hotkey = HotkeyService()
@@ -37,7 +38,7 @@ import SwiftUI
     NSApp.appearance = NSAppearance(named: .darkAqua)
     let acceptanceMode = [
       "--keychain-acceptance", "--smoke-test-codex", "--render-acceptance", "--capture-acceptance",
-      "--interaction-acceptance",
+      "--interaction-acceptance", "--cursor-acceptance", "--cursor-live-acceptance",
     ].contains(where: CommandLine.arguments.contains)
     model = AppModel(acceptanceMode: acceptanceMode)
     model.onOpen = { [weak self] in self?.openRequestedSurface() }
@@ -85,12 +86,74 @@ import SwiftUI
       return
     }
     shell = CompanionShell(
-      model: model, observePointer: !CommandLine.arguments.contains("--interaction-acceptance"),
+      model: model, observePointer: !acceptanceMode,
       onOpenWorkspace: { [weak self] in self?.openRequestedSurface() })
     model.onVoiceResponseSubmitted = { [weak self] source, destination in
       self?.shell?.handoffVoiceActivity(from: source, to: destination)
     }
     shell?.show(anchor: .notch)
+    if !acceptanceMode || CommandLine.arguments.contains("--cursor-acceptance")
+      || CommandLine.arguments.contains("--cursor-live-acceptance")
+    {
+      cursor = CursorCompanionCoordinator(
+        model: model, observePointer: !acceptanceMode,
+        preferences: acceptanceMode ? CursorCompanionPreferences() : nil,
+        exclusionFrames: { [weak self] in
+          guard let geometry = self?.shell?.geometry else { return [] }
+          return [geometry.frame]
+        })
+      model.onCursorInputStarted = { [weak self] generation in
+        self?.cursor?.beginInput(generation: generation)
+      }
+      model.onCursorResponseStarted = { [weak self] generation in
+        self?.cursor?.beginResponse(generation: generation)
+      }
+      model.onCursorTextPreview = { [weak self] generation, preview in
+        self?.cursor?.accept(preview, generation: generation)
+      }
+      model.onCursorTargetAccepted = { [weak self] generation, target, evidence in
+        self?.cursor?.guide(target: target, evidence: evidence, generation: generation)
+      }
+      model.onCursorCancelled = { [weak self] generation in
+        self?.cursor?.cancel(generation: generation)
+      }
+    }
+    if let index = CommandLine.arguments.firstIndex(of: "--cursor-live-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 1 < CommandLine.arguments.count, let cursor else {
+            throw ProviderError.message("Provide an output directory for live cursor acceptance.")
+          }
+          try await CursorCompanionLiveAcceptance.run(
+            cursor: cursor, model: model,
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+          print("CURSOR_LIVE_ACCEPTANCE_PASSED")
+        } catch {
+          print("CURSOR_LIVE_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
+    }
+    if let index = CommandLine.arguments.firstIndex(of: "--cursor-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 1 < CommandLine.arguments.count, let cursor, let shell else {
+            throw ProviderError.message("Provide an output directory for cursor acceptance.")
+          }
+          try await CursorCompanionAcceptance.run(
+            cursor: cursor, shell: shell, model: model,
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+          print("CURSOR_ACCEPTANCE_PASSED")
+        } catch {
+          print("CURSOR_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
+    }
     if let index = CommandLine.arguments.firstIndex(of: "--interaction-acceptance") {
       Task { @MainActor in
         do {
@@ -398,6 +461,7 @@ import SwiftUI
   }
   func applicationWillTerminate(_ notification: Notification) {
     voiceShortcut.stop()
+    cursor?.shutdown()
     shell?.shutdown()
     model.stop()
     model.runner.stop()

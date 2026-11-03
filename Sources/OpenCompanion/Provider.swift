@@ -59,7 +59,8 @@ actor ReasoningProvider {
   func stream(
     configuration: ProviderConfiguration, key: String, messages: [ChatLine], context: String,
     image: Data?, scene: SceneDocument?,
-    onUnit: @escaping @Sendable (ProviderUnit) async throws -> Void
+    onUnit: @escaping @Sendable (ProviderUnit) async throws -> Void,
+    onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil
   ) async throws {
     guard !configuration.model.trimmingCharacters(in: .whitespaces).isEmpty else {
       throw ProviderError.message("Choose a model in Settings, then run the connection test.")
@@ -115,9 +116,8 @@ actor ReasoningProvider {
         "Provider rejected the request (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)). Check endpoint, model access, and credentials."
       )
     }
-    var buffer = ""
+    var decoder = ProviderTextStreamDecoder()
     var total = 0
-    var units = 0
     var sawDone = false
     for try await line in bytes.lines {
       try Task.checkCancellation()
@@ -141,37 +141,12 @@ actor ReasoningProvider {
       guard total <= 2_000_000 else {
         throw ProviderError.message("Response exceeded the bounded stream budget.")
       }
-      buffer += content
-      while let newline = buffer.firstIndex(of: "\n") {
-        let unitLine = String(buffer[..<newline])
-        buffer.removeSubrange(...newline)
-        if let unit = try decodeUnit(unitLine) {
-          units += 1
-          try await onUnit(unit)
-        }
-      }
-      guard buffer.utf8.count < 262144 else {
-        throw ProviderError.message("A response unit exceeded 256 KiB.")
-      }
+      try await decoder.append(content, onUnit: onUnit, onText: onText)
     }
-    if let unit = try decodeUnit(buffer) {
-      units += 1
-      try await onUnit(unit)
-    }
-    guard sawDone, units > 0 else {
+    try await decoder.finish(onUnit: onUnit, onText: onText)
+    guard sawDone, decoder.acceptedUnits > 0 else {
       throw ProviderError.message(
         "The response ended without complete accepted content. Try another compatible model.")
-    }
-  }
-  private func decodeUnit(_ value: String) throws -> ProviderUnit? {
-    let line = value.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !line.isEmpty else { return nil }
-    guard let data = line.data(using: .utf8) else {
-      throw ProviderError.message("Invalid response encoding.")
-    }
-    do { return try JSONDecoder().decode(ProviderUnit.self, from: data) } catch {
-      throw ProviderError.message(
-        "Model output did not match the line protocol. Accepted earlier content was retained.")
     }
   }
   func test(configuration: ProviderConfiguration, key: String) async throws -> String {
@@ -202,7 +177,8 @@ actor ReasoningProvider {
     {"type":"text","text":"A short complete natural-language paragraph."}
     {"type":"scene","title":"Specific lesson title","nodes":[...],"removeIDs":[]}
     {"type":"target","target":{"x":0.1,"y":0.2,"width":0.2,"height":0.05,"instruction":"Click the named control."}}
+    Start with a short useful text clause before a large scene. Emit text objects in the canonical order type then text, with no extra fields. Continue with short complete natural-language paragraph units rather than withholding all narration until the whole answer is finished. Never split a JSON object across logical NDJSON lines.
     Targets require the supplied screenshot and normalized top-left bounds. Never invent a control. Say when ambiguous.
-    For teaching, commit a coherent relationship in a small scene first, then add detail. Generic title or empty page is insufficient. Nodes use stable id; kinds rectangle,ellipse,line,arrow,text,path,mesh,group. Coordinates are in a 900x560 canvas. Each node must include id,kind,x,y,width,height,text,color,fill,strokeWidth,fontSize,points,rotation,opacity,bindings ({}); parentID optional. Default color #2458A6 fill #E6EFFC, opacity 1, strokeWidth 2, fontSize 18, rotation 0, points []. Only kind=text renders text. A rectangle/ellipse/arrow text field is not a visible label: create separate text nodes over or beside shapes. New teaching diagrams need at least two visible text nodes labeling the actual concepts, as well as causal connectors. Text fits node bounds. Width and height must always be nonnegative. For upward or leftward arrows, use signed endpoint coordinates in points; never negative width or height. For arrows/lines set points [{"x":x1,"y":y1},{"x":x2,"y":y2}]. Mesh is a bounded 3D box. Avoid overlap, use clear labels and small diagrams. Existing IDs update the same parts. Never erase unrelated user edits. Give science assumptions, distinguish kinematics from physical simulation. A motor lesson must identify simplified brushed DC. Do not generate code or execute expressions. Do not output audio clock events. Narration remains text; the host controls speech and cancellation. All output belongs to the current generation.
+    For teaching, follow the first short text unit with a coherent relationship in a small scene, then add detail. Generic title or empty page is insufficient. Nodes use stable id; kinds rectangle,ellipse,line,arrow,text,path,mesh,group. Coordinates are in a 900x560 canvas. Each node must include id,kind,x,y,width,height,text,color,fill,strokeWidth,fontSize,points,rotation,opacity,bindings ({}); parentID optional. Default color #2458A6 fill #E6EFFC, opacity 1, strokeWidth 2, fontSize 18, rotation 0, points []. Only kind=text renders text. A rectangle/ellipse/arrow text field is not a visible label: create separate text nodes over or beside shapes. New teaching diagrams need at least two visible text nodes labeling the actual concepts, as well as causal connectors. Text fits node bounds. Width and height must always be nonnegative. For upward or leftward arrows, use signed endpoint coordinates in points; never negative width or height. For arrows/lines set points [{"x":x1,"y":y1},{"x":x2,"y":y2}]. Mesh is a bounded 3D box. Avoid overlap, use clear labels and small diagrams. Existing IDs update the same parts. Never erase unrelated user edits. Give science assumptions, distinguish kinematics from physical simulation. A motor lesson must identify simplified brushed DC. Do not generate code or execute expressions. Do not output audio clock events. Narration remains text; the host controls speech and cancellation. All output belongs to the current generation.
     """
 }

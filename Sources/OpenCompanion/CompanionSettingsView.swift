@@ -11,6 +11,7 @@ import SwiftUI
   var openDestination: ((String) -> Void)? = nil
   @State private var selection = CompanionSettingsPage.general
   @State private var shortcuts = ShortcutPreferences.load()
+  @State private var cursorPreferences = CursorCompanionPreferences.load()
   @State private var feedback: String?
   @State private var feedbackIsError = false
   @State private var permissions = CompanionPermissionSnapshot.current()
@@ -60,6 +61,11 @@ import SwiftUI
     .onReceive(NotificationCenter.default.publisher(for: .shortcutPreferencesDidChange)) { _ in
       shortcuts = .load()
     }
+    .onReceive(NotificationCenter.default.publisher(for: .cursorCompanionPreferencesDidChange)) {
+      _ in
+      cursorPreferences = .load()
+    }
+    .onChange(of: cursorPreferences) { _, preferences in preferences.save() }
   }
 
   private var sidebar: some View {
@@ -114,6 +120,7 @@ import SwiftUI
     switch selection {
     case .general: general
     case .voice: voice
+    case .cursor: cursor
     case .shortcuts: shortcutSettings
     case .providers: providers
     case .connections: connections
@@ -238,6 +245,30 @@ import SwiftUI
         .font(.system(size: 11, design: .rounded)).foregroundStyle(SettingsColors.secondary)
         .textSelection(.enabled)
       }
+    }
+  }
+
+  private var cursor: some View {
+    settingsGroup("Beside your pointer") {
+      Toggle(isOn: $cursorPreferences.enabled) {
+        VStack(alignment: .leading, spacing: 5) {
+          Text("Floating cursor").fontWeight(.medium)
+          detail("Keep a little companion beside your pointer.")
+        }
+      }
+      .toggleStyle(.switch).controlSize(.small)
+      .accessibilityIdentifier("companion.settings.cursor.enabled")
+      rowDivider
+      Toggle(isOn: $cursorPreferences.showReplies) {
+        VStack(alignment: .leading, spacing: 5) {
+          Text("Replies beside cursor").fontWeight(.medium)
+          detail("See short answers as they appear. Full answers stay in Chat.")
+        }
+      }
+      .toggleStyle(.switch).controlSize(.small)
+      .disabled(!cursorPreferences.enabled)
+      .accessibilityIdentifier("companion.settings.cursor.showReplies")
+      detail("Changes apply immediately.")
     }
   }
 
@@ -601,6 +632,7 @@ import SwiftUI
 private enum CompanionSettingsPage: String, CaseIterable, Identifiable {
   case general = "General"
   case voice = "Voice"
+  case cursor = "Cursor"
   case shortcuts = "Shortcuts"
   case providers = "Providers"
   case connections = "Connections"
@@ -609,6 +641,7 @@ private enum CompanionSettingsPage: String, CaseIterable, Identifiable {
     switch self {
     case .general: "general"
     case .voice: "voice"
+    case .cursor: "cursor"
     case .shortcuts: "shortcuts"
     case .providers: "providers"
     case .connections: "connections"
@@ -619,6 +652,7 @@ private enum CompanionSettingsPage: String, CaseIterable, Identifiable {
     switch self {
     case .general: "gearshape"
     case .voice: "waveform"
+    case .cursor: "cursorarrow"
     case .shortcuts: "command"
     case .providers: "sparkles"
     case .connections: "point.3.connected.trianglepath.dotted"
@@ -629,6 +663,7 @@ private enum CompanionSettingsPage: String, CaseIterable, Identifiable {
     switch self {
     case .general: "Your companion and screen preferences."
     case .voice: "How you speak to OpenCompanion and hear its replies."
+    case .cursor: "A small companion, right where you are."
     case .shortcuts: "Make room for the shortcuts you already use."
     case .providers: "Choose what powers your conversations."
     case .connections: "Connect the browser and tools you choose."

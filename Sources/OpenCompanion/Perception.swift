@@ -11,9 +11,51 @@ struct ScreenEvidence: Sendable {
   var foregroundPID: pid_t
   var foregroundName: String
   var screenRect: CGRect
+  var windowID: CGWindowID? = nil
   var image: Data
   var semanticText: String
 }
+/// Immutable source identity carried by a reasoning turn. A newer frame cannot
+/// inherit coordinates inferred from an older image, even in the same app.
+struct ScreenEvidenceIdentity: Sendable, Equatable {
+  let frameID: UUID
+  let revision: UInt64
+  let displayID: CGDirectDisplayID
+  let foregroundPID: pid_t
+  let windowID: CGWindowID?
+  let screenRect: CGRect
+
+  init(_ evidence: ScreenEvidence) {
+    frameID = evidence.frameID
+    revision = evidence.revision
+    displayID = evidence.displayID
+    foregroundPID = evidence.foregroundPID
+    windowID = evidence.windowID
+    screenRect = evidence.screenRect
+  }
+
+  func matches(_ evidence: ScreenEvidence?) -> Bool {
+    guard let evidence else { return false }
+    return self == ScreenEvidenceIdentity(evidence)
+  }
+}
+
+struct CapturePublicationGate: Sendable {
+  private(set) var generation: UInt64 = 0
+  mutating func invalidate() { generation &+= 1 }
+  func permits(_ token: UInt64, cancelled: Bool) -> Bool {
+    !cancelled && token == generation
+  }
+}
+
+enum CaptureEvidenceScope: Sendable {
+  case display, window, region
+  var permitsApplicationAccessibility: Bool {
+    if case .display = self { return true }
+    return false
+  }
+}
+
 struct CaptureWindow: Identifiable, Sendable {
   let id: CGWindowID
   let title: String
@@ -50,6 +92,9 @@ actor CaptureService {
         ?? content.displays.first,
       let rect = screens[display.displayID]
     else { throw ProviderError.message("The selected display is unavailable.") }
+    try Task.checkCancellation()
+    let scope: CaptureEvidenceScope =
+      windowID != nil ? .window : (region != nil ? .region : .display)
     let own = content.applications.filter {
       $0.processID == ProcessInfo.processInfo.processIdentifier
     }
@@ -75,6 +120,8 @@ actor CaptureService {
     config.scalesToFit = true
     var image = try await SCScreenshotManager.captureImage(
       contentFilter: filter, configuration: config)
+    let capturedAt = ProcessInfo.processInfo.systemUptime
+    try Task.checkCancellation()
     if let region {
       let clipped = region.intersection(sourceRect)
       guard clipped.width >= 8, clipped.height >= 8 else {
@@ -101,12 +148,20 @@ actor CaptureService {
       return (request.results ?? []).prefix(250).compactMap { $0.topCandidates(1).first?.string }
         .joined(separator: "\n")
     }.value
-    let semantics = await AccessibilityService.describe(pid: foregroundPID)
+    try Task.checkCancellation()
+    let semantics: String
+    if scope.permitsApplicationAccessibility {
+      semantics = await AccessibilityService.describe(pid: foregroundPID)
+    } else {
+      semantics =
+        "Application-wide accessibility text omitted to preserve the selected capture scope."
+    }
+    try Task.checkCancellation()
     revision += 1
     return ScreenEvidence(
-      frameID: UUID(), revision: revision, capturedAt: ProcessInfo.processInfo.systemUptime,
+      frameID: UUID(), revision: revision, capturedAt: capturedAt,
       displayID: display.displayID, foregroundPID: foregroundPID, foregroundName: foregroundName,
-      screenRect: sourceRect, image: data,
+      screenRect: sourceRect, windowID: windowID, image: data,
       semanticText:
         "Foreground: \(foregroundName)\nAX:\n\(semantics)\nOCR (text bounds are not button bounds):\n\(ocr)"
     )

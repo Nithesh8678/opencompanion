@@ -1,4 +1,7 @@
 import AppKit
+import Carbon
+import Combine
+import CompanionStore
 import SwiftUI
 
 @main enum OpenCompanionApplication {
@@ -15,6 +18,9 @@ import SwiftUI
   private var shell: CompanionShell?
   private var utilityWindow: NSWindow?
   private let hotkey = HotkeyService()
+  private let stopHotkey = HotkeyService()
+  private var stateSubscription: AnyCancellable?
+  private var stopKeyRegistered = false
   private var statusItem: NSStatusItem?
   private var localKeys: Any?
 
@@ -24,6 +30,24 @@ import SwiftUI
     model = AppModel()
     model.onOpen = { [weak self] in self?.showWorkspace() }
     installMenus()
+    if CommandLine.arguments.contains("--keychain-acceptance") {
+      let service = "org.opencompanion.acceptance.\(UUID().uuidString)"
+      let credentials = CredentialStore()
+      do {
+        defer { try? credentials.delete(service: service, account: "fixture") }
+        let value = Data("public acceptance fixture".utf8)
+        try credentials.save(value, service: service, account: "fixture")
+        guard try credentials.load(service: service, account: "fixture") == value else {
+          throw ProviderError.message("Keychain roundtrip mismatch")
+        }
+        print("KEYCHAIN_ACCEPTANCE_PASSED")
+      } catch {
+        print("KEYCHAIN_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+        exit(1)
+      }
+      NSApp.terminate(nil)
+      return
+    }
     if CommandLine.arguments.contains("--smoke-test-codex") {
       Task {
         do {
@@ -35,7 +59,10 @@ import SwiftUI
             try? FileHandle.standardOutput.write(contentsOf: Data((text + "\n").utf8))
           }
           print("CODEX_ACCEPTANCE_PASSED")
-        } catch { print("CODEX_ACCEPTANCE_FAILED: \(error.localizedDescription)") }
+        } catch {
+          print("CODEX_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
         NSApp.terminate(nil)
       }
       return
@@ -46,6 +73,23 @@ import SwiftUI
       self?.model.record("hotkey.keyDown")
       self?.shell?.toggle()
       self?.model.record("hotkey.companionRequested")
+    }
+    stateSubscription = model.$busy.combineLatest(model.$listening, model.$state).sink {
+      [weak self] busy, listening, state in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        let active = busy || listening || state == "Speaking" || state == "Observing"
+        guard active != self.stopKeyRegistered else { return }
+        self.stopKeyRegistered = active
+        if active {
+          self.stopHotkey.register(keyCode: UInt32(kVK_Escape), modifiers: 0) { [weak self] in
+            self?.model.stop()
+            self?.shell?.collapse()
+          }
+        } else {
+          self.stopHotkey.unregister()
+        }
+      }
     }
     localKeys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
       let consume = MainActor.assumeIsolated {
@@ -80,7 +124,10 @@ import SwiftUI
           try? await Task.sleep(for: .milliseconds(500))
           try RenderAcceptance.run()
           print("RENDER_ACCEPTANCE_PASSED")
-        } catch { print("RENDER_ACCEPTANCE_FAILED: \(error)") }
+        } catch {
+          print("RENDER_ACCEPTANCE_FAILED: \(error)")
+          exit(1)
+        }
         NSApp.terminate(nil)
       }
     }
@@ -162,6 +209,7 @@ import SwiftUI
     model.runner.stop()
     model.browser.stop()
     hotkey.unregister()
+    stopHotkey.unregister()
     if let localKeys { NSEvent.removeMonitor(localKeys) }
   }
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

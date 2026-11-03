@@ -4,7 +4,7 @@ Updated 3 November 2026. This is an active engineering build, not a claim of ful
 
 | Report scope | Proven status | Evidence and remaining acceptance |
 |---|---|---|
-| Native app, menu bar, text invocation, stop | implemented; installed-tested (launch/text controls) | Xcode application target; actual bundle launched; AX accessible controls. Global hotkey conflicts/Spaces need acceptance. |
+| Native app, menu bar, text invocation, stop | implemented; installed-tested (notch-only launch, expansion, text response) | Xcode application target; actual bundle launched with no workspace; AX accessible controls; live notch conversation completed. Global hotkey conflicts/Spaces need acceptance. |
 | Configurable shortcuts | specified | Default ⌘⇧Space / ⌘⇧R / Escape implemented; configurable key choices pending. |
 | Companion listening/thinking/speaking, notchless fallback | implemented | Notch-resident expandable companion with original character; mounted voice states. Large workspace is secondary. Actual microphone/speaker/device route acceptance pending. |
 | Deliberate screen/AX/OCR, permissions/repair | implemented | ScreenCaptureKit excludes own app; bounded AX/OCR; native privacy settings controls. Actual capture exclusion, denial/revocation and multi-display physical acceptance pending. |
@@ -13,7 +13,7 @@ Updated 3 November 2026. This is an active engineering build, not a claim of ful
 | Transparent annotations without focus theft | implemented | Separate non-key non-main click-through panel, bounded lifetime, foreground checks. Fullscreen/Spaces/focus retention installed tests pending. |
 | Voice input/output, streaming, interruption, dictation | implemented (Apple STT/TTS and review-before-send); specified (dictation) | macOS14.2-compatible Apple Speech fallback; accepted sentence speech, immediate stop. Audio-route and real input/output acceptance pending; synth callbacks are not acoustic measurements. |
 | Generic 2D notebooks/diagrams/math/charts/labels | implemented (retained primitives and text) | Core Animation shape/text layers, native font measurement; generic model scene protocol. Rich math shaping, chart recipes and layout constraints pending. |
-| Durable scenes, saved lessons, undo/export/reopen | implemented; automated-tested; installed-tested (save) | JSON documents, SQLite library; original55-node import, unrelated fixtures, save visible in Library. PNG/PDF render laboratory exports exist; user-facing PDF export pending. |
+| Durable scenes, saved lessons, undo/export/reopen | implemented; automated-tested; installed-tested (save) | JSON documents, SQLite library; original55-node import, unrelated fixtures, save visible in Library. PNG/PDF render laboratory exports exist; user-facing PNG/PDF export implemented; native render outputs inspected. |
 | Interactive local 3D, camera, parameters | implemented (SceneKit Metal backend) | Bounded box/sphere/cylinder geometry cache, orbit, local play/step/speed. General mesh format/material/light controls and two live3D lessons pending. No custom Metal pipeline claimed. |
 | Speech/visual beat clocks, text fallback | implemented; automated-tested (core scheduler) | Core host-clock scheduling tests; visual-first app scene acceptance. Full audio-synchronized application reveal wiring pending. |
 | Closed-loop tutorials, postconditions | implemented; automated-tested (core) | Explicit desktop tutorial UI verifies fresh title/value; scoped actions require fresh snapshot. Three-step unfamiliar-app installed acceptance pending. |

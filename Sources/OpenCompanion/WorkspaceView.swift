@@ -270,7 +270,19 @@ struct WorkspaceView: View {
           Button("Add text", systemImage: "text.badge.plus", action: model.addText)
           Button("Save", systemImage: "square.and.arrow.down", action: model.saveScene).buttonStyle(
             .borderedProminent)
-          Button("Export", action: model.exportScene)
+          Menu("Export") {
+            Button("Editable document JSON", action: model.exportScene)
+            Button("PNG image") {
+              do {
+                try SceneExport.chooseExport(document: scene, time: model.playTime, pdf: false)
+              } catch { model.showError(error) }
+            }
+            Button("PDF") {
+              do {
+                try SceneExport.chooseExport(document: scene, time: model.playTime, pdf: true)
+              } catch { model.showError(error) }
+            }
+          }
         }.controlSize(.small).padding(20)
         HStack(spacing: 0) {
           SceneCanvas(

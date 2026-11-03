@@ -29,7 +29,8 @@ enum RenderAcceptance {
       NSGraphicsContext.restoreGraphicsState()
       try rep.representation(using: .png, properties: [:])!.write(
         to: output.appendingPathComponent(name + ".png"))
-      try view.pdfData().write(to: output.appendingPathComponent(name + ".pdf"))
+      try SceneExport.render(document, time: 0.7, pdf: true).write(
+        to: output.appendingPathComponent(name + ".pdf"))
     }
     if let window = NSApp.windows.first(where: { $0.title == "OpenCompanion" }),
       let view = window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)

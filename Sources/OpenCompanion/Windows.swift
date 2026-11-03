@@ -77,7 +77,16 @@ struct AnnotationView: View {
   private var hotkey: EventHotKeyRef?
   private var handler: EventHandlerRef?
   private var callback: (() -> Void)?
-  func register(keyCode: UInt32 = UInt32(kVK_Space), action: @escaping () -> Void) {
+  private static var nextID: UInt32 = 1
+  private let identifier: UInt32
+  init() {
+    identifier = Self.nextID
+    Self.nextID += 1
+  }
+  func register(
+    keyCode: UInt32 = UInt32(kVK_Space), modifiers: UInt32 = UInt32(cmdKey | shiftKey),
+    action: @escaping () -> Void
+  ) {
     unregister()
     callback = action
     var spec = EventTypeSpec(
@@ -85,15 +94,25 @@ struct AnnotationView: View {
     let pointer = Unmanaged.passUnretained(self).toOpaque()
     InstallEventHandler(
       GetApplicationEventTarget(),
-      { _, _, userData in
-        guard let userData else { return noErr }
+      { _, event, userData in
+        guard let userData, let event else { return OSStatus(eventNotHandledErr) }
         let service = Unmanaged<HotkeyService>.fromOpaque(userData).takeUnretainedValue()
+        var received = EventHotKeyID()
+        guard
+          GetEventParameter(
+            event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
+            MemoryLayout<EventHotKeyID>.size, nil, &received) == noErr
+        else { return OSStatus(eventNotHandledErr) }
+        let matches = MainActor.assumeIsolated {
+          received.signature == 0x4F43_4F4D && received.id == service.identifier
+        }
+        guard matches else { return OSStatus(eventNotHandledErr) }
         MainActor.assumeIsolated { service.callback?() }
         return noErr
       }, 1, &spec, pointer, &handler)
-    let identifier = EventHotKeyID(signature: 0x4F43_4F4D, id: 1)
+    let identifier = EventHotKeyID(signature: 0x4F43_4F4D, id: identifier)
     RegisterEventHotKey(
-      keyCode, UInt32(cmdKey | shiftKey), identifier, GetApplicationEventTarget(), 0, &hotkey)
+      keyCode, modifiers, identifier, GetApplicationEventTarget(), 0, &hotkey)
   }
   func unregister() {
     if let hotkey { UnregisterEventHotKey(hotkey) }

@@ -4,6 +4,27 @@ import CompanionCore
 import CompanionStore
 import SwiftUI
 
+/// The host advances this binding only after a successful scene transaction.
+/// Revisions are meaningful only inside the same retained document identity.
+struct NotebookTurnBinding: Sendable, Equatable {
+  let documentID: String?
+  let revision: Int?
+
+  func checkedBase(currentID: String?, currentRevision: Int?, proposedBase: Int?) throws -> Int {
+    guard documentID == currentID, revision == currentRevision else {
+      throw ProviderError.message(
+        "The notebook changed while this response was being prepared. Your edits were kept; ask again to edit the current document."
+      )
+    }
+    let base = revision ?? 0
+    guard proposedBase == nil || proposedBase == base else {
+      throw ProviderError.message(
+        "The response used an outdated notebook revision. Your edits were kept.")
+    }
+    return base
+  }
+}
+
 @MainActor final class AppModel: ObservableObject {
   @Published var section = "Companion"
   @Published var input = ""
@@ -55,7 +76,9 @@ import SwiftUI
   private(set) var store: LocalStore?
   private var turn: Task<Void, Never>?
   private var generation: UInt64 = 0
-  private var outputSceneBaseRevision: Int?
+  private var outputSceneBinding: NotebookTurnBinding?
+  private var captureTask: Task<Void, Never>?
+  private var captureGate = CapturePublicationGate()
   private var undoStack: [SceneDocument] = []
   private var redoStack: [SceneDocument] = []
   private var timer: Timer?
@@ -172,7 +195,8 @@ import SwiftUI
     messages.append(ChatLine(role: "user", text: text))
     let history = messages
     let context = selectedContext + (evidence?.semanticText ?? "")
-    outputSceneBaseRevision = scene?.revision
+    outputSceneBinding = NotebookTurnBinding(documentID: scene?.id, revision: scene?.revision)
+    let turnEvidence = evidence.map(ScreenEvidenceIdentity.init)
     let screenshot = evidence?.image
     let activeScene = scene
     let config = configuration
@@ -182,7 +206,7 @@ import SwiftUI
       do {
         let handler: @Sendable (ProviderUnit) async throws -> Void = { [weak self] unit in
           try Task.checkCancellation()
-          try await self?.accept(unit, generation: current)
+          try await self?.accept(unit, generation: current, expectedEvidence: turnEvidence)
         }
         if self.providerMode == "ChatGPT via Codex" {
           let adapter = CodexProvider()
@@ -211,7 +235,9 @@ import SwiftUI
       }
     }
   }
-  func accept(_ unit: ProviderUnit, generation: UInt64) throws {
+  func accept(_ unit: ProviderUnit, generation: UInt64, expectedEvidence: ScreenEvidenceIdentity?)
+    throws
+  {
     guard generation == self.generation else { throw CancellationError() }
     switch unit.type {
     case "text":
@@ -222,14 +248,12 @@ import SwiftUI
       record("semantic.text.accepted")
       if configuration.speechEnabled { voice.speak(text) }
     case "scene":
+      guard let outputSceneBinding else { throw CancellationError() }
+      let expectedBase = try outputSceneBinding.checkedBase(
+        currentID: scene?.id, currentRevision: scene?.revision,
+        proposedBase: unit.baseDocumentRevision)
       var document =
         scene ?? SceneDocument(title: unit.title ?? "Explanation", width: 900, height: 560)
-      let expectedBase = unit.baseDocumentRevision ?? outputSceneBaseRevision ?? document.revision
-      guard expectedBase == document.revision else {
-        throw ProviderError.message(
-          "The notebook changed while this response was being prepared. Your edits were kept; ask again to edit the current revision."
-        )
-      }
       var operations = unit.operations ?? []
       for id in unit.removeIDs ?? [] { operations.append(.remove(id: id)) }
       for node in unit.nodes ?? [] {
@@ -266,13 +290,17 @@ import SwiftUI
       if let title = unit.title { document.title = String(title.prefix(200)) }
       snapshotUndo()
       scene = document
-      outputSceneBaseRevision = document.revision
+      self.outputSceneBinding = NotebookTurnBinding(
+        documentID: document.id, revision: document.revision)
       section = "Notebook"
       onOpen?()
       record("visual.accepted")
     case "target":
-      guard let target = unit.target, let evidence else {
-        throw ProviderError.message("No current screen evidence for this target.")
+      guard let target = unit.target, let evidence,
+        let expectedEvidence, expectedEvidence.matches(evidence)
+      else {
+        throw ProviderError.message(
+          "The selected screen evidence changed. Capture again before requesting guidance.")
       }
       try overlay.show(target: target, evidence: evidence)
       messages.append(ChatLine(role: "assistant", text: target.instruction))
@@ -282,6 +310,8 @@ import SwiftUI
   }
   func stop() {
     generation += 1
+    invalidateCapture()
+    outputSceneBinding = nil
     spatialSelector.cancel()
     turn?.cancel()
     turn = nil
@@ -310,8 +340,23 @@ import SwiftUI
       }
     }
   }
+  private func invalidateCapture() {
+    captureGate.invalidate()
+    captureTask?.cancel()
+    captureTask = nil
+  }
+  @discardableResult private func beginContextSelection() -> UInt64 {
+    invalidateCapture()
+    spatialSelector.cancel()
+    evidence = nil
+    selectedContext = ""
+    contextTitle = ""
+    overlay.clear()
+    return captureGate.generation
+  }
   func observe() { performCapture() }
   func performCapture(region: CGRect? = nil, window: CaptureWindow? = nil, strokes: String = "") {
+    let token = beginContextSelection()
     let foreground = NSWorkspace.shared.frontmostApplication
     let previous = NSRunningApplication(processIdentifier: lastExternalPID)
     let app = foreground?.bundleIdentifier == Bundle.main.bundleIdentifier ? previous : foreground
@@ -323,14 +368,17 @@ import SwiftUI
         else { return nil }
         return (number.uint32Value, screen.frame)
       })
+    let displayID = selectedDisplay
     state = "Observing"
     updateBadge()
-    Task {
+    captureTask = Task { [weak self] in
+      guard let self else { return }
       do {
         let frame = try await capture.capture(
-          displayID: selectedDisplay, foregroundPID: window?.pid ?? app?.processIdentifier ?? 0,
+          displayID: displayID, foregroundPID: window?.pid ?? app?.processIdentifier ?? 0,
           foregroundName: window?.appName ?? app?.localizedName ?? "Desktop", region: region,
           windowID: window?.id, screens: screens)
+        guard captureGate.permits(token, cancelled: Task.isCancelled) else { return }
         evidence = frame
         if !strokes.isEmpty {
           selectedContext = "User-drawn spatial context (normalized top-left points): " + strokes
@@ -338,19 +386,23 @@ import SwiftUI
         contextTitle = "Screen: \(frame.foregroundName)"
         notice = "One screen frame selected. It will be sent with your next question."
         state = "Ready"
+        captureTask = nil
         updateBadge()
       } catch {
+        guard captureGate.permits(token, cancelled: Task.isCancelled) else { return }
         state = "Ready"
+        captureTask = nil
         updateBadge()
-        showError(error)
+        if !(error is CancellationError) { showError(error) }
       }
     }
   }
   func clearContext() {
-    evidence = nil
-    selectedContext = ""
-    contextTitle = ""
-    overlay.clear()
+    _ = beginContextSelection()
+    if state == "Observing" {
+      state = "Ready"
+      updateBadge()
+    }
   }
   func sample(_ type: String) {
     do {
@@ -368,6 +420,7 @@ import SwiftUI
     } catch { showError(error) }
   }
   func newNotebook() {
+    stop()
     snapshotUndo()
     scene = SceneDocument(title: "Untitled notebook", width: 900, height: 560)
     section = "Notebook"
@@ -450,7 +503,9 @@ import SwiftUI
   func openRecord(_ record: StoredRecord) {
     if record.kind == "notebook", let data = record.payload {
       do {
-        scene = try JSONDecoder().decode(SceneDocument.self, from: data).validated()
+        let document = try JSONDecoder().decode(SceneDocument.self, from: data).validated()
+        stop()
+        scene = document
         section = "Notebook"
         playTime = 0
         seekRevision += 1
@@ -459,6 +514,7 @@ import SwiftUI
     } else if record.kind == "conversation", let data = record.payload,
       let lines = try? JSONDecoder().decode([ChatLine].self, from: data)
     {
+      stop()
       messages = lines
       section = "Companion"
     } else {
@@ -489,6 +545,7 @@ import SwiftUI
     }
   }
   func useRecord(_ record: StoredRecord) {
+    clearContext()
     selectedContext = "Saved \(record.kind): \(record.title)\n\(record.body)"
     contextTitle = record.title
     section = "Companion"
@@ -507,17 +564,25 @@ import SwiftUI
     panel.allowsMultipleSelection = false
     panel.canChooseDirectories = false
     guard panel.runModal() == .OK, let url = panel.url else { return }
-    Task {
+    let token = beginContextSelection()
+    captureTask = Task { [weak self] in
+      guard let self else { return }
       do {
         let context = try await Task.detached {
           try FileContextReader().read(url: url, allowedRoot: url.deletingLastPathComponent())
         }.value
+        guard captureGate.permits(token, cancelled: Task.isCancelled) else { return }
         selectedContext = context.chunks.map { "\($0.citation):\n\($0.text)" }.joined(
           separator: "\n")
         contextTitle = url.lastPathComponent
         notice = "Selected file context is ready for your next question."
         section = "Companion"
-      } catch { showError(error) }
+        captureTask = nil
+      } catch {
+        guard captureGate.permits(token, cancelled: Task.isCancelled) else { return }
+        captureTask = nil
+        if !(error is CancellationError) { showError(error) }
+      }
     }
   }
   func exportScene() {
@@ -649,8 +714,11 @@ extension AppModel {
           == selectedDisplay
       }) ?? NSScreen.main
     else { return }
-    Task {
+    let token = beginContextSelection()
+    captureTask = Task { [weak self] in
+      guard let self else { return }
       if let selection = await spatialSelector.choose(screen: screen, mode: mode) {
+        guard captureGate.permits(token, cancelled: Task.isCancelled) else { return }
         let encoded = selection.normalizedStrokes.map { $0.map { [Double($0.x), Double($0.y)] } }
         let data = try? JSONSerialization.data(withJSONObject: encoded)
         performCapture(
@@ -660,11 +728,20 @@ extension AppModel {
     }
   }
   func chooseWindow() {
-    Task {
+    let token = beginContextSelection()
+    captureTask = Task { [weak self] in
+      guard let self else { return }
       do {
-        captureWindows = try await capture.windows()
+        let windows = try await capture.windows()
+        guard captureGate.permits(token, cancelled: Task.isCancelled) else { return }
+        captureWindows = windows
         showingWindowPicker = true
-      } catch { showError(error) }
+        captureTask = nil
+      } catch {
+        guard captureGate.permits(token, cancelled: Task.isCancelled) else { return }
+        captureTask = nil
+        if !(error is CancellationError) { showError(error) }
+      }
     }
   }
   func renameScene(_ title: String) {

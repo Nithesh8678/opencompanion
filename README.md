@@ -4,6 +4,10 @@ An independent, open-source **notch companion for macOS**. It lives at the top o
 
 **Active engineering alpha. The complete research specification is not yet fully implemented or acceptance-tested.** See [feature status](docs/FEATURE-STATUS.md) for the exact boundary.
 
+<img src="docs/assets/notch-collapsed.png" width="192" alt="Collapsed notch companion">
+
+<img src="docs/assets/notch-expanded.png" width="430" alt="Expanded native notch conversation">
+
 ## Try it
 
 Apple Silicon; macOS14.2+; Xcode with Swift6. Current local verification uses macOS26.6.2. Older OS releases and Intel have not been exercised.

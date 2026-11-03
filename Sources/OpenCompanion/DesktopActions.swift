@@ -170,10 +170,12 @@ private actor DesktopAXWorker {
             value: value, x: point.x, y: point.y, width: size.width, height: size.height,
             actions: actions, path: path, secure: secure))
       }
-      if path.count < 12 && queue.count < maxVisited {
+      let hasQueueCapacity = queue.count < maxVisited
+      if path.count < 12 && hasQueueCapacity {
         let childValues = children(element)
         var childIndex = 0
-        while childIndex < childValues.count && queue.count < maxVisited {
+        while childIndex < childValues.count {
+          if queue.count >= maxVisited { break }
           let child = childValues[childIndex]
           queue.append((child, path + [childIndex]))
           childIndex += 1

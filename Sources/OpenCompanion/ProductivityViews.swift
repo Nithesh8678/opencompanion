@@ -164,9 +164,9 @@ struct BrowserConnectionView: View {
   }
 }
 struct MCPConnectionView: View {
-  @State private var name = ""
-  @State private var endpoint = ""
-  @State private var account = "Personal"
+  @AppStorage("mcp.connection.name") private var name = ""
+  @AppStorage("mcp.connection.endpoint") private var endpoint = ""
+  @AppStorage("mcp.connection.account") private var account = "Personal"
   @State private var token = ""
   @State private var status = "Disconnected"
   @State private var client: MCPClient?
@@ -188,7 +188,7 @@ struct MCPConnectionView: View {
       SecureField("Bearer token (optional)", text: $token)
       HStack {
         Button("Connect & discover tools") { connect() }.disabled(endpoint.isEmpty || name.isEmpty)
-        Button("Disconnect") {
+        Button("Disconnect & forget token") {
           Task {
             try? await client?.disconnect(removeCredential: true)
             client = nil
@@ -241,7 +241,7 @@ struct MCPConnectionView: View {
     status = "Connecting…"
     Task {
       do {
-        try await adapter.setToken(token)
+        if !token.isEmpty { try await adapter.setToken(token) }
         tools = try await adapter.connect()
         status = "Connected • \(tools.count) tools"
       } catch { status = error.localizedDescription }

@@ -634,9 +634,10 @@ struct ResponseInputPlan: Sendable {
         record("guidance.suppressed.responsePolicy")
         return
       }
-      guard let target = unit.target, target.instruction.utf8.count <= 32_000,
-        (target.label?.prefix(81).count ?? 0) <= 80
+      guard let payload = unit.target, payload.instruction.utf8.count <= 32_000,
+        (payload.label?.prefix(81).count ?? 0) <= 80
       else { throw ProviderError.message("Invalid or oversized screen guidance target.") }
+      let target = GuidanceTargetPresentation.styled(payload)
       guard let evidence, let expectedEvidence, expectedEvidence.matches(evidence)
       else {
         throw ProviderError.message(

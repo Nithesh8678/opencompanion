@@ -184,9 +184,23 @@ before presentation. The cursor flight starts only after validation. Target
 geometry and the capsule share one
 layout model. Rounded rectangles use a dashed red outline; ellipses use an
 original hand-drawn-style red path. Both have a restrained glow and light fill.
-Current provider instructions require an ellipse for a compact button/icon and
-reserve rounded rectangles for fields or larger regions. Live acceptance of this
-tightened shape instruction remains pending.
+The native UI owns the shape of a click-advancing control.
+`GuidanceTargetPresentation.styled` selects an ellipse when `advanceOn` is
+`"click"` and the model shape is absent or one of the supported shapes. Manual
+text-entry/explanatory marks retain the supplied supported shape, including a
+rounded rectangle for a field or larger region. Unsupported shape strings and
+invalid bounds remain rejectable. Styling preserves geometry, labels,
+instructions and advancement semantics; the same styled target goes through
+validation, cursor motion, the overlay and continuation ownership.
+
+This avoids relying on model compliance with a visual-style prompt. Correctly
+grounded raw rectangles are not reported as model-produced ellipses. The
+synthetic routing acceptance applies this production style rule, then checks its
+independent position/bounds oracle and native ellipse output. Diagnostics keep
+the raw model shape and `nativeShape` separate. Focused styling tests and the
+installed synthetic-image routing/native final-render check passed. Normal
+capture/focus preparation, animation and physical click delivery are separate
+acceptance boundaries.
 The attached label uses pink/light fill and dark text, bounded to 80 graphemes
 and 4,096 UTF-8 bytes. When the model omits a label, its instruction is the
 fixed annotation fallback even if nearby replies are enabled. Target instructions
@@ -256,6 +270,21 @@ validated text completion and first-glyph render submission separately. One tria
 is not a latency distribution; render submission is not presentation or acoustic
 onset.
 
+The installed synthetic-image routing check uses a live Codex-plan request and
+an authored 1200×780 JPEG containing only generic public fixture text and shapes:
+
+```sh
+/Applications/OpenCompanion.app/Contents/MacOS/OpenCompanion --guidance-routing-acceptance /tmp/OpenCompanion-New-Chat-Native-Circle
+```
+
+It asks “How do I create a new chat in ChatGPT?”, requires one click-advancing
+target grounded on the independently known New chat control, applies production
+native target styling, and renders the final annotation to PNG. The JSON report
+separates the raw model shape from `nativeShape`. This entry point bypasses the
+`AppModel.accept` path, actual screen capture, foreground preparation and notebook
+mutation. It does not click, use a microphone, produce audio or capture private
+pixels. It proves neither physical event delivery nor the animation timeline.
+
 For a live guidance check, `scripts/build-guidance-fixture.sh` creates the
 separate public `/tmp/OpenCompanionGuidanceFixture.app`, never an Applications
 installation. Open that fixture first and keep its opaque practice screen
@@ -273,20 +302,33 @@ displays, fullscreen/Spaces and exact visual parity need separate acceptance.
 
 ## Recorded verification
 
-- Latest completed automated checkpoint: 222 Swift tests and 29 Python
-  installer/signing tests passed. The capture-provenance and target-admission
-  follow-ups require another regression run before extending that evidence.
+- Latest completed automated checkpoint: 233 Swift tests (193 app, 15 store,
+  25 core) and 29 Python installer/signing tests passed, including capture
+  provenance, route admission and native target styling.
 - Shared typed/PTT routing, notebook admission/new-document isolation and retained
-  edit regressions passed automated tests; the updated native app built. Live
-  routing and foreground-preparation acceptance for this change is pending.
+  edit regressions passed automated tests. The live provider/synthetic-image
+  routing check below passed; normal AppModel capture/focus preparation remains
+  unverified by that entry point.
 - Certificate-signed native bundle built and installed at the canonical path.
-- Installed cursor acceptance passed: unfinished word waits, ordered whole-word
+- Installed cursor acceptance passed again on the current binary: unfinished word waits, ordered whole-word
   reveal, one canonical Chat commit, immediate restart, four-row emoji caption,
   Reduce Motion, idle clock shutdown, fixed annotation capture and no focus theft.
   Transparent capture inspection used alpha compositing onto a neutral dark
   background; raw transparent PNG RGB is not the composited on-screen appearance.
-- Installed notch regression passed: compact voice state lifecycle, cutout
+- Installed notch regression passed again on the current binary: compact voice state lifecycle, cutout
   placement, repeated synthetic hover, draft preservation and foreground focus.
+  These cursor/notch checks use synthetic controller input and owned panels;
+  they do not live-test fresh guidance foreground preparation, physical clicks
+  or microphone/audio routes.
+- Installed synthetic-image guidance routing passed through the real Codex
+  default model for the exact new-chat request. It returned one text unit and
+  one target, no scene units, with notebook capability disabled. The raw shape
+  was `roundedRectangle`; native styling rendered an ellipse around New chat.
+  Bounds `x=0.016, y=0.100, width=0.171, height=0.058` included the independent
+  control-center oracle. The final PNG's orientation, label and circle placement
+  were visually inspected. The complete single trial took 9,328.72 ms; this is
+  neither a latency distribution nor a guarantee. AppModel acceptance, notebook
+  mutation, actual capture/focus, click delivery and audio were not exercised.
 - One live public Moon question passed with incremental previews. First preview
   arrived at 5,413.49 ms, first-glyph render submission at 5,422.36 ms and complete
   text at 5,900.48 ms. The local preview-to-submission gap was 8.87 ms. This was

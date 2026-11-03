@@ -46,10 +46,11 @@ enum GuidanceRoutingAcceptance {
       let targets = targetUnits.compactMap(\.target)
       let clickTargets = targets.filter { $0.advanceOn == "click" }
       guard targets.count == targetUnits.count, clickTargets.count == 1,
-        let selected = clickTargets.first, isGroundedNewChatCircle(selected)
+        let selected = clickTargets.first.map({ GuidanceTargetPresentation.styled($0) }),
+        isGroundedNewChatCircle(selected)
       else {
         throw ProviderError.message(
-          "The response must contain exactly one click-advancing target, a bounded ellipse on the visible New chat control; text alone does not pass."
+          "The response must contain exactly one click-advancing target that the native UI renders as a bounded ellipse on the visible New chat control; text alone does not pass."
         )
       }
       try render(target: selected, over: fixture).write(
@@ -92,18 +93,20 @@ enum GuidanceRoutingAcceptance {
       }
       let rect = ScreenGuidancePolicy.targetRect(
         target, in: CGRect(origin: .zero, size: size))
+      let presentation = GuidanceTargetPresentation.styled(target)
       let oracleCenter = CGPoint(x: newChatButton.midX, y: size.height - newChatButton.midY)
       targetDiagnostics.append([
         "unitIndex": index, "hasTargetPayload": true,
         "x": jsonNumber(target.x), "y": jsonNumber(target.y),
         "width": jsonNumber(target.width), "height": jsonNumber(target.height),
         "shape": String((target.shape ?? "").prefix(64)),
+        "nativeShape": String((presentation.shape ?? "").prefix(64)),
         "label": String((target.label ?? "").prefix(80)),
         "advanceOn": String((target.advanceOn ?? "manual").prefix(64)),
         "validNormalizedRect": rect != nil,
         "containsNewChatCenter": rect?.contains(oracleCenter) ?? false,
         "withinCompactControlBounds": target.width <= 0.35 && target.height <= 0.18,
-        "passesGroundingOracle": isGroundedNewChatCircle(target),
+        "passesNativeCircleGroundingOracle": isGroundedNewChatCircle(presentation),
       ])
     }
     var result: [String: Any] = [
@@ -117,13 +120,15 @@ enum GuidanceRoutingAcceptance {
       "responsePolicyAllowsNotebook": policy.allowsNotebook,
       "existingNotebookSupplied": false,
       "oracleCoordinatesSuppliedToProvider": false,
+      "presentationStylePolicy":
+        "Native circles for click-advancing controls; provider geometry is unchanged.",
       "unitCounts": counts, "emittedTargets": targetDiagnostics,
       "elapsedMS": elapsed * 1_000,
       "oneTrialNotLatencyGuarantee": true,
       "nativeAnnotationFinalModelRendered": selected != nil && error == nil,
       "animationOrPhysicalClickAcceptance": false,
       "scope":
-        "Provider policy and synthetic-image grounding plus native final-model annotation rendering. Normal capture/focus and physical click delivery are separate checks.",
+        "Provider policy and synthetic-image grounding plus production target styling and native final-model annotation rendering. Normal capture/focus and physical click delivery are separate checks.",
     ]
     if let selected {
       result["selectedTarget"] =

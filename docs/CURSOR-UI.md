@@ -100,8 +100,11 @@ the model or create a provider retry loop. The first app test run aborted in a
 sandboxed Launch Services notification registration; isolated acceptance models
 now omit those unneeded workspace observers. The next complete run passed all
 297 Swift tests, including changed pixels, source identities, delayed output,
-original candidate IDs, ownership loss and cancellation. Normal GUI acceptance
-of this later fix remains separate.
+original candidate IDs, ownership loss and cancellation. In the subsequent
+normal GUI check, the user held Control+Option over the real assistant workflow
+and confirmed that a circle appeared on the correct new-conversation control.
+That verifies the reported first-target failure is resolved for this case; it
+does not establish arbitrary-app accuracy or physical click continuation.
 
 The repeated five-case signed-bundle/live-provider run passed with one target
 and no scene in every case; complete trial times were 3.78–7.13 s. The New task

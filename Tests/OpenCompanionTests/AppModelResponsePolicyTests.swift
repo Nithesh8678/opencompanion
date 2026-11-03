@@ -172,6 +172,33 @@ import Testing
     #expect(model.messages.first?.text == "Use the new chat control.")
   }
 
+  @Test func aCandidateFromAnEarlierFrameCannotReachCursorOrOverlayPresentation() throws {
+    let model = modelWithRetainedNotebook(section: "Companion")
+    defer { model.stop() }
+    model.configureResponseOutput(guidancePolicy)
+    let frame = screenFrame()
+    model.evidence = frame
+    var cursorCalls = 0
+    model.onCursorTargetAccepted = { _, _, _ in
+      cursorCalls += 1
+      return 0
+    }
+    let staleID = ScreenGrounding.candidateID(frameID: UUID(), index: 0)
+    let unit = try decode([
+      "type": "target",
+      "target": [
+        "candidateID": staleID, "instruction": "Click New task.", "advanceOn": "click",
+      ],
+    ])
+    #expect(throws: (any Error).self) {
+      try model.accept(
+        unit, generation: model.taskGeneration, expectedEvidence: ScreenEvidenceIdentity(frame))
+    }
+    #expect(cursorCalls == 0)
+    #expect(model.messages.isEmpty)
+    #expect(model.section == "Companion")
+  }
+
   @Test func ordinaryQuestionDoesNotInheritAnOpenNotebookCapability() throws {
     let model = modelWithRetainedNotebook(section: "Notebook")
     defer { model.stop() }

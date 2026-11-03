@@ -101,9 +101,25 @@ enum GuidanceIntent {
       apps.contains(word) && index > 0
         && ["in", "on", "using", "with", "open"].contains(words[index - 1])
     }
+    // Software operations in named applications need no provider allowlist.
+    // Keep this narrower than arbitrary "how to" questions: a software object
+    // and an explicit app relation are required, and authored content/privacy
+    // exclusions still take precedence below and above.
+    let softwareObjects: Set<String> = [
+      "workspace", "workspaces", "project", "projects", "record", "records", "database",
+      "databases", "table", "tables", "column", "columns", "folder", "folders", "repository",
+      "repositories", "board", "boards", "spreadsheet", "spreadsheets", "note", "notes",
+    ]
+    let genericAppContext =
+      contains(softwareObjects)
+      && words.enumerated().contains { index, word in
+        ["in", "on", "using"].contains(word) && index + 1 < words.count
+          && !["a", "an", "the", "my", "our", "your", "this", "that", "life", "general"]
+            .contains(words[index + 1])
+      }
     let chatGPTContext =
       chatGPT && (chatInterface || explicitUIContext || contains(["open", "launch"]))
-    let appContext = knownAppContext || chatGPTContext
+    let appContext = knownAppContext || chatGPTContext || genericAppContext
     let chatActions: Set<String> = ["start", "begin", "make"]
     let actionRequested =
       contains(actions)

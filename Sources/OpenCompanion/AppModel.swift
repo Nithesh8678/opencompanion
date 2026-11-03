@@ -619,7 +619,7 @@ struct ResponseInputPlan: Sendable {
       id: request.id, prompt: request.prompt, step: request.step + 1, expires: request.expires,
       speakAloud: request.speakAloud)
     let instruction = """
-      The user clicked the highlighted control. Inspect the new screen capture to verify what changed; do not assume the click succeeded. Continue the original task with the next grounded target and a short instruction. If the task is complete, say so without another target. If progress is unclear, explain the ambiguity rather than invent a control.
+      The user clicked the highlighted control. Inspect the new screen capture to verify what changed; do not assume the click succeeded. If that revealed a menu or sidebar, guide its next distinct nested control rather than repeating the opener. Continue the original functional goal using actual current app labels, even if the user named the app colloquially. Copy candidate IDs only from this fresh frame. If the task is complete, say so without another target. If progress is unclear, explain the ambiguity rather than invent a control.
       Original task: \(request.prompt)
       Guidance step: \(next.step)
       """
@@ -695,12 +695,14 @@ struct ResponseInputPlan: Sendable {
       guard let payload = unit.target, payload.instruction.utf8.count <= 32_000,
         (payload.label?.prefix(81).count ?? 0) <= 80
       else { throw ProviderError.message("Invalid or oversized screen guidance target.") }
-      let target = GuidanceTargetPresentation.styled(payload)
       guard let evidence, let expectedEvidence, expectedEvidence.matches(evidence)
       else {
         throw ProviderError.message(
           "The selected screen evidence changed. Capture again before requesting guidance.")
       }
+      let resolved = try ScreenGrounding.resolve(
+        payload, candidates: evidence.groundingCandidates, frameID: evidence.frameID)
+      let target = GuidanceTargetPresentation.styled(resolved)
       let cursorPreferences = CursorCompanionPreferences.load()
       if let request = activeGuidanceRequest {
         guard cursorPreferences.screenGuidanceEnabled,

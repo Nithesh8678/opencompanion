@@ -19,6 +19,10 @@ struct GuidanceIntentTests {
     "Please click that button",
     "SHOW ME WHERE TO CLICK!",
     "Show me how to open this dropdown",
+    "How can I create a project in Obsidian?",
+    "How do I add a record in Baserow?",
+    "Guide me to create a board in Linear",
+    "Can you create a new task in this app?",
   ])
   func recognizesRequestsForOnScreenHelp(_ text: String) {
     #expect(GuidanceIntent.requestsScreenGuidance(text: text))
@@ -94,6 +98,8 @@ struct GuidanceIntentTests {
     "",
     "   \n\t",
     "இந்த மோட்டார் எப்படி வேலை செய்கிறது?",
+    "How do I create a folder in my essay?",
+    "How do I create a table in Python? Write code.",
   ])
   func conceptualQuestionsAndQuotedPhrasesDoNotRequestCapture(_ text: String) {
     #expect(!GuidanceIntent.requestsScreenGuidance(text: text))

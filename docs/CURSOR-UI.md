@@ -12,8 +12,41 @@ A later standalone GUI guidance attempt exposed a stale Screen Recording grant:
 the old System Settings entry appeared enabled, but the running app's permission
 preflight failed. With explicit user approval, that one entry was removed and
 the exact canonical app was re-added and enabled. The updated GUI app has been
-launched; the user's physical guidance retry remains pending. The successful
-CLI-context capture is not a substitute for that verification.
+launched. The user subsequently reported reaching Thinking and receiving a
+shortcut-only clarification, rather than a circle, while this Codex window was
+visible. This establishes progress beyond the earlier capture failure, not
+successful guidance. The successful CLI-context capture is not a substitute for
+normal GUI verification.
+
+## Current-frame control grounding
+
+The guide now matches the requested functional goal to actual foreground labels:
+for example, an assistant's visible **New task** may satisfy a request for a new
+chat. A different product name alone should not cause a guessed shortcut. A
+collapsed sidebar is a separate first step; its child must be selected from a
+fresh frame after the user reveals it.
+
+Capture retains exact encoded image dimensions and a bounded table of at most
+120 frame-scoped observations in 24,000 UTF-8 bytes. Focused-window accessibility
+labels fall through empty titles to descriptions/help. The reader omits values,
+secure subtrees, hidden elements and out-of-capture bounds, propagates disabled
+ancestor state, and runs away from the render/audio thread. Selected window or
+region captures continue to omit application accessibility rather than expanding
+their scope. OCR boxes retain text geometry and remain nonactionable.
+
+The model may select an exact enabled actionable AX `candidateID`; native code
+resolves its retained bounds before cursor movement, drawing and hit testing.
+Unknown, duplicate, stale-frame and disabled IDs are rejected. OCR IDs cannot
+authorize click-advancing marks. Pixel-based bounds remain available for custom
+controls and missing accessibility. Existing frame, foreground, age, generation
+and scope guards still apply. No desktop input is injected by this feature.
+
+The opt-in routing acceptance uses authored compact icon controls, an edit-pencil
+distractor, a disabled duplicate, collapsed/revealed navigation, a second notes
+task and a pixel-only case. Candidate cases disclose native geometry as evidence;
+the answer key is withheld. Authored transitions are not observed user clicks.
+These checks cannot establish arbitrary-app accuracy, the actual Codex hotkey
+path, or exact reference behavior.
 
 ## Reference and implementation
 

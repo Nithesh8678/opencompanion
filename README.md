@@ -24,6 +24,8 @@ Hover over the camera notch for a quick peek; move away to tuck it without losin
 
 Global voice observation needs macOS Input Monitoring or Accessibility access. Voice input also needs Microphone and Speech Recognition permission. Settings reports the installed monitor status and provides repair controls. Voice hotkey turns do not automatically capture the screen or consume selected files/screens; ordinary conversation history and the notebook remain available.
 
+If the shortcut is unavailable, choose **Set up voice** in the peek, then **Allow global voice shortcut…** in Settings. Enable the installed OpenCompanion in macOS Input Monitoring and quit/reopen it. Allow the first Microphone/Speech prompts, release the keys to interact with the prompt, then start a fresh hold.
+
 Diagrams open in a separate notebook panel while conversation stays in the notch. Streaming updates retain the same canvas and leave keyboard focus where you are working.
 
 Settings includes configurable global shortcuts and an optional display-capture shortcut. Registration conflicts are reported; the last working shortcut stays available for that session.

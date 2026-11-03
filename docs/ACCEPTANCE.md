@@ -25,6 +25,8 @@ No tokens were read/copied; external capabilities were disabled for the ephemera
 
 ## Native application evidence
 
+The app-bundle Keychain acceptance probe saved/read/deleted a unique temporary public fixture successfully. No real credential was read or copied.
+
 The real signed-to-run-locally bundle launched with **only its collapsed notch panel**, with no normal workspace window. Accessibility inspection found its Expand control; clicking expanded it and focused its message field. Native safe geometry reported display1512×982, safe top32pt, collapsed panel96×48pt.
 
 A live question submitted through the expanded notch UI completed with a provider answer, returning the panel to Ready. This verifies the actual UI→provider→UI path.
@@ -32,6 +34,8 @@ A live question submitted through the expanded notch UI completed with a provide
 The earlier utility-window test opened/paused/saved the motor notebook and verified its record in Library. Own-window PNG renders of the notch and notebooks were inspected, exposing/fixing the initial dark-appearance contrast issue. These are local view renders, not displayed-FPS or acoustic measurements.
 
 ## Remaining installed/release acceptance
+
+The launched app reports Screen Recording permission absent and Accessibility unavailable. Those OS capabilities require user enablement before installed screen/desktop acceptance can run.
 
 Microphone capture and acoustic output, route changes, screenshot own-window exclusion, denied/revoked permissions, physical multi-display/fullscreen/Spaces/StageManager, unfamiliar-app three-step tutorials, installed browser pairing, live MCP account, live selfhost upstream, minimum OS/Intel, long sessions and100+ cold/warm latency trials remain unverified. Distribution uses an ad-hoc signature; DeveloperID/notarization/stapling/signed updates remain blocked on release identity and credentials.
 

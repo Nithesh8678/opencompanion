@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "OpenCompanion Browser Bridge",
+  "description": "Connect only the tab you choose to your local OpenCompanion app.",
+  "version": "0.1.0",
+  "minimum_chrome_version": "116",
+  "permissions": ["activeTab", "scripting", "nativeMessaging", "storage"],
+  "background": {"service_worker": "service-worker.js", "type": "module"},
+  "action": {"default_popup": "popup.html", "default_title": "OpenCompanion"}
+}

@@ -13,3 +13,5 @@ __pycache__/
 runtime/
 *.sqlite*
 *.trace.jsonl
+
+.playwright-cli/

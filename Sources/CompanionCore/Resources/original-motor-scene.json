@@ -1,0 +1,1754 @@
+{
+  "specVersion": "open-explainer.scene/1",
+  "provenance": "Original proposed reconstruction fixture; not recovered HeyClicky code or protocol.",
+  "id": "dc-motor-teaching-scene",
+  "mode": "independent-explanation",
+  "canvas": {
+    "viewBox": [
+      0,
+      0,
+      1000,
+      680
+    ],
+    "xAxis": "right",
+    "yAxis": "down",
+    "units": "sceneUnits"
+  },
+  "window": {
+    "title": "Motor notebook",
+    "minSizePoints": [
+      640,
+      460
+    ],
+    "resizable": true,
+    "draggable": true,
+    "closeable": true,
+    "anchors": "independentOfCapturedScreen"
+  },
+  "renderSemantics": {
+    "hierarchy": "Child coordinates are local to parent; node array order sets sibling draw order.",
+    "transformOrder": "parent * translation * rotation * scale",
+    "groupTransformOrigin": [
+      0,
+      0
+    ],
+    "primitiveScaleOrigin": "topLeftOfOwnUntransformedBounds",
+    "bindingOverrides": "Bindings replace named geometry/transform/style properties; child opacity multiplies parent opacity.",
+    "pathSubpaths": "Separate open polylines; never join across subpaths.",
+    "arrows": "Arrowhead follows the last nonzero segment tangent after point bindings.",
+    "transparentFill": "No fill",
+    "expressions": {
+      "operators": [
+        "add",
+        "mul",
+        "sin",
+        "cos",
+        "abs",
+        "lt",
+        "gt",
+        "select"
+      ],
+      "references": "Parameters, state values and named acyclic expressions only.",
+      "invalidResult": "Reject nonfinite, unknown, cyclic or ill-typed expression; retain last valid scene."
+    }
+  },
+  "parameters": {
+    "angularSpeed": 0.7853981633974483
+  },
+  "state": {
+    "theta": {
+      "initial": 0,
+      "unit": "radians",
+      "integrator": {
+        "derivative": {
+          "ref": "angularSpeed"
+        },
+        "clock": "monotonicActiveAnimationSeconds",
+        "startsWith": "turning",
+        "pausePreservesValue": true,
+        "parameterChangeRebasesEpoch": true
+      }
+    }
+  },
+  "expressions": {
+    "atGap": {
+      "op": "lt",
+      "args": [
+        {
+          "op": "abs",
+          "args": [
+            {
+              "op": "cos",
+              "args": [
+                {
+                  "ref": "theta"
+                }
+              ]
+            }
+          ]
+        },
+        0.05233595624294383
+      ]
+    },
+    "currentA": {
+      "op": "select",
+      "args": [
+        {
+          "ref": "atGap"
+        },
+        0,
+        {
+          "op": "select",
+          "args": [
+            {
+              "op": "gt",
+              "args": [
+                {
+                  "op": "cos",
+                  "args": [
+                    {
+                      "ref": "theta"
+                    }
+                  ]
+                },
+                0
+              ]
+            },
+            1,
+            -1
+          ]
+        }
+      ]
+    },
+    "torqueMagnitude": {
+      "op": "mul",
+      "args": [
+        {
+          "op": "abs",
+          "args": [
+            {
+              "op": "cos",
+              "args": [
+                {
+                  "ref": "theta"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "op": "abs",
+          "args": [
+            {
+              "ref": "currentA"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "nodes": [
+    {
+      "id": "document",
+      "kind": "group",
+      "parent": null,
+      "geometry": {},
+      "style": {}
+    },
+    {
+      "id": "paper",
+      "kind": "rect",
+      "parent": "document",
+      "geometry": {
+        "x": 0,
+        "y": 0,
+        "width": 1000,
+        "height": 680,
+        "radius": 14
+      },
+      "style": {
+        "fill": "#F9F7F0",
+        "stroke": "#D5D0C6",
+        "strokeWidth": 1
+      }
+    },
+    {
+      "id": "title",
+      "kind": "text",
+      "parent": "document",
+      "geometry": {
+        "x": 36,
+        "y": 45,
+        "text": "How a DC motor turns",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 29,
+        "fill": "#252B36"
+      }
+    },
+    {
+      "id": "subtitle",
+      "kind": "text",
+      "parent": "document",
+      "geometry": {
+        "x": 36,
+        "y": 77,
+        "text": "A simplified brushed motor: electricity produces rotation",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 18,
+        "fill": "#657080"
+      }
+    },
+    {
+      "id": "headerRule",
+      "kind": "polyline",
+      "parent": "document",
+      "geometry": {
+        "points": [
+          [
+            36,
+            96
+          ],
+          [
+            964,
+            96
+          ]
+        ]
+      },
+      "style": {
+        "stroke": "#DDD8CD",
+        "strokeWidth": 1
+      }
+    },
+    {
+      "id": "fieldPanel",
+      "kind": "group",
+      "parent": "document",
+      "geometry": {},
+      "style": {
+        "opacity": 0
+      }
+    },
+    {
+      "id": "mainCaption",
+      "kind": "text",
+      "parent": "fieldPanel",
+      "geometry": {
+        "x": 70,
+        "y": 142,
+        "text": "One coil’s two long sides, seen end-on",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 19,
+        "fill": "#252B36"
+      }
+    },
+    {
+      "id": "north",
+      "kind": "rect",
+      "parent": "fieldPanel",
+      "geometry": {
+        "x": 120,
+        "y": 260,
+        "width": 72,
+        "height": 180,
+        "radius": 8
+      },
+      "style": {
+        "fill": "#C94343",
+        "stroke": "#C94343",
+        "strokeWidth": 1
+      }
+    },
+    {
+      "id": "south",
+      "kind": "rect",
+      "parent": "fieldPanel",
+      "geometry": {
+        "x": 518,
+        "y": 260,
+        "width": 72,
+        "height": 180,
+        "radius": 8
+      },
+      "style": {
+        "fill": "#356DB5",
+        "stroke": "#356DB5",
+        "strokeWidth": 1
+      }
+    },
+    {
+      "id": "northText",
+      "kind": "text",
+      "parent": "fieldPanel",
+      "geometry": {
+        "x": 144,
+        "y": 357,
+        "text": "N",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 30,
+        "fill": "#FFFFFF"
+      }
+    },
+    {
+      "id": "southText",
+      "kind": "text",
+      "parent": "fieldPanel",
+      "geometry": {
+        "x": 542,
+        "y": 357,
+        "text": "S",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 30,
+        "fill": "#FFFFFF"
+      }
+    },
+    {
+      "id": "fieldArrow0",
+      "kind": "arrow",
+      "parent": "fieldPanel",
+      "geometry": {
+        "points": [
+          [
+            210,
+            235
+          ],
+          [
+            500,
+            235
+          ]
+        ],
+        "headLength": 12
+      },
+      "style": {
+        "stroke": "#326F9A",
+        "strokeWidth": 2.4
+      }
+    },
+    {
+      "id": "fieldArrow1",
+      "kind": "arrow",
+      "parent": "fieldPanel",
+      "geometry": {
+        "points": [
+          [
+            210,
+            465
+          ],
+          [
+            500,
+            465
+          ]
+        ],
+        "headLength": 12
+      },
+      "style": {
+        "stroke": "#326F9A",
+        "strokeWidth": 2.4
+      }
+    },
+    {
+      "id": "fieldLabel",
+      "kind": "text",
+      "parent": "fieldPanel",
+      "geometry": {
+        "x": 255,
+        "y": 211,
+        "text": "Magnetic field →",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 17,
+        "fill": "#326F9A"
+      }
+    },
+    {
+      "id": "rotorBoundary",
+      "kind": "ellipse",
+      "parent": "fieldPanel",
+      "geometry": {
+        "cx": 355,
+        "cy": 350,
+        "rx": 105,
+        "ry": 105
+      },
+      "style": {
+        "fill": "transparent",
+        "stroke": "#8D97A5",
+        "strokeWidth": 2
+      }
+    },
+    {
+      "id": "rotorReference",
+      "kind": "group",
+      "parent": "fieldPanel",
+      "geometry": {
+        "translate": [
+          355,
+          350
+        ]
+      },
+      "style": {},
+      "bindings": {
+        "rotateDegrees": {
+          "op": "mul",
+          "args": [
+            {
+              "ref": "theta"
+            },
+            -57.29577951308232
+          ]
+        }
+      }
+    },
+    {
+      "id": "rotorDiameter",
+      "kind": "polyline",
+      "parent": "rotorReference",
+      "geometry": {
+        "points": [
+          [
+            -80,
+            0
+          ],
+          [
+            80,
+            0
+          ]
+        ]
+      },
+      "style": {
+        "stroke": "#9DA5AF",
+        "strokeWidth": 1.5,
+        "dash": [
+          5,
+          5
+        ]
+      }
+    },
+    {
+      "id": "axle",
+      "kind": "ellipse",
+      "parent": "fieldPanel",
+      "geometry": {
+        "cx": 355,
+        "cy": 350,
+        "rx": 7,
+        "ry": 7
+      },
+      "style": {
+        "fill": "#252B36",
+        "stroke": "#252B36",
+        "strokeWidth": 1
+      }
+    },
+    {
+      "id": "forcesPanel",
+      "kind": "group",
+      "parent": "document",
+      "geometry": {},
+      "style": {
+        "opacity": 0
+      }
+    },
+    {
+      "id": "conductorA",
+      "kind": "group",
+      "parent": "forcesPanel",
+      "geometry": {},
+      "style": {},
+      "bindings": {
+        "translate.x": {
+          "op": "add",
+          "args": [
+            355,
+            {
+              "op": "mul",
+              "args": [
+                80,
+                1,
+                {
+                  "op": "cos",
+                  "args": [
+                    {
+                      "ref": "theta"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "translate.y": {
+          "op": "add",
+          "args": [
+            350,
+            {
+              "op": "mul",
+              "args": [
+                -80,
+                1,
+                {
+                  "op": "sin",
+                  "args": [
+                    {
+                      "ref": "theta"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "conductorOutlineA",
+      "kind": "ellipse",
+      "parent": "conductorA",
+      "geometry": {
+        "cx": 0,
+        "cy": 0,
+        "rx": 11,
+        "ry": 11
+      },
+      "style": {
+        "fill": "#F9F7F0",
+        "stroke": "#BA641E",
+        "strokeWidth": 3
+      }
+    },
+    {
+      "id": "outDotA",
+      "kind": "ellipse",
+      "parent": "conductorA",
+      "geometry": {
+        "cx": 0,
+        "cy": 0,
+        "rx": 3.2,
+        "ry": 3.2
+      },
+      "style": {
+        "fill": "#BA641E"
+      },
+      "bindings": {
+        "opacity": {
+          "op": "select",
+          "args": [
+            {
+              "op": "gt",
+              "args": [
+                {
+                  "ref": "currentA"
+                },
+                0
+              ]
+            },
+            1,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "id": "inCrossA",
+      "kind": "path",
+      "parent": "conductorA",
+      "geometry": {
+        "subpaths": [
+          [
+            [
+              -4,
+              -4
+            ],
+            [
+              4,
+              4
+            ]
+          ],
+          [
+            [
+              -4,
+              4
+            ],
+            [
+              4,
+              -4
+            ]
+          ]
+        ]
+      },
+      "style": {
+        "stroke": "#BA641E",
+        "strokeWidth": 2.2
+      },
+      "bindings": {
+        "opacity": {
+          "op": "select",
+          "args": [
+            {
+              "op": "lt",
+              "args": [
+                {
+                  "ref": "currentA"
+                },
+                0
+              ]
+            },
+            1,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "id": "conductorNameA",
+      "kind": "text",
+      "parent": "conductorA",
+      "geometry": {
+        "x": 16,
+        "y": -10,
+        "text": "A",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 15,
+        "fill": "#657080"
+      }
+    },
+    {
+      "id": "forceA",
+      "kind": "arrow",
+      "parent": "conductorA",
+      "geometry": {
+        "points": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            -56
+          ]
+        ],
+        "headLength": 10
+      },
+      "style": {
+        "stroke": "#147966",
+        "strokeWidth": 3
+      },
+      "bindings": {
+        "points.1.y": {
+          "op": "mul",
+          "args": [
+            -56,
+            {
+              "ref": "currentA"
+            }
+          ]
+        },
+        "opacity": {
+          "op": "abs",
+          "args": [
+            {
+              "ref": "currentA"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "conductorB",
+      "kind": "group",
+      "parent": "forcesPanel",
+      "geometry": {},
+      "style": {},
+      "bindings": {
+        "translate.x": {
+          "op": "add",
+          "args": [
+            355,
+            {
+              "op": "mul",
+              "args": [
+                80,
+                -1,
+                {
+                  "op": "cos",
+                  "args": [
+                    {
+                      "ref": "theta"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "translate.y": {
+          "op": "add",
+          "args": [
+            350,
+            {
+              "op": "mul",
+              "args": [
+                -80,
+                -1,
+                {
+                  "op": "sin",
+                  "args": [
+                    {
+                      "ref": "theta"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "conductorOutlineB",
+      "kind": "ellipse",
+      "parent": "conductorB",
+      "geometry": {
+        "cx": 0,
+        "cy": 0,
+        "rx": 11,
+        "ry": 11
+      },
+      "style": {
+        "fill": "#F9F7F0",
+        "stroke": "#BA641E",
+        "strokeWidth": 3
+      }
+    },
+    {
+      "id": "outDotB",
+      "kind": "ellipse",
+      "parent": "conductorB",
+      "geometry": {
+        "cx": 0,
+        "cy": 0,
+        "rx": 3.2,
+        "ry": 3.2
+      },
+      "style": {
+        "fill": "#BA641E"
+      },
+      "bindings": {
+        "opacity": {
+          "op": "select",
+          "args": [
+            {
+              "op": "gt",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "ref": "currentA"
+                    },
+                    -1
+                  ]
+                },
+                0
+              ]
+            },
+            1,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "id": "inCrossB",
+      "kind": "path",
+      "parent": "conductorB",
+      "geometry": {
+        "subpaths": [
+          [
+            [
+              -4,
+              -4
+            ],
+            [
+              4,
+              4
+            ]
+          ],
+          [
+            [
+              -4,
+              4
+            ],
+            [
+              4,
+              -4
+            ]
+          ]
+        ]
+      },
+      "style": {
+        "stroke": "#BA641E",
+        "strokeWidth": 2.2
+      },
+      "bindings": {
+        "opacity": {
+          "op": "select",
+          "args": [
+            {
+              "op": "lt",
+              "args": [
+                {
+                  "op": "mul",
+                  "args": [
+                    {
+                      "ref": "currentA"
+                    },
+                    -1
+                  ]
+                },
+                0
+              ]
+            },
+            1,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "id": "conductorNameB",
+      "kind": "text",
+      "parent": "conductorB",
+      "geometry": {
+        "x": 16,
+        "y": -10,
+        "text": "B",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 15,
+        "fill": "#657080"
+      }
+    },
+    {
+      "id": "forceB",
+      "kind": "arrow",
+      "parent": "conductorB",
+      "geometry": {
+        "points": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            -56
+          ]
+        ],
+        "headLength": 10
+      },
+      "style": {
+        "stroke": "#147966",
+        "strokeWidth": 3
+      },
+      "bindings": {
+        "points.1.y": {
+          "op": "mul",
+          "args": [
+            -56,
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "ref": "currentA"
+                },
+                -1
+              ]
+            }
+          ]
+        },
+        "opacity": {
+          "op": "abs",
+          "args": [
+            {
+              "op": "mul",
+              "args": [
+                {
+                  "ref": "currentA"
+                },
+                -1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "rotationArrow",
+      "kind": "arrow",
+      "parent": "forcesPanel",
+      "geometry": {
+        "points": [
+          [
+            449.04520189781084,
+            444.0452018978108
+          ],
+          [
+            456.1339934248041,
+            436.37659042791444
+          ],
+          [
+            462.59926025186803,
+            428.17543855489896
+          ],
+          [
+            468.4011418590943,
+            419.4923091072212
+          ],
+          [
+            473.5038677170529,
+            410.38073646535975
+          ],
+          [
+            477.87597782400115,
+            400.89689650455693
+          ],
+          [
+            481.4905166672554,
+            391.09926025186803
+          ],
+          [
+            484.325199412891,
+            381.0482333928354
+          ],
+          [
+            486.36254929915333,
+            370.80578385035074
+          ],
+          [
+            487.59000538650605,
+            360.4350597318034
+          ],
+          [
+            488,
+            350
+          ],
+          [
+            487.59000538650605,
+            339.56494026819666
+          ],
+          [
+            486.36254929915333,
+            329.19421614964926
+          ],
+          [
+            484.325199412891,
+            318.9517666071646
+          ],
+          [
+            481.4905166672554,
+            308.90073974813197
+          ],
+          [
+            477.87597782400115,
+            299.10310349544307
+          ],
+          [
+            473.5038677170529,
+            289.61926353464025
+          ],
+          [
+            468.4011418590943,
+            280.5076908927788
+          ],
+          [
+            462.59926025186803,
+            271.82456144510104
+          ],
+          [
+            456.1339934248041,
+            263.62340957208556
+          ],
+          [
+            449.04520189781084,
+            255.9547981021892
+          ]
+        ],
+        "headLength": 12
+      },
+      "style": {
+        "stroke": "#147966",
+        "strokeWidth": 2.4
+      }
+    },
+    {
+      "id": "legend",
+      "kind": "text",
+      "parent": "forcesPanel",
+      "geometry": {
+        "x": 103,
+        "y": 514,
+        "text": "• current toward you     × current away from you",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 17,
+        "fill": "#BA641E"
+      }
+    },
+    {
+      "id": "forceLegend",
+      "kind": "text",
+      "parent": "forcesPanel",
+      "geometry": {
+        "x": 103,
+        "y": 543,
+        "text": "Green arrows show magnetic forces on the conductors.",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 16,
+        "fill": "#147966"
+      }
+    },
+    {
+      "id": "referenceLegend",
+      "kind": "text",
+      "parent": "fieldPanel",
+      "geometry": {
+        "x": 103,
+        "y": 570,
+        "text": "Dashed diameter is a rotor reference, not a wire.",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 14,
+        "fill": "#657080"
+      }
+    },
+    {
+      "id": "notes",
+      "kind": "group",
+      "parent": "document",
+      "geometry": {},
+      "style": {
+        "opacity": 0
+      }
+    },
+    {
+      "id": "note1",
+      "kind": "text",
+      "parent": "notes",
+      "geometry": {
+        "x": 670,
+        "y": 163,
+        "text": "1. Current enters the coil.",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 19,
+        "fill": "#252B36"
+      }
+    },
+    {
+      "id": "note2",
+      "kind": "text",
+      "parent": "notes",
+      "geometry": {
+        "x": 670,
+        "y": 198,
+        "text": "2. Opposite forces turn it.",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 19,
+        "fill": "#252B36"
+      }
+    },
+    {
+      "id": "note3",
+      "kind": "text",
+      "parent": "notes",
+      "geometry": {
+        "x": 670,
+        "y": 233,
+        "text": "3. Contacts swap each half turn.",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 19,
+        "fill": "#252B36"
+      }
+    },
+    {
+      "id": "commutatorPanel",
+      "kind": "group",
+      "parent": "document",
+      "geometry": {},
+      "style": {
+        "opacity": 0
+      }
+    },
+    {
+      "id": "commutatorTitle",
+      "kind": "text",
+      "parent": "commutatorPanel",
+      "geometry": {
+        "x": 676,
+        "y": 295,
+        "text": "Split-ring commutator",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 19,
+        "fill": "#252B36"
+      }
+    },
+    {
+      "id": "splitRing",
+      "kind": "group",
+      "parent": "commutatorPanel",
+      "geometry": {
+        "translate": [
+          795,
+          370
+        ]
+      },
+      "style": {},
+      "bindings": {
+        "rotateDegrees": {
+          "op": "mul",
+          "args": [
+            {
+              "ref": "theta"
+            },
+            -57.29577951308232
+          ]
+        }
+      }
+    },
+    {
+      "id": "segmentA",
+      "kind": "polyline",
+      "parent": "splitRing",
+      "geometry": {
+        "points": [
+          [
+            2.1457742059607026,
+            40.94381092493753
+          ],
+          [
+            6.015949452669841,
+            40.556236908556016
+          ],
+          [
+            9.831983050855682,
+            39.80366954550405
+          ],
+          [
+            13.559531901153543,
+            38.69288170479939
+          ],
+          [
+            17.165049239034552,
+            37.23387012682833
+          ],
+          [
+            20.61608654511073,
+            35.43976545583371
+          ],
+          [
+            23.881585571579894,
+            33.32671406825622
+          ],
+          [
+            26.9321578566647,
+            30.91373276043665
+          ],
+          [
+            29.740349211503798,
+            28.22253760344391
+          ],
+          [
+            32.280886799196544,
+            25.277348505281534
+          ],
+          [
+            34.53090658236775,
+            22.104671239351006
+          ],
+          [
+            36.4701590922961,
+            18.733058900847247
+          ],
+          [
+            38.0811916677489,
+            15.192854937903283
+          ],
+          [
+            39.349505523431155,
+            11.515920070122977
+          ],
+          [
+            40.26368623448246,
+            7.735345552148763
+          ],
+          [
+            40.81550646270227,
+            3.8851553628020596
+          ],
+          [
+            41,
+            0
+          ],
+          [
+            40.81550646270227,
+            -3.8851553628020596
+          ],
+          [
+            40.26368623448246,
+            -7.735345552148763
+          ],
+          [
+            39.349505523431155,
+            -11.515920070122977
+          ],
+          [
+            38.0811916677489,
+            -15.192854937903283
+          ],
+          [
+            36.4701590922961,
+            -18.733058900847247
+          ],
+          [
+            34.530906582367756,
+            -22.104671239351006
+          ],
+          [
+            32.280886799196544,
+            -25.277348505281534
+          ],
+          [
+            29.740349211503787,
+            -28.222537603443914
+          ],
+          [
+            26.93215785666469,
+            -30.913732760436652
+          ],
+          [
+            23.881585571579897,
+            -33.32671406825622
+          ],
+          [
+            20.61608654511073,
+            -35.43976545583371
+          ],
+          [
+            17.165049239034552,
+            -37.23387012682833
+          ],
+          [
+            13.559531901153534,
+            -38.6928817047994
+          ],
+          [
+            9.831983050855689,
+            -39.80366954550405
+          ],
+          [
+            6.015949452669841,
+            -40.556236908556016
+          ],
+          [
+            2.1457742059607026,
+            -40.94381092493753
+          ]
+        ]
+      },
+      "style": {
+        "stroke": "#BA641E",
+        "strokeWidth": 10
+      }
+    },
+    {
+      "id": "segmentB",
+      "kind": "polyline",
+      "parent": "splitRing",
+      "geometry": {
+        "points": [
+          [
+            -2.1457742059606977,
+            -40.94381092493753
+          ],
+          [
+            -6.015949452669827,
+            -40.55623690855602
+          ],
+          [
+            -9.831983050855676,
+            -39.80366954550405
+          ],
+          [
+            -13.55953190115354,
+            -38.6928817047994
+          ],
+          [
+            -17.16504923903454,
+            -37.233870126828336
+          ],
+          [
+            -20.616086545110715,
+            -35.439765455833715
+          ],
+          [
+            -23.881585571579883,
+            -33.32671406825622
+          ],
+          [
+            -26.93215785666469,
+            -30.913732760436652
+          ],
+          [
+            -29.740349211503794,
+            -28.22253760344391
+          ],
+          [
+            -32.28088679919653,
+            -25.277348505281545
+          ],
+          [
+            -34.53090658236774,
+            -22.104671239351017
+          ],
+          [
+            -36.470159092296086,
+            -18.73305890084727
+          ],
+          [
+            -38.08119166774888,
+            -15.192854937903304
+          ],
+          [
+            -39.34950552343115,
+            -11.515920070122991
+          ],
+          [
+            -40.263686234482456,
+            -7.735345552148777
+          ],
+          [
+            -40.81550646270227,
+            -3.8851553628020645
+          ],
+          [
+            -41,
+            -5.021051876504148e-15
+          ],
+          [
+            -40.81550646270227,
+            3.8851553628020543
+          ],
+          [
+            -40.26368623448246,
+            7.7353455521487495
+          ],
+          [
+            -39.34950552343116,
+            11.515920070122947
+          ],
+          [
+            -38.081191667748904,
+            15.19285493790326
+          ],
+          [
+            -36.47015909229611,
+            18.733058900847226
+          ],
+          [
+            -34.530906582367756,
+            22.104671239350992
+          ],
+          [
+            -32.28088679919655,
+            25.27734850528152
+          ],
+          [
+            -29.7403492115038,
+            28.222537603443907
+          ],
+          [
+            -26.932157856664702,
+            30.91373276043664
+          ],
+          [
+            -23.881585571579894,
+            33.32671406825622
+          ],
+          [
+            -20.616086545110758,
+            35.439765455833694
+          ],
+          [
+            -17.165049239034584,
+            37.233870126828315
+          ],
+          [
+            -13.559531901153564,
+            38.69288170479938
+          ],
+          [
+            -9.831983050855703,
+            39.80366954550404
+          ],
+          [
+            -6.0159494526698545,
+            40.556236908556016
+          ],
+          [
+            -2.1457742059607168,
+            40.94381092493753
+          ]
+        ]
+      },
+      "style": {
+        "stroke": "#8A653E",
+        "strokeWidth": 10
+      }
+    },
+    {
+      "id": "brushLeft",
+      "kind": "rect",
+      "parent": "commutatorPanel",
+      "geometry": {
+        "x": 730,
+        "y": 360,
+        "width": 21,
+        "height": 20,
+        "radius": 2
+      },
+      "style": {
+        "fill": "#596471"
+      }
+    },
+    {
+      "id": "brushRight",
+      "kind": "rect",
+      "parent": "commutatorPanel",
+      "geometry": {
+        "x": 839,
+        "y": 360,
+        "width": 21,
+        "height": 20,
+        "radius": 2
+      },
+      "style": {
+        "fill": "#596471"
+      }
+    },
+    {
+      "id": "minusBrush",
+      "kind": "text",
+      "parent": "commutatorPanel",
+      "geometry": {
+        "x": 714,
+        "y": 375,
+        "text": "−",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 22,
+        "fill": "#252B36"
+      }
+    },
+    {
+      "id": "plusBrush",
+      "kind": "text",
+      "parent": "commutatorPanel",
+      "geometry": {
+        "x": 865,
+        "y": 375,
+        "text": "+",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 22,
+        "fill": "#252B36"
+      }
+    },
+    {
+      "id": "brushLabel",
+      "kind": "text",
+      "parent": "commutatorPanel",
+      "geometry": {
+        "x": 709,
+        "y": 438,
+        "text": "Stationary brushes; rotating contacts",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 14,
+        "fill": "#657080"
+      }
+    },
+    {
+      "id": "commutationLabel",
+      "kind": "text",
+      "parent": "commutatorPanel",
+      "geometry": {
+        "x": 670,
+        "y": 479,
+        "text": "Current reverses near each dead point.",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 16,
+        "fill": "#252B36"
+      }
+    },
+    {
+      "id": "inertiaLabel",
+      "kind": "text",
+      "parent": "commutatorPanel",
+      "geometry": {
+        "x": 670,
+        "y": 507,
+        "text": "Momentum carries the rotor through the gap.",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 16,
+        "fill": "#657080"
+      }
+    },
+    {
+      "id": "torqueLabel",
+      "kind": "text",
+      "parent": "commutatorPanel",
+      "geometry": {
+        "x": 670,
+        "y": 553,
+        "text": "Relative turning effect",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 15,
+        "fill": "#657080"
+      }
+    },
+    {
+      "id": "torqueTrack",
+      "kind": "rect",
+      "parent": "commutatorPanel",
+      "geometry": {
+        "x": 670,
+        "y": 568,
+        "width": 265,
+        "height": 8,
+        "radius": 4
+      },
+      "style": {
+        "fill": "#DEDCD3"
+      }
+    },
+    {
+      "id": "torqueBar",
+      "kind": "rect",
+      "parent": "commutatorPanel",
+      "geometry": {
+        "x": 670,
+        "y": 568,
+        "width": 265,
+        "height": 8,
+        "radius": 4
+      },
+      "style": {
+        "fill": "#147966"
+      },
+      "bindings": {
+        "scaleX": {
+          "ref": "torqueMagnitude"
+        }
+      }
+    },
+    {
+      "id": "footer",
+      "kind": "text",
+      "parent": "document",
+      "geometry": {
+        "x": 36,
+        "y": 636,
+        "text": "Teaching schematic: one idealized coil. Playback is kinematic, not a motor-performance simulation.",
+        "maxWidth": 900
+      },
+      "style": {
+        "font": "system-rounded",
+        "size": 14,
+        "fill": "#657080"
+      }
+    }
+  ],
+  "beats": [
+    {
+      "id": "field",
+      "narration": "A simple DC motor has a coil between magnetic poles.",
+      "reveal": [
+        {
+          "node": "fieldPanel",
+          "kind": "opacity",
+          "from": 0,
+          "to": 1,
+          "durationMs": 260
+        },
+        {
+          "node": "notes",
+          "kind": "opacity",
+          "from": 0,
+          "to": 1,
+          "durationMs": 220
+        }
+      ],
+      "visualTrigger": "firstValidatedVisualBatch",
+      "audioMayLagVisual": true
+    },
+    {
+      "id": "forces",
+      "narration": "Current on the two sides feels opposite forces. Together, they turn the rotor.",
+      "reveal": [
+        {
+          "node": "forcesPanel",
+          "kind": "opacity",
+          "from": 0,
+          "to": 1,
+          "durationMs": 220
+        }
+      ],
+      "visualTrigger": "audioStartOrTextOnlyAdvance"
+    },
+    {
+      "id": "turning",
+      "narration": "The split-ring contacts swap the current each half turn, keeping the turning effect in the same direction.",
+      "reveal": [
+        {
+          "node": "commutatorPanel",
+          "kind": "opacity",
+          "from": 0,
+          "to": 1,
+          "durationMs": 240
+        }
+      ],
+      "startAnimations": [
+        "rotorPhase"
+      ],
+      "visualTrigger": "audioStartOrTextOnlyAdvance"
+    }
+  ],
+  "animations": [
+    {
+      "id": "rotorPhase",
+      "state": "theta",
+      "kind": "integrate",
+      "loop": "untilPausedOrWindowClosed",
+      "renderRate": "displaySynchronized",
+      "reducedMotion": "pauseAtTheta0AndUseStepControls"
+    }
+  ],
+  "controls": [
+    {
+      "id": "pause",
+      "label": "Pause / play",
+      "action": {
+        "kind": "toggleAnimation",
+        "target": "rotorPhase"
+      }
+    },
+    {
+      "id": "replay",
+      "label": "Replay",
+      "action": {
+        "kind": "restartScene",
+        "phase": 0
+      }
+    },
+    {
+      "id": "slow",
+      "label": "Half speed",
+      "action": {
+        "kind": "setParameter",
+        "name": "angularSpeed",
+        "value": 0.39269908169872414
+      }
+    },
+    {
+      "id": "step",
+      "label": "Next quarter turn",
+      "action": {
+        "kind": "pauseThenAdvanceState",
+        "name": "theta",
+        "delta": 1.5707963267948966
+      }
+    },
+    {
+      "id": "askCommutator",
+      "label": "Why does the current reverse?",
+      "action": {
+        "kind": "askFollowUp",
+        "text": "Explain why this brushed DC motor reverses the coil current each half turn.",
+        "preserveScene": true,
+        "focusNodes": [
+          "splitRing",
+          "forceA",
+          "forceB"
+        ]
+      }
+    }
+  ],
+  "semantics": {
+    "fieldWorld": [
+      1,
+      0,
+      0
+    ],
+    "conductorDirection": "A is +z when currentA is positive; B is its opposite.",
+    "worldToScene": "screen x = cx + world x; screen y = cy - world y",
+    "forceLaw": "F = I L cross B; A force is +world-y for currentA positive.",
+    "torque": "Ideal paired-conductor torque is proportional to currentA*cos(theta).",
+    "gap": "Within 3 degrees of a contact dead point, current and displayed force vanish.",
+    "simulationLimit": "Phase is prescribed for clarity. Does not model current dynamics, inductance, back EMF, load, friction or acceleration.",
+    "source": "https://openstax.org/books/university-physics-volume-2/pages/11-5-force-and-torque-on-a-current-loop"
+  }
+}

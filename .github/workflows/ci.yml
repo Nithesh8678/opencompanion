@@ -1,0 +1,27 @@
+name: Validate
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  native:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Native tests
+        run: swift test
+      - name: Build native app
+        run: scripts/build-app.sh
+  protocols:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Python and browser protocol checks
+        run: |
+          python3 -m unittest discover -s NativeBrowserHost -p 'test_*.py'
+          python3 -m unittest discover -s Server -p 'test_*.py'
+          node --test BrowserExtension/test_protocol.mjs BrowserExtension/test_service.mjs

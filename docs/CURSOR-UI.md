@@ -48,6 +48,26 @@ the answer key is withheld. Authored transitions are not observed user clicks.
 These checks cannot establish arbitrary-app accuracy, the actual Codex hotkey
 path, or exact reference behavior.
 
+The 4 November signed-bundle run passed all five cases through the live ChatGPT
+via Codex provider. Every case returned one advancing target and no scene. The
+four semantic cases selected the correct current candidate, including New task
+despite the request saying ChatGPT, and the fresh expanded frame selected a new
+ID rather than repeating its opener. The image-only case returned grounded
+coordinates around the sidebar icon. Native final-model PNGs for the compact
+New task and pixel-only opener were visually inspected. Complete provider trial
+times ranged from 4.31 to 9.62 seconds; these five single trials are not a latency
+distribution or a guarantee. Capture, actual AX harvesting, microphone input,
+AppModel admission and physical click continuation were not exercised by this
+authored-image run. Separate signed cursor and notch regression acceptance
+passed, including compact voice lifecycle, synthetic hover/layout, draft and
+foreground focus checks. The final compiled test binaries passed all 277 Swift
+tests; 29 installer/signing tests also passed.
+
+Image capture and accessibility queries remain separate observations in time.
+Matching their retained frame owner prevents cross-turn reuse but does not prove
+the interface stayed unchanged during enrichment. The model must corroborate
+labels with the image; fresh user workflow acceptance remains necessary.
+
 ## Reference and implementation
 
 The supplied reference recordings informed the separate system pointer and

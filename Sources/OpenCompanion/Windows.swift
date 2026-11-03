@@ -73,52 +73,101 @@ struct AnnotationView: View {
     }.allowsHitTesting(false)
   }
 }
+struct HotkeyRegistrationError: Error, Equatable, LocalizedError {
+  let status: OSStatus
+  let operation: String
+  var errorDescription: String? {
+    if status == OSStatus(eventHotKeyExistsErr) {
+      return
+        "This shortcut is already used by another app. Choose another combination (OSStatus \(status))."
+    }
+    return
+      "Could not \(operation) (OSStatus \(status)). Use the companion menu or choose another shortcut."
+  }
+}
+
 @MainActor final class HotkeyService {
   private var hotkey: EventHotKeyRef?
   private var handler: EventHandlerRef?
   private var callback: (() -> Void)?
   private static var nextID: UInt32 = 1
   private let identifier: UInt32
+  private var registeredKeyCode: UInt32?
+  private var registeredModifiers: UInt32?
   init() {
     identifier = Self.nextID
     Self.nextID += 1
   }
-  func register(
+  @discardableResult func register(
     keyCode: UInt32 = UInt32(kVK_Space), modifiers: UInt32 = UInt32(cmdKey | shiftKey),
     action: @escaping () -> Void
-  ) {
-    unregister()
-    callback = action
+  ) -> Result<Void, HotkeyRegistrationError> {
+    if hotkey != nil, registeredKeyCode == keyCode, registeredModifiers == modifiers {
+      callback = action
+      return .success(())
+    }
     var spec = EventTypeSpec(
       eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
     let pointer = Unmanaged.passUnretained(self).toOpaque()
-    InstallEventHandler(
-      GetApplicationEventTarget(),
-      { _, event, userData in
-        guard let userData, let event else { return OSStatus(eventNotHandledErr) }
-        let service = Unmanaged<HotkeyService>.fromOpaque(userData).takeUnretainedValue()
-        var received = EventHotKeyID()
-        guard
-          GetEventParameter(
-            event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil,
-            MemoryLayout<EventHotKeyID>.size, nil, &received) == noErr
-        else { return OSStatus(eventNotHandledErr) }
-        let matches = MainActor.assumeIsolated {
-          received.signature == 0x4F43_4F4D && received.id == service.identifier
-        }
-        guard matches else { return OSStatus(eventNotHandledErr) }
-        MainActor.assumeIsolated { service.callback?() }
-        return noErr
-      }, 1, &spec, pointer, &handler)
+    let hadHandler = handler != nil
+    if !hadHandler {
+      let status = InstallEventHandler(
+        GetApplicationEventTarget(),
+        { _, event, userData in
+          guard let userData, let event else { return OSStatus(eventNotHandledErr) }
+          let service = Unmanaged<HotkeyService>.fromOpaque(userData).takeUnretainedValue()
+          var received = EventHotKeyID()
+          guard
+            GetEventParameter(
+              event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+              nil,
+              MemoryLayout<EventHotKeyID>.size, nil, &received) == noErr
+          else { return OSStatus(eventNotHandledErr) }
+          let matches = MainActor.assumeIsolated {
+            received.signature == 0x4F43_4F4D && received.id == service.identifier
+          }
+          guard matches else { return OSStatus(eventNotHandledErr) }
+          MainActor.assumeIsolated { service.callback?() }
+          return noErr
+        }, 1, &spec, pointer, &handler)
+      guard status == noErr, handler != nil else {
+        if let handler { RemoveEventHandler(handler) }
+        handler = nil
+        return .failure(
+          .init(
+            status: status == noErr ? OSStatus(paramErr) : status,
+            operation: "install the shortcut handler"))
+      }
+    }
     let identifier = EventHotKeyID(signature: 0x4F43_4F4D, id: identifier)
-    RegisterEventHotKey(
-      keyCode, modifiers, identifier, GetApplicationEventTarget(), 0, &hotkey)
+    var replacement: EventHotKeyRef?
+    let status = RegisterEventHotKey(
+      keyCode, modifiers, identifier, GetApplicationEventTarget(), 0, &replacement)
+    guard status == noErr, let replacement else {
+      if !hadHandler, let handler {
+        RemoveEventHandler(handler)
+        self.handler = nil
+      }
+      return .failure(
+        .init(
+          status: status == noErr ? OSStatus(paramErr) : status,
+          operation: "register the global shortcut"))
+    }
+    if let hotkey { UnregisterEventHotKey(hotkey) }
+    hotkey = replacement
+    registeredKeyCode = keyCode
+    registeredModifiers = modifiers
+    callback = action
+    return .success(())
   }
   func unregister() {
     if let hotkey { UnregisterEventHotKey(hotkey) }
     if let handler { RemoveEventHandler(handler) }
     hotkey = nil
     handler = nil
+    callback = nil
+    registeredKeyCode = nil
+    registeredModifiers = nil
   }
 }
 struct CompanionBadge: View {

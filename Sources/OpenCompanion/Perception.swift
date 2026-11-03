@@ -68,6 +68,8 @@ actor CaptureService {
       false, onScreenWindowsOnly: true)
     return content.windows.filter {
       $0.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier
+        && $0.owningApplication?.bundleIdentifier
+          != (Bundle.main.bundleIdentifier ?? "org.opencompanion.mac")
         && $0.frame.width > 80 && $0.frame.height > 60 && $0.isOnScreen
     }.prefix(150).map {
       CaptureWindow(
@@ -97,12 +99,14 @@ actor CaptureService {
       windowID != nil ? .window : (region != nil ? .region : .display)
     let own = content.applications.filter {
       $0.processID == ProcessInfo.processInfo.processIdentifier
+        || $0.bundleIdentifier == (Bundle.main.bundleIdentifier ?? "org.opencompanion.mac")
     }
     var sourceRect = rect
     let filter: SCContentFilter
     if let windowID {
       guard let window = content.windows.first(where: { $0.windowID == windowID }),
-        window.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier
+        window.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier,
+        window.owningApplication?.bundleIdentifier != Bundle.main.bundleIdentifier
       else { throw ProviderError.message("Selected window is unavailable.") }
       filter = SCContentFilter(desktopIndependentWindow: window)
       let primaryTop = screens[CGMainDisplayID()]?.maxY ?? rect.maxY

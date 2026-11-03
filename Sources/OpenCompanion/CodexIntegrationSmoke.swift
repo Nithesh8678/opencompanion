@@ -89,18 +89,7 @@ private actor LiveSceneReceiver {
   }
   func accept(_ unit: ProviderUnit) throws {
     guard unit.type == "scene" else { return }
-    var candidate = scene
-    if let title = unit.title, !title.isEmpty { candidate.title = title }
-    for id in unit.removeIDs ?? [] { candidate.nodes.removeAll { $0.id == id } }
-    for node in unit.nodes ?? [] {
-      if let index = candidate.nodes.firstIndex(where: { $0.id == node.id }) {
-        candidate.nodes[index] = node
-      } else {
-        candidate.nodes.append(node)
-      }
-    }
-    candidate.revision += 1
-    scene = try candidate.validated()
+    scene = try ProviderSceneBoundary.applying(unit, to: scene, baseRevision: scene.revision)
     sawScene = true
   }
   func document() throws -> SceneDocument {

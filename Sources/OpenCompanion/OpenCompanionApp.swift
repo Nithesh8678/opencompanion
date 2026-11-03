@@ -17,9 +17,12 @@ import SwiftUI
   private var model: AppModel!
   private var shell: CompanionShell?
   private var utilityWindow: NSWindow?
+  private var explanationPanel: NSPanel?
   private let hotkey = HotkeyService()
+  private let captureHotkey = HotkeyService()
   private let stopHotkey = HotkeyService()
   private var stateSubscription: AnyCancellable?
+  private var shortcutSubscription: AnyCancellable?
   private var stopKeyRegistered = false
   private var statusItem: NSStatusItem?
   private var localKeys: Any?
@@ -27,8 +30,12 @@ import SwiftUI
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
     NSApp.appearance = NSAppearance(named: .aqua)
-    model = AppModel()
-    model.onOpen = { [weak self] in self?.showWorkspace() }
+    let acceptanceMode = [
+      "--keychain-acceptance", "--smoke-test-codex", "--render-acceptance", "--capture-acceptance",
+    ].contains(where: CommandLine.arguments.contains)
+    model = AppModel(acceptanceMode: acceptanceMode)
+    model.onOpen = { [weak self] in self?.openRequestedSurface() }
+    model.onSceneReady = { [weak self] in self?.showExplanation(focus: false) }
     installMenus()
     if CommandLine.arguments.contains("--keychain-acceptance") {
       let service = "org.opencompanion.acceptance.\(UUID().uuidString)"
@@ -67,40 +74,68 @@ import SwiftUI
       }
       return
     }
-    shell = CompanionShell(model: model, onOpenWorkspace: { [weak self] in self?.showWorkspace() })
+    shell = CompanionShell(
+      model: model, onOpenWorkspace: { [weak self] in self?.openRequestedSurface() })
     shell?.show(anchor: .notch)
-    hotkey.register { [weak self] in
-      self?.model.record("hotkey.keyDown")
-      self?.shell?.toggle()
-      self?.model.record("hotkey.companionRequested")
+    if let index = CommandLine.arguments.firstIndex(of: "--capture-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 1 < CommandLine.arguments.count else {
+            throw ProviderError.message(
+              "Provide a private output directory for capture acceptance.")
+          }
+          try await CaptureAcceptance.run(
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+          print("CAPTURE_ACCEPTANCE_PASSED")
+        } catch {
+          print("CAPTURE_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
     }
-    stateSubscription = model.$busy.combineLatest(model.$listening, model.$state).sink {
-      [weak self] busy, listening, state in
-      MainActor.assumeIsolated {
-        guard let self else { return }
-        let active = busy || listening || state == "Speaking" || state == "Observing"
-        guard active != self.stopKeyRegistered else { return }
-        self.stopKeyRegistered = active
-        if active {
-          self.stopHotkey.register(keyCode: UInt32(kVK_Escape), modifiers: 0) { [weak self] in
+    if !acceptanceMode {
+      registerGlobalShortcuts()
+      shortcutSubscription = NotificationCenter.default.publisher(
+        for: .shortcutPreferencesDidChange
+      )
+      .sink { [weak self] _ in
+        MainActor.assumeIsolated { self?.registerGlobalShortcuts() }
+      }
+      stateSubscription = model.$busy.combineLatest(model.$listening, model.$state).sink {
+        [weak self] busy, listening, state in
+        MainActor.assumeIsolated {
+          guard let self else { return }
+          let active = busy || listening || state == "Speaking" || state == "Observing"
+          guard active != self.stopKeyRegistered else { return }
+          self.stopKeyRegistered = active
+          if active {
+            let result = self.stopHotkey.register(keyCode: UInt32(kVK_Escape), modifiers: 0) {
+              [weak self] in
+              self?.model.stop()
+              self?.shell?.collapse()
+            }
+            if case .failure(let error) = result {
+              self.model.notice =
+                "Global Escape is unavailable. Use the Stop control. \(error.localizedDescription)"
+            }
+          } else {
+            self.stopHotkey.unregister()
+          }
+        }
+      }
+      localKeys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        let consume = MainActor.assumeIsolated {
+          if event.keyCode == 53 {
             self?.model.stop()
             self?.shell?.collapse()
+            return true
           }
-        } else {
-          self.stopHotkey.unregister()
+          return false
         }
+        return consume ? nil : event
       }
-    }
-    localKeys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-      let consume = MainActor.assumeIsolated {
-        if event.keyCode == 53 {
-          self?.model.stop()
-          self?.shell?.collapse()
-          return true
-        }
-        return false
-      }
-      return consume ? nil : event
     }
     if CommandLine.arguments.contains("--render-acceptance") {
       Task { @MainActor in
@@ -121,6 +156,7 @@ import SwiftUI
           try shell?.exportSnapshot(to: output.appendingPathComponent("notch-expanded.png"))
           shell?.collapse()
           showWorkspace()
+          model.sample("motor")
           try? await Task.sleep(for: .milliseconds(500))
           try RenderAcceptance.run()
           print("RENDER_ACCEPTANCE_PASSED")
@@ -131,6 +167,34 @@ import SwiftUI
         NSApp.terminate(nil)
       }
     }
+  }
+
+  private func registerGlobalShortcuts() {
+    let preferences = ShortcutPreferences.load()
+    var failures: [String] = []
+    if case .failure(let error) = hotkey.register(
+      keyCode: preferences.openShortcut.key.keyCode,
+      modifiers: preferences.openShortcut.modifiers.carbonMask,
+      action: { [weak self] in
+        self?.model.record("hotkey.keyDown")
+        self?.shell?.toggle()
+        self?.model.record("hotkey.companionRequested")
+      })
+    {
+      failures.append("Open companion: \(error.localizedDescription)")
+    }
+    if preferences.captureEnabled {
+      if case .failure(let error) = captureHotkey.register(
+        keyCode: preferences.captureShortcut.key.keyCode,
+        modifiers: preferences.captureShortcut.modifiers.carbonMask,
+        action: { [weak self] in self?.shell?.captureSelectedDisplay() })
+      {
+        failures.append("Capture screen: \(error.localizedDescription)")
+      }
+    } else {
+      captureHotkey.unregister()
+    }
+    if !failures.isEmpty { model.notice = failures.joined(separator: "\n") }
   }
 
   private func installMenus() {
@@ -175,6 +239,33 @@ import SwiftUI
     statusItem = status
   }
 
+  private func openRequestedSurface() {
+    if model.section == "Notebook" { showExplanation(focus: true) } else { showWorkspace() }
+  }
+  private func showExplanation(focus: Bool) {
+    if explanationPanel == nil {
+      let display = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1280, height: 800)
+      let panel = ExplanationPanel(
+        contentRect: CGRect(
+          x: 0, y: 0, width: min(980, display.width - 40), height: min(740, display.height - 40)),
+        styleMask: [.titled, .closable, .resizable, .nonactivatingPanel], backing: .buffered,
+        defer: false)
+      panel.title = "OpenCompanion Notebook"
+      panel.isReleasedWhenClosed = false
+      panel.minSize = CGSize(width: 760, height: 580)
+      panel.collectionBehavior = [.fullScreenAuxiliary]
+      panel.contentView = NSHostingView(
+        rootView: WorkspaceView(model: model, notebookOnly: true).preferredColorScheme(.light))
+      panel.center()
+      explanationPanel = panel
+    }
+    if focus {
+      NSApp.activate(ignoringOtherApps: true)
+      explanationPanel?.makeKeyAndOrderFront(nil)
+    } else if explanationPanel?.isVisible != true {
+      explanationPanel?.orderFrontRegardless()
+    }
+  }
   func showWorkspace() {
     if utilityWindow == nil {
       let window = NSWindow(
@@ -209,8 +300,14 @@ import SwiftUI
     model.runner.stop()
     model.browser.stop()
     hotkey.unregister()
+    captureHotkey.unregister()
     stopHotkey.unregister()
     if let localKeys { NSEvent.removeMonitor(localKeys) }
   }
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+}
+
+private final class ExplanationPanel: NSPanel {
+  override var canBecomeKey: Bool { true }
+  override var canBecomeMain: Bool { false }
 }

@@ -8,7 +8,22 @@ private let ink = Color(red: 0.13, green: 0.22, blue: 0.37)
 private let blue = Color(red: 0.17, green: 0.36, blue: 0.72)
 struct WorkspaceView: View {
   @ObservedObject var model: AppModel
+  @State private var editingMemory: StoredRecord?
+  var notebookOnly = false
   var body: some View {
+    Group {
+      if notebookOnly {
+        VStack(spacing: 0) {
+          if let error = model.error { banner(error, isError: true) }
+          if let notice = model.notice { banner(notice, isError: false) }
+          notebook
+        }
+      } else {
+        workspace
+      }
+    }.frame(minWidth: notebookOnly ? 760 : 1000, minHeight: notebookOnly ? 580 : 680).tint(blue)
+  }
+  private var workspace: some View {
     HStack(spacing: 0) {
       sidebar
       VStack(spacing: 0) {
@@ -28,7 +43,14 @@ struct WorkspaceView: View {
         if let notice = model.notice { banner(notice, isError: false) }
         Group {
           switch model.section {
-          case "Notebook": notebook
+          case "Notebook":
+            ContentUnavailableView {
+              Label("Your notebook is in its own panel", systemImage: "pencil.and.outline")
+            } description: {
+              Text("Keep the explanation beside your work while you talk from the notch.")
+            } actions: {
+              Button("Open notebook") { model.onOpen?() }
+            }
           case "Library": library
           case "Memory": memory
           case "Jobs": jobs
@@ -57,6 +79,7 @@ struct WorkspaceView: View {
       ) { name, icon in
         Button {
           model.section = name
+          if name == "Notebook" { model.onOpen?() }
           Task { await model.reload() }
         } label: {
           Label(name, systemImage: icon).font(
@@ -74,7 +97,9 @@ struct WorkspaceView: View {
         Text("A little clarity,\nright where you are.").font(
           .system(size: 16, weight: .medium, design: .rounded)
         ).foregroundStyle(ink)
-        Text("⌘ ⇧ Space to open").font(.system(size: 11)).foregroundStyle(.secondary)
+        Text("\(ShortcutPreferences.load().openShortcut.displayName) to open").font(
+          .system(size: 11)
+        ).foregroundStyle(.secondary)
         Text("Independent & open source").font(.system(size: 10)).foregroundStyle(.secondary)
       }.padding(15)
     }.padding(.horizontal, 10).frame(width: 210).background(
@@ -429,11 +454,19 @@ struct WorkspaceView: View {
           Text(record.body).font(.system(size: 13)).textSelection(.enabled)
           HStack {
             Button("Use in question") { model.useRecord(record) }
+            Button("Edit") { editingMemory = record }.disabled(model.store == nil)
             Button("Delete", role: .destructive) { model.deleteRecord(record.id) }
           }
         }.padding(.vertical, 10)
       }
-    }.padding(28)
+    }.padding(28).sheet(item: $editingMemory) { record in
+      if let store = model.store {
+        MemoryEditorView(store: store, record: record) { _ in
+          model.notice = "Memory updated."
+          Task { await model.reload() }
+        }
+      }
+    }
   }
   private var jobs: some View { JobsView(model: model) }
   private var settings: some View {
@@ -463,14 +496,15 @@ struct WorkspaceView: View {
         }
         Text(model.connectionStatus).font(.caption).textSelection(.enabled)
       }
-      Section("Voice & shortcuts") {
+      Section("Voice") {
         Toggle("Read accepted answers aloud", isOn: $model.configuration.speechEnabled)
         Text(
           "Voice input uses Apple Speech Recognition, on-device when available. Otherwise Apple may process audio. Finish recording to review the transcript before sending."
         ).font(.caption).foregroundStyle(.secondary)
-        Text("Open workspace: ⌘⇧Space. Stop current output: Escape.").font(.caption)
+        Text("Stop current output: Escape.").font(.caption)
         Button("Show companion", action: model.showBadge)
       }
+      ShortcutSettingsView()
       Section("Permissions") {
         HStack {
           Label(

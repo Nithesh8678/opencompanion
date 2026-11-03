@@ -4,11 +4,14 @@
 
 ## Local automated checks
 
-- 20 core tests: bounded event framing/ordering/cancellation, coordinate inverses/negative displays, atomic revisions, reference/cycle/expression budgets, current/force conventions for the55-node motor, unrelated lessons, long playback, grouped transforms/hit tests and beat clocks.
-- 11 storage/file tests: migrations/reopen/search/export, scope/symlink boundaries/hash freshness, leases, unknown outcomes/reconciliation, retry budgets, cancellation and missed-run semantics.
+- 25 core tests: bounded event framing/ordering/cancellation, coordinate inverses/negative displays, atomic revisions, reference/cycle/expression budgets, current/force conventions for the55-node motor, unrelated lessons, long playback, grouped transforms/hit tests, beat clocks and signed directional geometry.
+- 15 storage/file tests: migrations/reopen/search/export, scope/symlink boundaries/hash freshness, leases, unknown outcomes/reconciliation, retry budgets, cancellation, missed-run semantics and safe memory edits.
 - 9 runtime tests: actual executor results/cancellation, scheduler replacement, MCP JSON/SSE/session negotiation/pagination/schema validation/expiry/cancellation/deadlines.
 - 5 context-binding tests: immutable frame/source identity, notebook identity and revisions, cancellation publication and scoped AX exclusion.
 - 2 Codex transport tests: short pipe responses stream before EOF; cancellation does not accept late output.
+- 6 provider-boundary tests: direct create/patch and legacy node updates share atomic validation; signed arrows, alternate point representations, omitted fields and failed updates are covered.
+- 7 shell capture tests: only fresh matching frames complete an invocation; Stop and superseding captures invalidate late results.
+- 5 shortcut tests: safe modifiers, duplicate actions, corrupted preferences and persistence.
 - 5 native host tests;6 selfhost relay integration tests;4 browser protocol/scope tests.
 - 10 real Chromium DOM assertions, including shadow DOM, stale document refs, protected/covered controls and fresh post-action evidence. Extension messaging was fixture-driven; this is not installed MV3/native-host pairing.
 - Real Swift browser bridge↔Unix socket↔Python host↔framed-message round trip.

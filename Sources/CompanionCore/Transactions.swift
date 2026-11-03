@@ -5,6 +5,7 @@ public struct ScenePatch: Codable, Equatable, Sendable {
   public var x, y, width, height, rotation, opacity, scaleX, scaleY, fontSize, strokeWidth: Double?
   public var text, color, fill, accessibilityLabel: String?
   public var points: [Point2D]?
+  public var subpaths: [[Point2D]]?
   public var bindings: [String: SafeExpression]?
   public init(
     x: Double? = nil, y: Double? = nil, width: Double? = nil, height: Double? = nil,
@@ -12,7 +13,7 @@ public struct ScenePatch: Codable, Equatable, Sendable {
     opacity: Double? = nil, scaleX: Double? = nil, scaleY: Double? = nil, fontSize: Double? = nil,
     strokeWidth: Double? = nil, text: String? = nil, color: String? = nil, fill: String? = nil,
     accessibilityLabel: String? = nil, points: [Point2D]? = nil,
-    bindings: [String: SafeExpression]? = nil
+    subpaths: [[Point2D]]? = nil, bindings: [String: SafeExpression]? = nil
   ) {
     self.x = x
     self.y = y
@@ -29,7 +30,15 @@ public struct ScenePatch: Codable, Equatable, Sendable {
     self.fill = fill
     self.accessibilityLabel = accessibilityLabel
     self.points = points
+    self.subpaths = subpaths
     self.bindings = bindings
+  }
+  /// A value copy is useful when checking provider geometry before committing
+  /// an atomic document transaction. Omitted fields retain their prior values.
+  public func applying(to node: SceneNode) -> SceneNode {
+    var result = node
+    apply(to: &result)
+    return result
   }
   fileprivate func apply(to node: inout SceneNode) {
     if let x { node.x = x }
@@ -47,6 +56,7 @@ public struct ScenePatch: Codable, Equatable, Sendable {
     if let fill { node.fill = fill }
     if let accessibilityLabel { node.accessibilityLabel = accessibilityLabel }
     if let points { node.points = points }
+    if let subpaths { node.subpaths = subpaths }
     if let bindings { node.bindings = bindings }
   }
 }

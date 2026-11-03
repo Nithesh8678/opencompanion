@@ -76,8 +76,14 @@ struct NotebookTurnBinding: Sendable, Equatable {
   private(set) var store: LocalStore?
   private var turn: Task<Void, Never>?
   private var generation: UInt64 = 0
+  var taskGeneration: UInt64 { generation }
+  var capturePublicationRevision: UInt64 { captureGate.generation }
+  var captureResultID: UUID? { evidence?.frameID }
+  private var scenePresentedForTurn = false
   private var outputSceneBinding: NotebookTurnBinding?
   private var captureTask: Task<Void, Never>?
+  private var windowPickerTask: Task<Void, Never>?
+  private var windowPickerRequestID: UUID?
   private var captureGate = CapturePublicationGate()
   private var undoStack: [SceneDocument] = []
   private var redoStack: [SceneDocument] = []
@@ -85,17 +91,23 @@ struct NotebookTurnBinding: Sendable, Equatable {
   private var lastTick = ProcessInfo.processInfo.systemUptime
   private var badge: NSPanel?
   var onOpen: (() -> Void)?
+  var onSceneReady: (() -> Void)?
   private var trace: [[String: String]] = []
-  init() {
-    do {
-      let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+  init(acceptanceMode: Bool = false) {
+    if !acceptanceMode {
+      do {
+        let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[
+          0
+        ]
         .appendingPathComponent("OpenCompanion", isDirectory: true)
-      try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-      store = try LocalStore(url: url.appendingPathComponent("library.sqlite"))
-    } catch { self.error = "Local library could not open: \(error.localizedDescription)" }
-    apiKey =
-      (try? credentials.load(service: "org.opencompanion.provider", account: configuration.endpoint))
-      .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        store = try LocalStore(url: url.appendingPathComponent("library.sqlite"))
+      } catch { self.error = "Local library could not open: \(error.localizedDescription)" }
+      apiKey =
+        (try? credentials.load(
+          service: "org.opencompanion.provider", account: configuration.endpoint))
+        .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    }
     voice.onState = { [weak self] state in
       guard let self else { return }
       self.state = state
@@ -119,9 +131,11 @@ struct NotebookTurnBinding: Sendable, Equatable {
         self.overlay.clear()
       }
     }
-    Task {
-      await reload()
-      startJobs()
+    if !acceptanceMode {
+      Task {
+        await reload()
+        startJobs()
+      }
     }
   }
   func record(_ event: String) {
@@ -188,6 +202,7 @@ struct NotebookTurnBinding: Sendable, Equatable {
     error = nil
     generation += 1
     let current = generation
+    scenePresentedForTurn = false
     busy = true
     state = "Thinking"
     updateBadge()
@@ -252,48 +267,19 @@ struct NotebookTurnBinding: Sendable, Equatable {
       let expectedBase = try outputSceneBinding.checkedBase(
         currentID: scene?.id, currentRevision: scene?.revision,
         proposedBase: unit.baseDocumentRevision)
-      var document =
-        scene ?? SceneDocument(title: unit.title ?? "Explanation", width: 900, height: 560)
-      var operations = unit.operations ?? []
-      for id in unit.removeIDs ?? [] { operations.append(.remove(id: id)) }
-      for node in unit.nodes ?? [] {
-        if let existing = document.nodes.first(where: { $0.id == node.id }) {
-          guard existing.kind == node.kind, existing.parentID == node.parentID else {
-            throw ProviderError.message(
-              "Changing a retained part's kind or parent requires an explicit remove and create transaction."
-            )
-          }
-          operations.append(
-            .patch(
-              id: node.id,
-              fields: ScenePatch(
-                x: node.x, y: node.y, width: node.width, height: node.height,
-                rotation: node.rotation, opacity: node.opacity, scaleX: node.scaleX,
-                scaleY: node.scaleY, fontSize: node.fontSize, strokeWidth: node.strokeWidth,
-                text: node.text, color: node.color, fill: node.fill,
-                accessibilityLabel: node.accessibilityLabel, points: node.points,
-                bindings: node.bindings)))
-        } else {
-          operations.append(.create(node))
-        }
-      }
-      for animation in unit.animations ?? [] { operations.append(.defineAnimation(animation)) }
-      for parameter in unit.parameters?.values ?? [String: SceneParameter]().values {
-        operations.append(.defineParameter(parameter))
-      }
-      guard !operations.isEmpty else {
-        throw ProviderError.message("The scene unit contained no substantive operations.")
-      }
-      document = try document.applying(
-        SceneTransaction(
-          baseDocumentRevision: expectedBase, operations: operations, surfaceID: document.id))
-      if let title = unit.title { document.title = String(title.prefix(200)) }
+      let document = try ProviderSceneBoundary.applying(
+        unit,
+        to: scene ?? SceneDocument(title: unit.title ?? "Explanation", width: 900, height: 560),
+        baseRevision: expectedBase)
       snapshotUndo()
       scene = document
       self.outputSceneBinding = NotebookTurnBinding(
         documentID: document.id, revision: document.revision)
       section = "Notebook"
-      onOpen?()
+      if !scenePresentedForTurn {
+        scenePresentedForTurn = true
+        onSceneReady?()
+      }
       record("visual.accepted")
     case "target":
       guard let target = unit.target, let evidence,
@@ -311,6 +297,7 @@ struct NotebookTurnBinding: Sendable, Equatable {
   func stop() {
     generation += 1
     invalidateCapture()
+    cancelWindowPicker()
     outputSceneBinding = nil
     spatialSelector.cancel()
     turn?.cancel()
@@ -347,6 +334,7 @@ struct NotebookTurnBinding: Sendable, Equatable {
   }
   @discardableResult private func beginContextSelection() -> UInt64 {
     invalidateCapture()
+    cancelWindowPicker()
     spatialSelector.cancel()
     evidence = nil
     selectedContext = ""
@@ -727,19 +715,31 @@ extension AppModel {
       }
     }
   }
+  /// Dismissing enumeration must not cancel an already selected capture or
+  /// erase evidence the user deliberately retained for a question.
+  func cancelWindowPicker() {
+    windowPickerRequestID = nil
+    windowPickerTask?.cancel()
+    windowPickerTask = nil
+    if showingWindowPicker { showingWindowPicker = false }
+  }
   func chooseWindow() {
-    let token = beginContextSelection()
-    captureTask = Task { [weak self] in
+    cancelWindowPicker()
+    let requestID = UUID()
+    windowPickerRequestID = requestID
+    windowPickerTask = Task { [weak self] in
       guard let self else { return }
       do {
         let windows = try await capture.windows()
-        guard captureGate.permits(token, cancelled: Task.isCancelled) else { return }
+        guard !Task.isCancelled, windowPickerRequestID == requestID else { return }
         captureWindows = windows
         showingWindowPicker = true
-        captureTask = nil
+        windowPickerRequestID = nil
+        windowPickerTask = nil
       } catch {
-        guard captureGate.permits(token, cancelled: Task.isCancelled) else { return }
-        captureTask = nil
+        guard !Task.isCancelled, windowPickerRequestID == requestID else { return }
+        windowPickerRequestID = nil
+        windowPickerTask = nil
         if !(error is CancellationError) { showError(error) }
       }
     }

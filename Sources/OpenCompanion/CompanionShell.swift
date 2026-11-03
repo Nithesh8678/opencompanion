@@ -18,6 +18,31 @@ struct CompanionShellGeometry: Codable, Sendable {
 
 private enum ShellCaptureSource { case display, window, region, scribble }
 
+enum ShellCaptureCompletion: Equatable {
+  case waiting, completed, invalidated
+}
+
+/// Capture publication and task cancellation are independent clocks. A generic
+/// audio/UI "Ready" transition never proves that a selected frame arrived.
+struct ShellCaptureExpectation {
+  let taskGeneration: UInt64
+  let previousFrameID: UUID?
+  let publicationRevision: UInt64
+
+  func completion(
+    taskGeneration currentGeneration: UInt64, publicationRevision currentRevision: UInt64,
+    frameID: UUID?
+  ) -> ShellCaptureCompletion {
+    guard currentGeneration == taskGeneration, currentRevision <= publicationRevision else {
+      return .invalidated
+    }
+    guard currentRevision == publicationRevision, let frameID, frameID != previousFrameID else {
+      return .waiting
+    }
+    return .completed
+  }
+}
+
 private enum ShellPalette {
   static let background = Color(red: 0.025, green: 0.035, blue: 0.055)
   static let inset = Color(red: 0.075, green: 0.095, blue: 0.13)
@@ -49,8 +74,12 @@ private final class ResidentCompanionPanel: NSPanel {
   private var screen: NSScreen?
   private var previousApplication: NSRunningApplication?
   private var subscriptions: Set<AnyCancellable> = []
-  private var waitingForCapture = false
-  private var observedCapture = false
+  private var captureExpectation: ShellCaptureExpectation?
+  private var captureStarted = false
+  private var captureInitialError: String?
+  private var lastWindowPickerPresented = false
+  private var pendingInvocationID: UUID?
+  private var pendingTaskGeneration: UInt64?
   private var pendingInvocation: Task<Void, Never>?
   private let dockArt = CompanionDockTileView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
 
@@ -114,10 +143,29 @@ private final class ResidentCompanionPanel: NSPanel {
 
   func toggle() { presentation.expanded ? collapse() : expand() }
 
+  func captureSelectedDisplay() {
+    if let foreground = NSWorkspace.shared.frontmostApplication,
+      foreground.processIdentifier != ProcessInfo.processInfo.processIdentifier
+    {
+      previousApplication = foreground
+    }
+    captureScreen(.display)
+  }
+
   func collapse() {
-    pendingInvocation?.cancel()
-    waitingForCapture = false
+    invalidateInvocations()
     collapse(restoringFocus: true)
+  }
+
+  private func invalidateInvocations() {
+    model.cancelWindowPicker()
+    pendingInvocation?.cancel()
+    pendingInvocation = nil
+    pendingInvocationID = nil
+    pendingTaskGeneration = nil
+    captureExpectation = nil
+    captureStarted = false
+    captureInitialError = nil
   }
 
   private func collapse(restoringFocus: Bool) {
@@ -150,57 +198,136 @@ private final class ResidentCompanionPanel: NSPanel {
   }
 
   private func openWorkspace(_ section: String) {
+    invalidateInvocations()
     collapse(restoringFocus: false)
     model.section = section
     onOpenWorkspace()
   }
 
   private func captureScreen(_ source: ShellCaptureSource) {
-    pendingInvocation?.cancel()
+    invalidateInvocations()
     if source == .window {
       model.chooseWindow()
       return
     }
-    waitingForCapture = true
-    observedCapture = false
+    let generation = model.taskGeneration
+    let previousFrameID = model.captureResultID
+    let initialError = model.error
+    let invocationID = UUID()
+    pendingInvocationID = invocationID
+    pendingTaskGeneration = generation
     collapse(restoringFocus: true)
+    let expectedPID = previousApplication?.processIdentifier
     pendingInvocation = Task { @MainActor [weak self] in
-      do { try await Task.sleep(for: .milliseconds(240)) } catch { return }
-      guard let self, !Task.isCancelled else { return }
+      guard let self,
+        await self.waitForForeground(
+          expectedPID, generation: generation, invocationID: invocationID)
+      else { return }
+      guard self.invocationPermitted(invocationID, generation: generation) else { return }
+      self.finishPendingInvocation()
       switch source {
       case .display: self.model.observe()
       case .region: self.model.chooseRegion(.region)
       case .scribble: self.model.chooseRegion(.scribble)
-      case .window: break
+      case .window: return
       }
+      // Region/scribble selection has its own invalidation, followed by the
+      // capture's invalidation after the user completes the selection.
+      let selectionStage: UInt64 = source == .region || source == .scribble ? 1 : 0
+      self.captureExpectation = ShellCaptureExpectation(
+        taskGeneration: generation, previousFrameID: previousFrameID,
+        publicationRevision: self.model.capturePublicationRevision &+ selectionStage)
+      self.captureInitialError = initialError
+      self.updateState()
     }
   }
 
   private func selectWindow(_ window: CaptureWindow) {
     model.showingWindowPicker = false
-    pendingInvocation?.cancel()
-    waitingForCapture = true
-    observedCapture = false
+    invalidateInvocations()
+    let generation = model.taskGeneration
+    let previousFrameID = model.captureResultID
+    let initialError = model.error
+    let invocationID = UUID()
+    pendingInvocationID = invocationID
+    pendingTaskGeneration = generation
     collapse(restoringFocus: true)
+    let expectedPID = previousApplication?.processIdentifier
     pendingInvocation = Task { @MainActor [weak self] in
-      do { try await Task.sleep(for: .milliseconds(240)) } catch { return }
-      guard let self, !Task.isCancelled else { return }
+      guard let self,
+        await self.waitForForeground(
+          expectedPID, generation: generation, invocationID: invocationID)
+      else { return }
+      guard self.invocationPermitted(invocationID, generation: generation) else { return }
+      self.finishPendingInvocation()
       self.model.performCapture(window: window)
+      self.captureExpectation = ShellCaptureExpectation(
+        taskGeneration: generation, previousFrameID: previousFrameID,
+        publicationRevision: self.model.capturePublicationRevision)
+      self.captureInitialError = initialError
+      self.updateState()
     }
   }
 
   private func send() {
-    pendingInvocation?.cancel()
-    if model.evidence != nil {
-      collapse(restoringFocus: true)
-      pendingInvocation = Task { @MainActor [weak self] in
-        do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
-        guard let self, !Task.isCancelled else { return }
-        self.model.send()
-      }
-    } else {
+    invalidateInvocations()
+    guard model.evidence != nil else {
       model.send()
+      return
     }
+    let generation = model.taskGeneration
+    let requestedInput = model.input
+    let requestedFrameID = model.captureResultID
+    let invocationID = UUID()
+    pendingInvocationID = invocationID
+    pendingTaskGeneration = generation
+    collapse(restoringFocus: true)
+    let expectedPID = previousApplication?.processIdentifier
+    pendingInvocation = Task { @MainActor [weak self] in
+      guard let self,
+        await self.waitForForeground(
+          expectedPID, generation: generation, invocationID: invocationID)
+      else { return }
+      guard self.invocationPermitted(invocationID, generation: generation) else { return }
+      self.finishPendingInvocation()
+      guard self.model.input == requestedInput, self.model.captureResultID == requestedFrameID
+      else {
+        self.model.notice =
+          "The draft or selected screen changed before sending. Review it and send again."
+        return
+      }
+      self.model.send()
+    }
+  }
+
+  private func invocationPermitted(_ id: UUID, generation: UInt64) -> Bool {
+    !Task.isCancelled && pendingInvocationID == id && model.taskGeneration == generation
+  }
+
+  private func finishPendingInvocation() {
+    pendingInvocation = nil
+    pendingInvocationID = nil
+    pendingTaskGeneration = nil
+  }
+
+  /// App activation is asynchronous. Poll observed focus, bounded to 240 ms,
+  /// rather than assuming that sleeping for a fixed interval restored it.
+  private func waitForForeground(_ expectedPID: pid_t?, generation: UInt64, invocationID: UUID)
+    async -> Bool
+  {
+    let deadline = ProcessInfo.processInfo.systemUptime + 0.24
+    while invocationPermitted(invocationID, generation: generation) {
+      let foregroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+      let external =
+        foregroundPID != nil && foregroundPID != ProcessInfo.processInfo.processIdentifier
+      if external && (expectedPID == nil || foregroundPID == expectedPID) { return true }
+      if ProcessInfo.processInfo.systemUptime >= deadline { break }
+      do { try await Task.sleep(for: .milliseconds(12)) } catch { return false }
+    }
+    guard invocationPermitted(invocationID, generation: generation) else { return false }
+    finishPendingInvocation()
+    model.error = "The previous app did not regain focus. Bring it forward and try again."
+    return false
   }
 
   /// Render the current mounted surface for visual acceptance without asking
@@ -223,12 +350,33 @@ private final class ResidentCompanionPanel: NSPanel {
     dockArt.active = model.busy || model.listening || model.state == "Speaking"
     dockArt.needsDisplay = true
     NSApp.dockTile.display()
-    if model.showingWindowPicker && !presentation.expanded { expand() }
-    if waitingForCapture {
-      if model.state == "Observing" { observedCapture = true }
-      if observedCapture && model.state == "Ready" {
-        waitingForCapture = false
-        expand()
+    if let pendingTaskGeneration, pendingTaskGeneration != model.taskGeneration {
+      invalidateInvocations()
+    }
+    let pickerAppeared = model.showingWindowPicker && !lastWindowPickerPresented
+    lastWindowPickerPresented = model.showingWindowPicker
+    if pickerAppeared && !presentation.expanded { expand() }
+    guard let expectation = captureExpectation else { return }
+    switch expectation.completion(
+      taskGeneration: model.taskGeneration,
+      publicationRevision: model.capturePublicationRevision,
+      frameID: model.captureResultID)
+    {
+    case .invalidated:
+      captureExpectation = nil
+      captureStarted = false
+    case .completed:
+      captureExpectation = nil
+      captureStarted = false
+      expand()
+    case .waiting:
+      if model.state == "Observing" { captureStarted = true }
+      let failed = model.error != nil && model.error != captureInitialError
+      let endedWithoutFrame =
+        captureStarted && model.state == "Ready" && model.captureResultID == nil
+      if failed || endedWithoutFrame {
+        captureExpectation = nil
+        captureStarted = false
       }
     }
   }
@@ -369,7 +517,7 @@ private struct CompanionShellView: View {
         ).accessibilityHidden(presentation.expanded)
           .accessibilityLabel("Open OpenCompanion. \(model.state)").accessibilityIdentifier(
             "companion.expand"
-          ).help("Open companion · ⌘⇧Space")
+          ).help("Open companion · \(ShortcutPreferences.load().openShortcut.displayName)")
       }
       .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
       .clipShape(

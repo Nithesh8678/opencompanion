@@ -20,6 +20,8 @@ open dist/OpenCompanion.app
 
 Press **⌘⇧Space** or click the companion to expand it. **Escape** stops output and collapses it. Use its utility menu for Settings, Notebook, and Library. It does not open a conventional app window at launch. A notchless display gets the same top-of-screen companion below its menu bar.
 
+Diagrams open in a separate notebook panel while conversation stays in the notch. Streaming updates retain the same canvas and leave keyboard focus where you are working.
+
 ### ChatGPT subscription mode
 
 Install the official Codex CLI and sign in with `codex login`. In Settings, select **ChatGPT via Codex**, choose its executable path, and run **Test live connection**. A blank model uses the catalog default; only a completed request verifies access. OpenCompanion uses the documented stdio app-server; it does not read or copy your login tokens. Teaching requests disable external tool capabilities and run in an ephemeral read-only thread. Model usage remains subject to your plan and limits.

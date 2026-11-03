@@ -38,6 +38,47 @@ public actor LocalStore {
     return record
   }
 
+  /// Edit an existing user memory without upserting, changing its scope or
+  /// overwriting a newer edit. Opaque payload/provenance bytes are left intact.
+  @discardableResult
+  public func updateMemory(_ original: StoredRecord, title: String, body: String) throws
+    -> StoredRecord
+  {
+    let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedTitle.isEmpty, !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else {
+      throw StoreError.invalidValue("A memory needs a title and some text.")
+    }
+    guard trimmedTitle.utf8.count <= 1_000, body.utf8.count <= 256_000 else {
+      throw StoreError.invalidValue(
+        "Keep the title within 1,000 bytes and memory text within 256,000 bytes.")
+    }
+    guard original.kind == "memory" else {
+      throw StoreError.invalidValue("Only a saved memory can be edited here.")
+    }
+    return try database.transaction {
+      guard
+        let current = try database.query(
+          "SELECT * FROM records WHERE id=?", [.text(original.id)], map: Self.record
+        ).first
+      else { throw StoreError.notFound(original.id) }
+      guard current.kind == "memory", current == original else {
+        throw StoreError.invalidValue(
+          "This memory changed after you opened it. Keep your draft, close the editor, and reopen the latest memory before saving."
+        )
+      }
+      try database.execute(
+        "UPDATE records SET title=?,body=?,updated_at=? WHERE id=? AND kind='memory'",
+        [.text(trimmedTitle), .text(body), .real(Date().timeIntervalSince1970), .text(original.id)])
+      guard
+        let updated = try database.query(
+          "SELECT * FROM records WHERE id=?", [.text(original.id)], map: Self.record
+        ).first
+      else { throw StoreError.notFound(original.id) }
+      return updated
+    }
+  }
+
   public func records(kind: String? = nil, query: String = "") throws -> [StoredRecord] {
     var predicates: [String] = []
     var values: [SQLValue] = []

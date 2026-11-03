@@ -40,5 +40,13 @@ enum RenderAcceptance {
         try data.write(to: output.appendingPathComponent("workspace.png"))
       }
     }
+    if let window = NSApp.windows.first(where: { $0.title == "OpenCompanion Notebook" }),
+      let view = window.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds)
+    {
+      view.cacheDisplay(in: view.bounds, to: rep)
+      if let data = rep.representation(using: .png, properties: [:]) {
+        try data.write(to: output.appendingPathComponent("notebook-panel.png"))
+      }
+    }
   }
 }

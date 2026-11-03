@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import QuartzCore
+@preconcurrency import ScreenCaptureKit
 import SwiftUI
 
 enum CompanionAnchor: String, CaseIterable, Identifiable {
@@ -14,6 +15,8 @@ struct CompanionShellGeometry: Codable, Sendable {
   let frame: CGRect
   let displayFrame: CGRect
   let safeAreaTop: CGFloat
+  let surface: String
+  let cutoutFrame: CGRect?
 }
 
 private enum ShellCaptureSource { case display, window, region, scribble }
@@ -44,7 +47,7 @@ struct ShellCaptureExpectation {
 }
 
 private enum ShellPalette {
-  static let background = Color(red: 0.025, green: 0.035, blue: 0.055)
+  static let background = Color.black
   static let inset = Color(red: 0.075, green: 0.095, blue: 0.13)
   static let text = Color(red: 0.95, green: 0.97, blue: 1)
   static let secondary = Color(red: 0.61, green: 0.67, blue: 0.77)
@@ -53,6 +56,9 @@ private enum ShellPalette {
 
 @MainActor private final class ShellPresentation: ObservableObject {
   @Published var expanded = false
+  @Published var peeked = false
+  @Published var topInset: CGFloat = 0
+  @Published var hasCutout = false
   @Published var focusEpoch = 0
   @Published var anchor: CompanionAnchor = .notch
 }
@@ -81,6 +87,15 @@ private final class ResidentCompanionPanel: NSPanel {
   private var pendingInvocationID: UUID?
   private var pendingTaskGeneration: UInt64?
   private var pendingInvocation: Task<Void, Never>?
+  private var globalPointerMonitor: Any?
+  private var localPointerMonitor: Any?
+  private var hoverTransition: Task<Void, Never>?
+  private var hoverTransitionID: UUID?
+  private var hoverAction = NotchHoverPolicy.Action.none
+  private var hoverPolicy = NotchHoverPolicy()
+  private var lastPointer = NSEvent.mouseLocation
+  private var voicePresentation = false
+  private var voiceTuck: Task<Void, Never>?
   private let dockArt = CompanionDockTileView(frame: NSRect(x: 0, y: 0, width: 128, height: 128))
 
   init(model: AppModel, onOpenWorkspace: @escaping () -> Void) {
@@ -94,6 +109,7 @@ private final class ResidentCompanionPanel: NSPanel {
     panel.hasShadow = true
     panel.hidesOnDeactivate = false
     panel.isReleasedWhenClosed = false
+    panel.acceptsMouseMovedEvents = true
     panel.level = .floating
     panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
     panel.appearance = NSAppearance(named: .darkAqua)
@@ -122,23 +138,124 @@ private final class ResidentCompanionPanel: NSPanel {
           self.position(animated: false)
         }
       }.store(in: &subscriptions)
+    globalPointerMonitor = NSEvent.addGlobalMonitorForEvents(matching: [
+      .mouseMoved, .leftMouseDragged,
+    ]) { [weak self] _ in
+      MainActor.assumeIsolated { self?.pointerMoved(to: NSEvent.mouseLocation) }
+    }
+    localPointerMonitor = NSEvent.addLocalMonitorForEvents(matching: [
+      .mouseMoved, .leftMouseDragged,
+    ]) { [weak self] event in
+      MainActor.assumeIsolated { self?.pointerMoved(to: NSEvent.mouseLocation) }
+      return event
+    }
   }
 
   func show(anchor: CompanionAnchor = .notch) {
     presentation.anchor = anchor
-    screen =
-      NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
-      ?? NSScreen.screens.first
+    screen = preferredScreen()
     position(animated: false)
     panel.orderFrontRegardless()
     updateState()
+    pointerMoved(to: NSEvent.mouseLocation)
   }
 
   var geometry: CompanionShellGeometry {
     let display = screen ?? NSScreen.main
     return CompanionShellGeometry(
       anchor: presentation.anchor.rawValue, expanded: presentation.expanded, frame: panel.frame,
-      displayFrame: display?.frame ?? .zero, safeAreaTop: display?.safeAreaInsets.top ?? 0)
+      displayFrame: display?.frame ?? .zero, safeAreaTop: display?.safeAreaInsets.top ?? 0,
+      surface: surface.rawValue, cutoutFrame: layout?.cutout)
+  }
+
+  private var surface: NotchSurface {
+    presentation.expanded ? .conversation : presentation.peeked ? .peek : .tucked
+  }
+  private var layout: NotchLayout? {
+    guard let display = screen ?? preferredScreen() else { return nil }
+    return NotchLayout(
+      display: display.frame, visible: display.visibleFrame,
+      safeTop: display.safeAreaInsets.top, left: display.auxiliaryTopLeftArea,
+      right: display.auxiliaryTopRightArea)
+  }
+  private func preferredScreen() -> NSScreen? {
+    NSScreen.screens.first(where: {
+      $0.safeAreaInsets.top > 0 && $0.auxiliaryTopLeftArea != nil && $0.auxiliaryTopRightArea != nil
+    })
+      ?? NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
+      ?? NSScreen.main ?? NSScreen.screens.first
+  }
+
+  /// Reveal without activating the app or taking the foreground application's keyboard.
+  func showVoiceActivity() {
+    voiceTuck?.cancel()
+    voicePresentation = true
+    if !presentation.expanded { presentPeek() }
+  }
+
+  func shutdown() {
+    hoverTransition?.cancel()
+    voiceTuck?.cancel()
+    motion.stop()
+    if let globalPointerMonitor { NSEvent.removeMonitor(globalPointerMonitor) }
+    if let localPointerMonitor { NSEvent.removeMonitor(localPointerMonitor) }
+    globalPointerMonitor = nil
+    localPointerMonitor = nil
+  }
+
+  private func presentPeek() {
+    hoverTransition?.cancel()
+    hoverAction = .none
+    presentation.peeked = true
+    panel.permitsKeyboard = false
+    position(animated: true)
+    panel.orderFrontRegardless()
+  }
+
+  func pointerMoved(to location: CGPoint) {
+    lastPointer = location
+    guard presentation.anchor == .notch, let layout else { return }
+    let action = hoverPolicy.action(
+      pointer: location, layout: layout, surface: surface,
+      displayedFrame: panel.frame, voiceActive: voicePresentation)
+    if action == .none {
+      hoverTransition?.cancel()
+      hoverTransition = nil
+      hoverTransitionID = nil
+      hoverAction = .none
+      return
+    }
+    guard action != hoverAction else { return }
+    hoverTransition?.cancel()
+    hoverAction = action
+    let requestID = UUID()
+    hoverTransitionID = requestID
+    hoverTransition = Task { @MainActor [weak self] in
+      do {
+        try await Task.sleep(for: action == .reveal ? .milliseconds(70) : .milliseconds(230))
+      } catch {}
+      guard let self, self.hoverTransitionID == requestID else { return }
+      defer {
+        if self.hoverTransitionID == requestID {
+          self.hoverTransitionID = nil
+          self.hoverTransition = nil
+          self.hoverAction = .none
+        }
+      }
+      guard !Task.isCancelled, let currentLayout = self.layout,
+        self.hoverPolicy.action(
+          pointer: self.lastPointer, layout: currentLayout, surface: self.surface,
+          displayedFrame: self.panel.frame,
+          voiceActive: self.voicePresentation) == action
+      else { return }
+      self.hoverAction = .none
+      if action == .reveal { self.presentPeek() } else { self.collapse(restoringFocus: false) }
+    }
+  }
+
+  private var voiceIsActive: Bool {
+    model.busy || model.listening || model.pushToTalkActive || model.state == "Speaking"
+      || model.state == "Finishing speech" || model.state == "Preparing microphone"
   }
 
   func toggle() { presentation.expanded ? collapse() : expand() }
@@ -155,6 +272,9 @@ private final class ResidentCompanionPanel: NSPanel {
 
   func collapse() {
     invalidateInvocations()
+    hoverPolicy.suppressedUntilExit = true
+    voicePresentation = false
+    voiceTuck?.cancel()
     collapse(restoringFocus: true)
   }
 
@@ -170,8 +290,11 @@ private final class ResidentCompanionPanel: NSPanel {
   }
 
   private func collapse(restoringFocus: Bool) {
-    guard presentation.expanded else { return }
+    hoverTransition?.cancel()
+    hoverAction = .none
+    guard presentation.expanded || presentation.peeked else { return }
     presentation.expanded = false
+    presentation.peeked = false
     panel.permitsKeyboard = false
     panel.resignKey()
     position(animated: true)
@@ -184,12 +307,16 @@ private final class ResidentCompanionPanel: NSPanel {
   }
 
   private func expand() {
+    hoverTransition?.cancel()
+    hoverAction = .none
+    voiceTuck?.cancel()
     if let foreground = NSWorkspace.shared.frontmostApplication,
       foreground.processIdentifier != ProcessInfo.processInfo.processIdentifier
     {
       previousApplication = foreground
     }
     presentation.expanded = true
+    presentation.peeked = false
     panel.permitsKeyboard = true
     position(animated: true)
     // This activation follows an explicit click/hotkey/Dock invocation.
@@ -346,11 +473,54 @@ private final class ResidentCompanionPanel: NSPanel {
     try data.write(to: url, options: .atomic)
   }
 
+  /// Capture only this exact application's own panel for visual QA. A view's
+  /// cacheDisplay can omit compositor-backed SwiftUI controls while inactive.
+  func exportLiveSnapshot(to url: URL) async throws {
+    let inventory = try await SCShareableContent.excludingDesktopWindows(
+      false, onScreenWindowsOnly: true)
+    guard
+      let window = inventory.windows.first(where: {
+        $0.windowID == CGWindowID(panel.windowNumber)
+          && $0.owningApplication?.processID == ProcessInfo.processInfo.processIdentifier
+      })
+    else {
+      throw ProviderError.message(
+        "The companion panel is not available for its own visual capture.")
+    }
+    let configuration = SCStreamConfiguration()
+    let scale = panel.backingScaleFactor
+    configuration.width = Int(panel.frame.width * scale)
+    configuration.height = Int(panel.frame.height * scale)
+    configuration.showsCursor = false
+    let image = try await SCScreenshotManager.captureImage(
+      contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: configuration
+    )
+    guard let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+    else {
+      throw ProviderError.message("The own-panel capture could not be encoded.")
+    }
+    try data.write(to: url, options: .atomic)
+  }
+
   func updateState() {
     dockArt.state = model.state
     dockArt.active = model.busy || model.listening || model.state == "Speaking"
     dockArt.needsDisplay = true
     NSApp.dockTile.display()
+    if voicePresentation && !voiceIsActive && model.error == nil && !presentation.expanded
+      && voiceTuck == nil
+    {
+      voiceTuck = Task { @MainActor [weak self] in
+        do { try await Task.sleep(for: .milliseconds(1200)) } catch { return }
+        guard let self, !self.voiceIsActive else { return }
+        self.voicePresentation = false
+        self.voiceTuck = nil
+        self.pointerMoved(to: NSEvent.mouseLocation)
+      }
+    } else if voiceIsActive {
+      voiceTuck?.cancel()
+      voiceTuck = nil
+    }
     if let pendingTaskGeneration, pendingTaskGeneration != model.taskGeneration {
       invalidateInvocations()
     }
@@ -383,18 +553,25 @@ private final class ResidentCompanionPanel: NSPanel {
   }
 
   private func position(animated: Bool) {
-    guard let display = screen ?? NSScreen.main ?? NSScreen.screens.first else { return }
+    guard let display = screen ?? preferredScreen() else { return }
     screen = display
-    let size =
-      presentation.expanded ? CGSize(width: 430, height: 330) : CGSize(width: 96, height: 48)
+    let notch = NotchLayout(
+      display: display.frame, visible: display.visibleFrame,
+      safeTop: display.safeAreaInsets.top, left: display.auxiliaryTopLeftArea,
+      right: display.auxiliaryTopRightArea)
+    presentation.topInset = presentation.anchor == .notch ? notch.topInset : 0
+    presentation.hasCutout = presentation.anchor == .notch && notch.cutout != nil
+    panel.hasShadow = surface != .tucked || !presentation.hasCutout
+    panel.level =
+      presentation.hasCutout
+      ? NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1) : .floating
+    let size = notch.frame(for: surface).size
     let bounds = display.frame
     let visible = display.visibleFrame
     var origin: CGPoint
     switch presentation.anchor {
     case .notch:
-      // Safe area comes from the actual display; no Mac model/notch sizes.
-      let safeTop = max(display.safeAreaInsets.top, bounds.maxY - visible.maxY)
-      origin = CGPoint(x: bounds.midX - size.width / 2, y: bounds.maxY - safeTop - size.height + 3)
+      origin = notch.frame(for: surface).origin
     case .dock:
       if visible.minX > bounds.minX + 6 {
         origin = CGPoint(x: visible.minX + 10, y: visible.midY - size.height / 2)
@@ -406,7 +583,9 @@ private final class ResidentCompanionPanel: NSPanel {
     case .floating:
       origin = CGPoint(x: visible.maxX - size.width - 24, y: visible.minY + 24)
     }
-    origin.x = min(max(bounds.minX + 6, origin.x), bounds.maxX - size.width - 6)
+    if !(presentation.anchor == .notch && surface == .tucked && notch.cutout != nil) {
+      origin.x = min(max(bounds.minX + 6, origin.x), bounds.maxX - size.width - 6)
+    }
     origin.y = max(bounds.minY + 6, origin.y)
     let frame = CGRect(origin: origin, size: size)
     let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -490,6 +669,8 @@ private struct CompanionShellView: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   private var active: Bool { model.busy || model.listening || model.state == "Speaking" }
   private var stateTitle: String {
+    if model.state == "Preparing microphone" { return "Getting ready to listen" }
+    if model.state == "Finishing speech" { return "Finishing your thought" }
     if model.listening { return "I'm listening" }
     if model.busy { return "Thinking it through" }
     if model.state == "Speaking" { return "Let's talk it through" }
@@ -499,10 +680,14 @@ private struct CompanionShellView: View {
   var body: some View {
     GeometryReader { geometry in
       ZStack(alignment: .top) {
-        ShellMaterial()
-        ShellPalette.background.opacity(0.93)
-        expandedContent.frame(width: 430, height: 330).opacity(presentation.expanded ? 1 : 0)
+        if !presentation.hasCutout { ShellMaterial() }
+        ShellPalette.background
+        expandedContent.frame(width: 430, height: 330).padding(.top, presentation.topInset)
+          .opacity(presentation.expanded ? 1 : 0)
           .allowsHitTesting(presentation.expanded).accessibilityHidden(!presentation.expanded)
+        peekContent.frame(width: 380, height: 142).padding(.top, presentation.topInset)
+          .opacity(presentation.peeked ? 1 : 0).allowsHitTesting(presentation.peeked)
+          .accessibilityHidden(!presentation.peeked)
         Button(action: expand) {
           HStack(spacing: 8) {
             CompanionMote(state: model.state, active: active).frame(width: 34, height: 34)
@@ -512,10 +697,12 @@ private struct CompanionShellView: View {
               Image(systemName: "ellipsis").font(.system(size: 17, weight: .medium))
                 .foregroundStyle(ShellPalette.secondary)
             }
-          }.frame(width: 96, height: 48).contentShape(Rectangle())
-        }.buttonStyle(.plain).opacity(presentation.expanded ? 0 : 1).allowsHitTesting(
-          !presentation.expanded
-        ).accessibilityHidden(presentation.expanded)
+          }.frame(width: 96, height: 36).contentShape(Rectangle())
+        }.buttonStyle(.plain).opacity(
+          presentation.expanded || presentation.peeked || presentation.hasCutout ? 0 : 1
+        ).allowsHitTesting(
+          !presentation.expanded && !presentation.peeked
+        ).accessibilityHidden(presentation.expanded || presentation.peeked)
           .accessibilityLabel("Open OpenCompanion. \(model.state)").accessibilityIdentifier(
             "companion.expand"
           ).help("Open companion · \(ShortcutPreferences.load().openShortcut.displayName)")
@@ -530,7 +717,7 @@ private struct CompanionShellView: View {
         UnevenRoundedRectangle(
           topLeadingRadius: 12, bottomLeadingRadius: 24, bottomTrailingRadius: 24,
           topTrailingRadius: 12
-        ).stroke(.white.opacity(0.11), lineWidth: 0.7)
+        ).stroke(.white.opacity(presentation.hasCutout ? 0 : 0.11), lineWidth: 0.7)
       )
       .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: presentation.expanded)
     }
@@ -559,6 +746,73 @@ private struct CompanionShellView: View {
       }.padding(22).frame(width: 430).preferredColorScheme(.dark)
     }
   }
+  private var peekContent: some View {
+    VStack(alignment: .leading, spacing: 10) {
+      HStack(spacing: 10) {
+        CompanionMote(state: model.state, active: active).frame(width: 31, height: 31)
+        VStack(alignment: .leading, spacing: 2) {
+          Text(stateTitle).font(.system(size: 13, weight: .semibold)).foregroundStyle(
+            ShellPalette.text)
+          Text(
+            model.pushToTalkActive
+              ? "Release ⌃⌥ to send"
+              : model.voiceShortcutAvailable ? "Hold ⌃⌥ to talk" : "Open chat to talk or type"
+          )
+          .font(.system(size: 10.5)).foregroundStyle(ShellPalette.secondary)
+        }
+        Spacer(minLength: 6)
+        if active { ShellSignal(state: model.state).frame(width: 24, height: 18) }
+        if active {
+          Button {
+            model.stop()
+            collapse()
+          } label: {
+            Image(systemName: "stop.circle").font(.system(size: 15)).frame(width: 25, height: 28)
+          }.buttonStyle(.plain).foregroundStyle(ShellPalette.secondary).accessibilityLabel(
+            "Stop response")
+        }
+        Button(action: expand) {
+          Image(systemName: "arrow.up.left.and.arrow.down.right").font(.system(size: 12)).frame(
+            width: 25, height: 28)
+        }.buttonStyle(.plain).foregroundStyle(ShellPalette.secondary).accessibilityLabel(
+          "Open full conversation")
+        Button {
+          open("Settings")
+        } label: {
+          Image(systemName: "slider.horizontal.3").font(.system(size: 12)).frame(
+            width: 25, height: 28)
+        }.buttonStyle(.plain).foregroundStyle(ShellPalette.secondary).accessibilityLabel(
+          "Open settings")
+      }
+      Group {
+        if let error = model.error {
+          Text(error).foregroundStyle(Color(red: 1, green: 0.72, blue: 0.56))
+        } else if let notice = model.voiceNotice {
+          Text(notice).foregroundStyle(ShellPalette.secondary)
+        } else if !model.voiceTranscript.isEmpty
+          && (model.pushToTalkActive || model.listening || model.state == "Finishing speech")
+        {
+          Text(model.voiceTranscript).foregroundStyle(ShellPalette.text)
+        } else if model.busy {
+          Text("Thinking through your question…").foregroundStyle(ShellPalette.secondary)
+        } else if let answer = model.messages.last(where: { $0.role == "assistant" }),
+          model.state == "Speaking"
+        {
+          Text(answer.text).foregroundStyle(ShellPalette.text)
+        } else {
+          Text("Ask out loud, or open your conversation.").foregroundStyle(ShellPalette.secondary)
+        }
+      }.font(.system(size: 12)).lineLimit(2).frame(
+        maxWidth: .infinity, minHeight: 30, alignment: .leading)
+      HStack(spacing: 14) {
+        Button("Open chat", action: expand)
+        if model.scene != nil { Button("Notebook") { open("Notebook") } }
+        Button("Library") { open("Library") }
+        Spacer(minLength: 0)
+      }.font(.system(size: 11, weight: .medium)).buttonStyle(.plain).foregroundStyle(
+        ShellPalette.blue)
+    }.padding(.horizontal, 19).padding(.vertical, 11)
+  }
   private var expandedContent: some View {
     VStack(alignment: .leading, spacing: 0) {
       HStack(spacing: 10) {
@@ -571,7 +825,7 @@ private struct CompanionShellView: View {
               width: 4, height: 4)
             Text(
               model.listening
-                ? "Press the mic to finish"
+                ? (model.pushToTalkActive ? "Release ⌃⌥ to send" : "Press the mic to finish")
                 : active ? "You can stop me anytime" : "Right here when you need a hand"
             ).font(.system(size: 10.5)).foregroundStyle(ShellPalette.secondary)
           }

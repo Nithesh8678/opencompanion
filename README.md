@@ -1,10 +1,10 @@
 # OpenCompanion
 
-An independent, open-source **notch companion for macOS**. It lives at the top of the screen and expands in place for conversation. Editable notebooks, saved work, and settings open only when needed.
+An independent, open-source **notch companion for macOS**. Idle blends into the physical notch. Hover reveals a compact peek; open the conversation when you need it. Hold **Control + Option** to talk, then release to send and hear the answer.
 
 **Active engineering alpha. The complete research specification is not yet fully implemented or acceptance-tested.** See [feature status](docs/FEATURE-STATUS.md) for the exact boundary.
 
-<img src="docs/assets/notch-collapsed.png" width="192" alt="Collapsed notch companion">
+<img src="docs/assets/notch-peek.png" width="380" alt="Compact hover peek attached to the physical notch">
 
 <img src="docs/assets/notch-expanded.png" width="430" alt="Expanded native notch conversation">
 
@@ -18,7 +18,9 @@ scripts/build-app.sh
 open dist/OpenCompanion.app
 ```
 
-Press **⌘⇧Space** or click the companion to expand it. **Escape** stops output and collapses it. Use its utility menu for Settings, Notebook, and Library. It does not open a conventional app window at launch. A notchless display gets the same top-of-screen companion below its menu bar.
+Hover over the camera notch for a quick peek; move away to tuck it without losing your draft. Click **Open chat** or press **⌘⇧Space** for the full conversation. Hold **Control + Option**, wait for Listening, speak, and release either key to submit. The reply is spoken for that turn. **Escape** stops output. A notchless display gets a compact capsule below its menu bar.
+
+Global voice observation needs macOS Input Monitoring or Accessibility access. Voice input also needs Microphone and Speech Recognition permission. Settings reports the installed monitor status and provides repair controls. Voice hotkey turns do not automatically capture the screen or consume selected files/screens; ordinary conversation history and the notebook remain available.
 
 Diagrams open in a separate notebook panel while conversation stays in the notch. Streaming updates retain the same canvas and leave keyboard focus where you are working.
 

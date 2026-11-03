@@ -1,3 +1,4 @@
+import AppKit
 import Carbon
 import Foundation
 import SwiftUI
@@ -80,6 +81,19 @@ struct ShortcutPreferences: Codable, Equatable, Sendable {
   var openShortcut = GlobalShortcut(key: .space, modifiers: [.command, .shift])
   var captureShortcut = GlobalShortcut(key: .r, modifiers: [.command, .shift])
   var captureEnabled = false
+  var voiceHoldEnabled = true
+
+  private enum CodingKeys: String, CodingKey {
+    case openShortcut, captureShortcut, captureEnabled, voiceHoldEnabled
+  }
+  init() {}
+  init(from decoder: any Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    openShortcut = try values.decode(GlobalShortcut.self, forKey: .openShortcut)
+    captureShortcut = try values.decode(GlobalShortcut.self, forKey: .captureShortcut)
+    captureEnabled = try values.decode(Bool.self, forKey: .captureEnabled)
+    voiceHoldEnabled = try values.decodeIfPresent(Bool.self, forKey: .voiceHoldEnabled) ?? true
+  }
 
   @discardableResult func validated() throws -> Self {
     try openShortcut.validated()
@@ -110,7 +124,31 @@ struct ShortcutSettingsView: View {
 
   var body: some View {
     Section("Global shortcuts") {
-      shortcutEditor("Open companion", shortcut: $preferences.openShortcut)
+      shortcutEditor("Open companion for text", shortcut: $preferences.openShortcut)
+      Toggle("Hold Control + Option to talk", isOn: $preferences.voiceHoldEnabled)
+        .accessibilityIdentifier("settings.shortcuts.voiceHold")
+      Text(
+        "Press and hold both modifiers to speak; release either to finish. Command, Shift, Fn or another key cancels the hold. Caps Lock does not change it. Your text/open shortcut remains separate."
+      )
+      .font(.caption).foregroundStyle(.secondary)
+      Text(
+        "Global voice observation needs Input Monitoring permission, and on some macOS configurations Accessibility. If unavailable, use Talk in the notch. Control + Option is also used by VoiceOver; turn this shortcut off here if it conflicts. VoiceOver settings are never changed."
+      )
+      .font(.caption).foregroundStyle(.secondary)
+      HStack {
+        Button("Allow global voice shortcut…") {
+          _ = VoiceShortcutMonitor.requestListenPermission()
+        }
+        Button("Open Input Monitoring") {
+          if let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+          {
+            NSWorkspace.shared.open(url)
+          }
+        }
+      }
+      Text(voicePermissionMessage).font(.caption).foregroundStyle(.secondary)
+        .accessibilityIdentifier("settings.shortcuts.voicePermission")
       Toggle("Enable a shortcut to capture the selected display", isOn: $preferences.captureEnabled)
       if preferences.captureEnabled {
         shortcutEditor("Capture screen", shortcut: $preferences.captureShortcut)
@@ -146,6 +184,13 @@ struct ShortcutSettingsView: View {
           .accessibilityIdentifier("settings.shortcuts.feedback")
       }
     }
+  }
+  private var voicePermissionMessage: String {
+    if CGPreflightListenEventAccess() || AXIsProcessTrusted() {
+      return
+        "Permission is available. Save shortcuts to apply changes; the companion reports whether global observation is installed."
+    }
+    return VoiceShortcutMonitor.permissionMessage
   }
   private func shortcutEditor(_ title: String, shortcut: Binding<GlobalShortcut>) -> some View {
     VStack(alignment: .leading, spacing: 8) {

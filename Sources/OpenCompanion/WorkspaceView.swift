@@ -508,12 +508,19 @@ struct WorkspaceView: View {
       Section("Voice") {
         Toggle("Read accepted answers aloud", isOn: $model.configuration.speechEnabled)
         Text(
-          "Voice input uses Apple Speech Recognition, on-device when available. Otherwise Apple may process audio. Finish recording to review the transcript before sending."
+          "Voice input uses Apple Speech Recognition, on-device when available. Otherwise Apple may process audio. Hold Control + Option and release to send and hear a reply. The Talk button lets you review the transcript before sending."
         ).font(.caption).foregroundStyle(.secondary)
         Text("Stop current output: Escape.").font(.caption)
         Button("Show companion", action: model.showBadge)
       }
       ShortcutSettingsView()
+      Section("Voice shortcut status") {
+        Label(
+          model.voiceShortcutStatus,
+          systemImage: model.voiceShortcutAvailable ? "checkmark.circle" : "keyboard.badge.ellipsis"
+        )
+        .font(.caption).textSelection(.enabled)
+      }
       Section("Permissions") {
         HStack {
           Label(

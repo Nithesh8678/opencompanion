@@ -13,8 +13,8 @@
 <key>LSMinimumSystemVersion</key><string>14.2</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
-<key>NSMicrophoneUsageDescription</key><string>OpenCompanion records audio only when you start voice input.</string>
-<key>NSSpeechRecognitionUsageDescription</key><string>Convert your deliberate voice input into a transcript you can review before sending.</string>
+<key>NSMicrophoneUsageDescription</key><string>Listen only when you hold Control + Option or start Talk.</string>
+<key>NSSpeechRecognitionUsageDescription</key><string>Transcribe your deliberate speech. Releasing Control + Option sends your utterance to your configured AI provider; the Talk button lets you review first.</string>
 <key>NSScreenCaptureUsageDescription</key><string>Share a screen frame only when you choose Add screen.</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>

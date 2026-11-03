@@ -34,6 +34,12 @@ struct NotebookTurnBinding: Sendable, Equatable {
   @Published var notice: String?
   @Published var busy = false
   @Published var listening = false
+  @Published var pushToTalkActive = false
+  @Published var voiceInputState = "Ready"
+  @Published var voiceShortcutAvailable = false
+  @Published var voiceShortcutStatus = "Control+Option shortcut is not registered."
+  @Published var voiceTranscript = ""
+  @Published var voiceNotice: String?
   @Published var configuration = ProviderConfiguration.load()
   @Published var providerMode =
     UserDefaults.standard.string(forKey: "providerMode") ?? "ChatGPT via Codex"
@@ -75,6 +81,11 @@ struct NotebookTurnBinding: Sendable, Equatable {
   let credentials = CredentialStore()
   private(set) var store: LocalStore?
   private var turn: Task<Void, Never>?
+  private var voiceStartTask: Task<Void, Never>?
+  private var voiceSessionID: UUID?
+  private var voiceMode: VoiceInputMode?
+  private var voiceDraftGuard: VoiceDraftGuard?
+  private var turnSpeaksAloud = false
   private var generation: UInt64 = 0
   var taskGeneration: UInt64 { generation }
   var capturePublicationRevision: UInt64 { captureGate.generation }
@@ -111,12 +122,30 @@ struct NotebookTurnBinding: Sendable, Equatable {
     }
     voice.onState = { [weak self] state in
       guard let self else { return }
-      self.state = state
+      if !self.listening {
+        self.state = state == "Ready" && self.busy ? "Thinking" : state
+        self.updateBadge()
+      }
+    }
+    voice.onInputState = { [weak self] snapshot in self?.acceptVoiceState(snapshot) }
+    voice.onTranscript = { [weak self] id, mode, text, _ in
+      self?.acceptVoiceTranscript(id: id, mode: mode, text: text)
+    }
+    voice.onInputCompletion = { [weak self] completion in self?.completeVoiceInput(completion) }
+    voice.onInputError = { [weak self] id, error in
+      guard let self, self.voiceSessionID == id else { return }
+      self.voiceSessionID = nil
+      self.voiceMode = nil
+      self.listening = false
+      self.pushToTalkActive = false
+      self.showError(error)
+      self.state = "Ready"
       self.updateBadge()
     }
-    voice.onTranscript = { [weak self] text, final in
-      self?.input = text
-      if final { self?.listening = false }
+    voice.onInputNotice = { [weak self] id, notice in
+      guard let self, self.voiceSessionID == id else { return }
+      self.notice = notice
+      self.voiceNotice = notice
     }
     voice.onSpeechEvent = { [weak self] event in self?.record(event) }
     lastExternalPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
@@ -195,11 +224,14 @@ struct NotebookTurnBinding: Sendable, Equatable {
       } catch { connectionStatus = error.localizedDescription }
     }
   }
-  func send() {
-    let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+  func send() { send(textOverride: nil, voiceOnly: false, speakAloud: false) }
+  private func send(textOverride: String?, voiceOnly: Bool, speakAloud: Bool) {
+    let text = (textOverride ?? input).trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty else { return }
     stop()
-    input = ""
+    if textOverride == nil { input = "" }
+    turnSpeaksAloud = speakAloud
+    voiceNotice = nil
     error = nil
     generation += 1
     let current = generation
@@ -210,10 +242,10 @@ struct NotebookTurnBinding: Sendable, Equatable {
     record("turn.declaredEnd.textSubmit")
     messages.append(ChatLine(role: "user", text: text))
     let history = messages
-    let context = selectedContext + (evidence?.semanticText ?? "")
+    let context = voiceOnly ? "" : selectedContext + (evidence?.semanticText ?? "")
     outputSceneBinding = NotebookTurnBinding(documentID: scene?.id, revision: scene?.revision)
-    let turnEvidence = evidence.map(ScreenEvidenceIdentity.init)
-    let screenshot = evidence?.image
+    let turnEvidence = voiceOnly ? nil : evidence.map(ScreenEvidenceIdentity.init)
+    let screenshot = voiceOnly ? nil : evidence?.image
     let activeScene = scene
     let config = configuration
     let key = apiKey
@@ -262,7 +294,7 @@ struct NotebookTurnBinding: Sendable, Equatable {
       }
       messages.append(ChatLine(role: "assistant", text: text))
       record("semantic.text.accepted")
-      if configuration.speechEnabled { voice.speak(text) }
+      if configuration.speechEnabled || turnSpeaksAloud { voice.speak(text) }
     case "scene":
       guard let outputSceneBinding else { throw CancellationError() }
       let expectedBase = try outputSceneBinding.checkedBase(
@@ -303,29 +335,131 @@ struct NotebookTurnBinding: Sendable, Equatable {
     spatialSelector.cancel()
     turn?.cancel()
     turn = nil
+    voiceStartTask?.cancel()
+    voiceStartTask = nil
+    voiceSessionID = nil
+    voiceMode = nil
+    voiceDraftGuard = nil
+    turnSpeaksAloud = false
     voice.stop()
     listening = false
+    pushToTalkActive = false
+    voiceInputState = "Ready"
     busy = false
     state = "Ready"
     overlay.clear()
     record("turn.cancelled")
     updateBadge()
   }
+  /// Manual microphone capture ends in a reviewable draft; it never submits.
   func toggleVoice() {
-    if listening {
-      voice.finishListening()
-      listening = false
-      record("ptt.released")
+    if voiceMode == .manualReview, let id = voiceSessionID, listening {
+      voiceStartTask?.cancel()
+      voiceStartTask = nil
+      voice.finishListening(id: id)
       return
     }
+    beginVoiceInput(mode: .manualReview)
+  }
+
+  /// The global modifier hotkey calls these two edges. Repeated keyDown events
+  /// cannot restart a held session; hover/panel focus is managed independently.
+  func beginPushToTalk() {
+    guard !pushToTalkActive else { return }
+    beginVoiceInput(mode: .pushToTalk)
+  }
+  func endPushToTalk() {
+    guard voiceMode == .pushToTalk, let id = voiceSessionID else { return }
+    voiceStartTask?.cancel()
+    voiceStartTask = nil
+    record("ptt.released")
+    voice.finishListening(id: id)
+  }
+
+  /// Lifecycle/tap loss also cancels the recognized tail after physical key
+  /// release. A manual microphone session or an already submitted turn is kept.
+  func cancelPushToTalk() {
+    guard voiceMode == .pushToTalk else { return }
     stop()
-    listening = true
-    record("keyDown.voice")
-    Task {
-      do { try await voice.startListening() } catch {
-        listening = false
-        showError(error)
+  }
+
+  private func beginVoiceInput(mode: VoiceInputMode) {
+    stop()
+    error = nil
+    voiceTranscript = ""
+    voiceNotice = nil
+    let id = UUID()
+    voiceSessionID = id
+    voiceMode = mode
+    voiceDraftGuard = VoiceDraftGuard(draft: input)
+    record(mode == .pushToTalk ? "keyDown.ptt" : "manualVoice.started")
+    voice.beginInput(id: id, mode: mode)
+    voiceStartTask = Task { [weak self] in
+      guard let self else { return }
+      do { try await self.voice.startListening(id: id) } catch {
+        // Current permission/route errors are emitted by VoiceService. Released
+        // or stopped startup tasks deliberately produce no late UI mutation.
       }
+    }
+  }
+
+  private func acceptVoiceState(_ snapshot: VoiceInputSnapshot) {
+    guard let id = snapshot.sessionID, id == voiceSessionID else { return }
+    voiceInputState = snapshot.phase.label
+    voiceTranscript = snapshot.transcript
+    listening = snapshot.phase.isActive
+    pushToTalkActive = snapshot.mode == .pushToTalk && snapshot.isHeld && snapshot.phase.isActive
+    state = snapshot.phase.isActive ? snapshot.phase.label : (busy ? "Thinking" : "Ready")
+    updateBadge()
+  }
+
+  private func acceptVoiceTranscript(id: UUID, mode: VoiceInputMode, text: String) {
+    guard voiceSessionID == id else { return }
+    voiceTranscript = text
+    guard mode == .manualReview else { return }
+    guard
+      let replacement = voiceDraftGuard?.replacement(
+        mode: mode, transcript: text, currentDraft: input)
+    else {
+      voiceStartTask?.cancel()
+      voiceSessionID = nil
+      voiceMode = nil
+      voice.cancelInput()
+      listening = false
+      pushToTalkActive = false
+      voiceInputState = "Ready"
+      state = busy ? "Thinking" : "Ready"
+      notice = "Your typed edit was kept. Speech input stopped."
+      updateBadge()
+      return
+    }
+    input = replacement
+  }
+
+  private func completeVoiceInput(_ completion: VoiceInputCompletion) {
+    guard voiceSessionID == completion.sessionID else { return }
+    voiceSessionID = nil
+    voiceMode = nil
+    voiceStartTask = nil
+    listening = false
+    pushToTalkActive = false
+    voiceInputState = "Ready"
+    state = "Ready"
+    guard !completion.transcript.isEmpty else {
+      notice =
+        "No speech was captured. Hold Control+Option until Listening appears, then speak and release."
+      voiceNotice = notice
+      updateBadge()
+      return
+    }
+    if completion.mode.submitsOnCompletion {
+      record(completion.isFinal ? "ptt.finalTranscript" : "ptt.recognizedTailDeadline")
+      // Keep the ordinary conversation/notebook workflow and typed draft. Only
+      // selected screen/file/memory evidence is omitted from this voice turn.
+      send(textOverride: completion.transcript, voiceOnly: true, speakAloud: true)
+    } else {
+      notice = "Transcript ready. Review the draft and send when ready."
+      updateBadge()
     }
   }
   private func invalidateCapture() {

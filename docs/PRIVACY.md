@@ -1,6 +1,8 @@
 # Privacy and local boundaries
 
-Microphone input starts only on explicit invocation. Text is reviewed before sending. Apple Speech uses on-device recognition where available; otherwise Apple may process audio. Speech output uses system voices. No audio recording is persisted by this build.
+Microphone input starts only on explicit invocation. Holding Control + Option starts push-to-talk; releasing sends the recognized utterance to the configured reasoning provider and speaks the reply. The manual Talk button produces a draft for review before sending. Voice hotkey turns omit selected screen/file/memory evidence while preserving ordinary conversation and notebook context. Apple Speech uses on-device recognition where available; otherwise Apple may process audio. Speech output uses system voices. No audio recording is persisted by this build.
+
+The global voice shortcut uses a passive event observer for modifier transitions and ordinary-key press/release categories so other shortcuts can cancel recording. It does not suppress events or read/store typed characters or key codes. macOS Input Monitoring or Accessibility permission is required; Settings reports whether the observer was actually installed.
 
 Add screen captures one selected display frame using ScreenCaptureKit. It excludes OpenCompanion's app windows. AX/OCR are bounded; secure AX fields are omitted. The selected image and extracted evidence are sent only with a user question. Frames are held in memory and can be removed. Region/scribble mode is explicit. Actual capture-exclusion acceptance is still required; see feature status.
 

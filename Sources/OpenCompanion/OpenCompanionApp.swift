@@ -21,6 +21,11 @@ import SwiftUI
   private let hotkey = HotkeyService()
   private let captureHotkey = HotkeyService()
   private let stopHotkey = HotkeyService()
+  private let voiceShortcut = VoiceShortcutMonitor()
+  private var voiceShortcutSubscription: AnyCancellable?
+  private var activationSubscription: AnyCancellable?
+  private var voiceHoldGeneration: UInt64?
+  private var voiceLifecycleSubscriptions = Set<AnyCancellable>()
   private var stateSubscription: AnyCancellable?
   private var shortcutSubscription: AnyCancellable?
   private var stopKeyRegistered = false
@@ -32,6 +37,7 @@ import SwiftUI
     NSApp.appearance = NSAppearance(named: .aqua)
     let acceptanceMode = [
       "--keychain-acceptance", "--smoke-test-codex", "--render-acceptance", "--capture-acceptance",
+      "--interaction-acceptance",
     ].contains(where: CommandLine.arguments.contains)
     model = AppModel(acceptanceMode: acceptanceMode)
     model.onOpen = { [weak self] in self?.openRequestedSurface() }
@@ -78,6 +84,23 @@ import SwiftUI
     shell = CompanionShell(
       model: model, onOpenWorkspace: { [weak self] in self?.openRequestedSurface() })
     shell?.show(anchor: .notch)
+    if let index = CommandLine.arguments.firstIndex(of: "--interaction-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 1 < CommandLine.arguments.count, let shell else {
+            throw ProviderError.message("Provide an output directory for interaction acceptance.")
+          }
+          try await NotchAcceptance.run(
+            shell: shell, model: model,
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+        } catch {
+          print("NOTCH_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
+    }
     if let index = CommandLine.arguments.firstIndex(of: "--capture-acceptance") {
       Task { @MainActor in
         do {
@@ -98,6 +121,33 @@ import SwiftUI
     }
     if !acceptanceMode {
       registerGlobalShortcuts()
+      voiceShortcutSubscription = voiceShortcut.$availability.sink { [weak self] availability in
+        MainActor.assumeIsolated {
+          self?.model.voiceShortcutAvailable = availability.isInstalled
+          self?.model.voiceShortcutStatus = availability.statusText
+          if !availability.isInstalled { self?.model.cancelPushToTalk() }
+        }
+      }
+      for notification in [
+        NSWorkspace.willSleepNotification, NSWorkspace.screensDidSleepNotification,
+        NSWorkspace.sessionDidResignActiveNotification,
+      ] {
+        NSWorkspace.shared.notificationCenter.publisher(for: notification).sink { [weak self] _ in
+          MainActor.assumeIsolated {
+            self?.voiceShortcut.cancelActive(reason: .sessionInactive)
+            self?.model.cancelPushToTalk()
+          }
+        }.store(in: &voiceLifecycleSubscriptions)
+      }
+      activationSubscription = NotificationCenter.default.publisher(
+        for: NSApplication.didBecomeActiveNotification
+      )
+      .sink { [weak self] _ in
+        MainActor.assumeIsolated {
+          guard let self, !self.voiceShortcut.isObservationInstalled else { return }
+          self.registerVoiceShortcut()
+        }
+      }
       shortcutSubscription = NotificationCenter.default.publisher(
         for: .shortcutPreferencesDidChange
       )
@@ -114,6 +164,7 @@ import SwiftUI
           if active {
             let result = self.stopHotkey.register(keyCode: UInt32(kVK_Escape), modifiers: 0) {
               [weak self] in
+              self?.voiceShortcut.cancelActive(reason: .manualStop)
               self?.model.stop()
               self?.shell?.collapse()
             }
@@ -134,6 +185,7 @@ import SwiftUI
             self.model.busy || self.model.listening || self.model.state == "Speaking"
             || self.model.state == "Observing"
           if event.keyCode == 53 && (companionFocused || active) {
+            self.voiceShortcut.cancelActive(reason: .manualStop)
             self.model.stop()
             self.shell?.collapse()
             return true
@@ -200,7 +252,33 @@ import SwiftUI
     } else {
       captureHotkey.unregister()
     }
+    registerVoiceShortcut()
     if !failures.isEmpty { model.notice = failures.joined(separator: "\n") }
+  }
+
+  private func registerVoiceShortcut() {
+    voiceShortcut.start(
+      enabled: ShortcutPreferences.load().voiceHoldEnabled,
+      onPressed: { [weak self] in
+        guard let self else { return }
+        self.model.beginPushToTalk()
+        self.voiceHoldGeneration = self.model.taskGeneration
+        self.shell?.showVoiceActivity()
+      },
+      onReleased: { [weak self] in
+        guard let self else { return }
+        let generation = self.voiceHoldGeneration
+        self.voiceHoldGeneration = nil
+        guard generation == self.model.taskGeneration else { return }
+        self.model.endPushToTalk()
+      },
+      onCancelled: { [weak self] _ in
+        guard let self else { return }
+        let generation = self.voiceHoldGeneration
+        self.voiceHoldGeneration = nil
+        guard generation == self.model.taskGeneration else { return }
+        self.model.stop()
+      })
   }
 
   private func installMenus() {
@@ -295,13 +373,18 @@ import SwiftUI
     model.section = "Settings"
     showWorkspace()
   }
-  @objc private func stop() { model.stop() }
+  @objc private func stop() {
+    voiceShortcut.cancelActive(reason: .manualStop)
+    model.stop()
+  }
   @objc private func quit() { NSApp.terminate(nil) }
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
     shell?.toggle()
     return false
   }
   func applicationWillTerminate(_ notification: Notification) {
+    voiceShortcut.stop()
+    shell?.shutdown()
     model.stop()
     model.runner.stop()
     model.browser.stop()

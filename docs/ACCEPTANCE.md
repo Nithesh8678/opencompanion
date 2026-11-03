@@ -13,6 +13,9 @@
 - 7 shell capture tests: only fresh matching frames complete an invocation; Stop and superseding captures invalidate late results.
 - 5 shortcut tests: safe modifiers, duplicate actions, corrupted preferences and persistence.
 - 1 capture-sampler test: JPEG color conversion, negative display origins, retained fixtures and invalid controls.
+- 4 notch layout/hover tests: exact cutout footprint, negative display origins, notchless fallback, pointer exit, pinned conversation and hover rearming.
+- 11 voice input tests: permission/start/release/Stop ordering, final/deadline races, cancellation after release, old tails after a new hold and typed-draft preservation.
+- 9 modifier-voice tests: Control+Option edges, repeats, extra keys/modifiers, lock-bit policy, cancellation and preference migration.
 - 5 native host tests;6 selfhost relay integration tests;4 browser protocol/scope tests.
 - 10 real Chromium DOM assertions, including shadow DOM, stale document refs, protected/covered controls and fresh post-action evidence. Extension messaging was fixture-driven; this is not installed MV3/native-host pairing.
 - Real Swift browser bridge↔Unix socket↔Python host↔framed-message round trip.
@@ -32,6 +35,8 @@ No tokens were read/copied; external capabilities were disabled for the ephemera
 The app-bundle Keychain acceptance probe saved/read/deleted a unique temporary public fixture successfully. No real credential was read or copied.
 
 The real signed-to-run-locally bundle launched with **only its collapsed notch panel**, with no normal workspace window. Accessibility inspection found its Expand control; clicking expanded it and focused its message field. Native safe geometry reported display1512×982, safe top32pt, collapsed panel96×48pt.
+
+The corrected notch implementation replaces that earlier floating idle chip: the current display reports a185×32pt cutout at(663,950), and idle matches it exactly. A real panel diagnostic drove synthetic pointer positions through two hover/tuck passes, preserved an unsent fixture draft and the foreground application, and rendered the compact peek and explicit full conversation. This exercises the real window/layout path; physical pointer and voice-key delivery still need installed human acceptance.
 
 A live question submitted through the expanded notch UI completed with a provider answer, returning the panel to Ready. This verifies the actual UI→provider→UI path.
 

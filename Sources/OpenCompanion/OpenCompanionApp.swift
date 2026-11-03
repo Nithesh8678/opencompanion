@@ -35,6 +35,7 @@ import SwiftUI
     ].contains(where: CommandLine.arguments.contains)
     model = AppModel(acceptanceMode: acceptanceMode)
     model.onOpen = { [weak self] in self?.openRequestedSurface() }
+    model.onCompanionRequested = { [weak self] in self?.shell?.open() }
     model.onSceneReady = { [weak self] in self?.showExplanation(focus: false) }
     installMenus()
     if CommandLine.arguments.contains("--keychain-acceptance") {
@@ -127,9 +128,14 @@ import SwiftUI
       }
       localKeys = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
         let consume = MainActor.assumeIsolated {
-          if event.keyCode == 53 {
-            self?.model.stop()
-            self?.shell?.collapse()
+          guard let self else { return false }
+          let companionFocused = event.window?.identifier?.rawValue == "org.opencompanion.resident"
+          let active =
+            self.model.busy || self.model.listening || self.model.state == "Speaking"
+            || self.model.state == "Observing"
+          if event.keyCode == 53 && (companionFocused || active) {
+            self.model.stop()
+            self.shell?.collapse()
             return true
           }
           return false

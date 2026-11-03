@@ -91,6 +91,7 @@ struct NotebookTurnBinding: Sendable, Equatable {
   private var lastTick = ProcessInfo.processInfo.systemUptime
   private var badge: NSPanel?
   var onOpen: (() -> Void)?
+  var onCompanionRequested: (() -> Void)?
   var onSceneReady: (() -> Void)?
   private var trace: [[String: String]] = []
   init(acceptanceMode: Bool = false) {
@@ -611,7 +612,7 @@ struct NotebookTurnBinding: Sendable, Equatable {
     } catch { showError(error) }
   }
   func updateBadge() { badge?.contentView = NSHostingView(rootView: CompanionBadge(state: state)) }
-  func showBadge() { notice = "OpenCompanion lives at the notch. Use ⌘⇧Space to expand it." }
+  func showBadge() { onCompanionRequested?() }
 }
 
 actor ReceiptFlag {

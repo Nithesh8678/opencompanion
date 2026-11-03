@@ -12,6 +12,7 @@ enum CaptureAcceptance {
         "Capture acceptance output must be inside an ignored dist directory.")
     }
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+    try samplerRegression()
     let screenAllowed = CGPreflightScreenCaptureAccess()
     let axAllowed = AXIsProcessTrusted()
     var receipt = Receipt(
@@ -80,21 +81,29 @@ enum CaptureAcceptance {
       configuration.showsCursor = false
       configuration.scalesToFit = true
       var included: CGImage?
-      var includedMatch = Match(score: 0, topLeftY: true)
+      var includedData: Data?
+      var includedMatch = Match(score: 0, topLeftY: true, reference: nil)
       for _ in 0..<3 {
         try Task.checkCancellation()
-        let image = try await SCScreenshotManager.captureImage(
+        let source = try await SCScreenshotManager.captureImage(
           contentFilter: includedFilter, configuration: configuration)
+        // Compare the same JPEG representation in both directions. AppKit's
+        // JPEG encoder can attach a different color profile than the SCK image.
+        let data = try jpeg(source)
+        guard let image = NSBitmapImageRep(data: data)?.cgImage else {
+          throw DiagnosticError.message("The included JPEG could not be decoded.")
+        }
         let match = bestMatch(image: image, displayFrame: screen.frame, fixtureFrame: fixtureFrame)
         included = image
+        includedData = data
         includedMatch = match
         if match.score >= 0.85 { break }
         try await Task.sleep(for: .milliseconds(60))
       }
-      guard let included else {
+      guard let included, let includedData else {
         throw DiagnosticError.message("No included control image arrived.")
       }
-      try jpeg(included).write(
+      try includedData.write(
         to: output.appendingPathComponent("included-control.jpg"), options: .atomic)
       receipt.controlMatch = includedMatch.score
       receipt.controlPixels = [included.width, included.height]
@@ -121,7 +130,11 @@ enum CaptureAcceptance {
       }
       let excludedScore = match(
         image: excluded, displayFrame: evidence.screenRect, fixtureFrame: fixtureFrame,
-        topLeftY: includedMatch.topLeftY)
+        topLeftY: includedMatch.topLeftY, reference: includedMatch.reference)
+      receipt.calibratedPaletteSRGB = includedMatch.reference?.colors.map {
+        [$0.red, $0.green, $0.blue]
+      }
+      receipt.calibrationMinimumSeparation = includedMatch.reference?.minimumSeparation
       receipt.excludedMatch = excludedScore
       receipt.excludedPixels = [excluded.width, excluded.height]
       receipt.fixturePattern = CheckerView.pattern
@@ -173,23 +186,104 @@ enum CaptureAcceptance {
     return last
   }
 
+  /// Read-only replay for an already-authorized local receipt. This performs no
+  /// screen capture and never rewrites the images or the original receipt.
+  @MainActor static func replaySavedArtifacts(output: URL) throws -> (
+    control: Double, excluded: Double
+  ) {
+    let decoder = JSONDecoder()
+    decoder.dateDecodingStrategy = .iso8601
+    let receipt = try decoder.decode(
+      Receipt.self, from: Data(contentsOf: output.appendingPathComponent("capture-metadata.json")))
+    guard let displayFrame = receipt.displayFrame, let fixtureFrame = receipt.fixtureFrame,
+      let control = NSBitmapImageRep(
+        data: try Data(contentsOf: output.appendingPathComponent("included-control.jpg")))?.cgImage,
+      let excluded = NSBitmapImageRep(
+        data: try Data(contentsOf: output.appendingPathComponent("excluded-production.jpg")))?
+        .cgImage
+    else { throw DiagnosticError.message("The saved receipt or JPEGs are incomplete.") }
+    let reference = bestMatch(
+      image: control, displayFrame: displayFrame, fixtureFrame: fixtureFrame)
+    let excludedScore = match(
+      image: excluded, displayFrame: displayFrame, fixtureFrame: fixtureFrame,
+      topLeftY: reference.topLeftY, reference: reference.reference)
+    return (reference.score, excludedScore)
+  }
+
   @MainActor private static func bestMatch(
     image: CGImage, displayFrame: CGRect, fixtureFrame: CGRect
   ) -> Match {
-    let top = match(
+    let top = calibratedMatch(
       image: image, displayFrame: displayFrame, fixtureFrame: fixtureFrame, topLeftY: true)
-    let bottom = match(
+    let bottom = calibratedMatch(
       image: image, displayFrame: displayFrame, fixtureFrame: fixtureFrame, topLeftY: false)
-    return top >= bottom ? Match(score: top, topLeftY: true) : Match(score: bottom, topLeftY: false)
+    return top.score >= bottom.score ? top : bottom
+  }
+
+  @MainActor private static func calibratedMatch(
+    image: CGImage, displayFrame: CGRect, fixtureFrame: CGRect, topLeftY: Bool
+  ) -> Match {
+    let values = samples(
+      image: image, displayFrame: displayFrame, fixtureFrame: fixtureFrame, topLeftY: topLeftY)
+    guard values.count == 40 else { return Match(score: 0, topLeftY: topLeftY, reference: nil) }
+    var colors: [RGB] = []
+    for label in 0..<4 {
+      var sum = RGB(red: 0, green: 0, blue: 0)
+      var count = 0.0
+      for index in values.indices where CheckerView.pattern[index] == label {
+        sum.red += values[index].red
+        sum.green += values[index].green
+        sum.blue += values[index].blue
+        count += 1
+      }
+      colors.append(RGB(red: sum.red / count, green: sum.green / count, blue: sum.blue / count))
+    }
+    var separation = Double.infinity
+    for first in 0..<4 {
+      for second in (first + 1)..<4 {
+        separation = min(separation, colors[first].distance(to: colors[second]))
+      }
+    }
+    // A uniform/random desktop patch cannot calibrate itself into a checker:
+    // all four groups must be distinct, and each repeated group must be tight.
+    guard separation >= 0.30 else { return Match(score: 0, topLeftY: topLeftY, reference: nil) }
+    let reference = Reference(
+      colors: colors, tolerance: min(0.18, separation * 0.28), minimumSeparation: separation)
+    return Match(
+      score: score(values, reference: reference), topLeftY: topLeftY, reference: reference)
   }
 
   @MainActor private static func match(
-    image: CGImage, displayFrame: CGRect, fixtureFrame: CGRect, topLeftY: Bool
+    image: CGImage, displayFrame: CGRect, fixtureFrame: CGRect, topLeftY: Bool,
+    reference: Reference?
   ) -> Double {
-    guard displayFrame.width > 0, displayFrame.height > 0 else { return 0 }
+    guard let reference else { return 0 }
+    return score(
+      samples(
+        image: image, displayFrame: displayFrame, fixtureFrame: fixtureFrame, topLeftY: topLeftY),
+      reference: reference)
+  }
+
+  @MainActor private static func score(_ values: [RGB], reference: Reference) -> Double {
+    guard values.count == 40 else { return 0 }
+    var matches = 0
+    for index in values.indices {
+      if values[index].distance(to: reference.colors[CheckerView.pattern[index]])
+        <= reference.tolerance
+      {
+        matches += 1
+      }
+    }
+    return Double(matches) / 40
+  }
+
+  @MainActor private static func samples(
+    image: CGImage, displayFrame: CGRect, fixtureFrame: CGRect, topLeftY: Bool
+  ) -> [RGB] {
+    guard displayFrame.width > 0, displayFrame.height > 0 else { return [] }
     let bitmap = NSBitmapImageRep(cgImage: image)
     let inner = fixtureFrame.insetBy(dx: 16, dy: 16)
-    var matches = 0
+    var values: [RGB] = []
     for row in 0..<5 {
       for column in 0..<8 {
         let x = inner.minX + (CGFloat(column) + 0.5) * inner.width / 8
@@ -198,19 +292,63 @@ enum CaptureAcceptance {
         let normalizedY = (y - displayFrame.minY) / displayFrame.height
         let py = Int((topLeftY ? 1 - normalizedY : normalizedY) * CGFloat(image.height))
         guard px >= 0, py >= 0, px < image.width, py < image.height,
-          let color = bitmap.colorAt(x: px, y: py)?.usingColorSpace(.deviceRGB)
-        else { continue }
-        let expected = CheckerView.palette[CheckerView.pattern[row * 8 + column]]
-        // Allow JPEG/chroma/color conversion, but keep four colors distinct.
-        if abs(color.redComponent - expected.0) < 0.16,
-          abs(color.greenComponent - expected.1) < 0.16,
-          abs(color.blueComponent - expected.2) < 0.16
-        {
-          matches += 1
-        }
+          let color = bitmap.colorAt(x: px, y: py)?.usingColorSpace(.sRGB)
+        else { return [] }
+        values.append(
+          RGB(red: color.redComponent, green: color.greenComponent, blue: color.blueComponent))
       }
     }
-    return Double(matches) / 40
+    return values
+  }
+
+  /// Synthetic regression uses no screen pixels: JPEG/profile conversion,
+  /// negative display origins, retained fixtures and empty controls are checked.
+  @MainActor static func samplerRegression() throws {
+    let display = CGRect(x: -300, y: 120, width: 800, height: 600)
+    let fixture = CGRect(x: -100, y: 220, width: 416, height: 272)
+    func synthetic(checker: Bool) throws -> CGImage {
+      guard
+        let context = CGContext(
+          data: nil, width: 800, height: 600, bitsPerComponent: 8,
+          bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+          bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+      else { throw DiagnosticError.message("Synthetic sampler bitmap could not be created.") }
+      context.setFillColor(CGColor(gray: 0.12, alpha: 1))
+      context.fill(CGRect(x: 0, y: 0, width: 800, height: 600))
+      if checker {
+        let inner = fixture.offsetBy(dx: -display.minX, dy: -display.minY).insetBy(dx: 16, dy: 16)
+        for row in 0..<5 {
+          for column in 0..<8 {
+            let rgb = CheckerView.palette[CheckerView.pattern[row * 8 + column]]
+            context.setFillColor(CGColor(red: rgb.0, green: rgb.1, blue: rgb.2, alpha: 1))
+            context.fill(
+              CGRect(
+                x: inner.minX + CGFloat(column) * inner.width / 8,
+                y: inner.minY + CGFloat(row) * inner.height / 5, width: inner.width / 8,
+                height: inner.height / 5))
+          }
+        }
+      }
+      guard let image = context.makeImage(),
+        let decoded = NSBitmapImageRep(data: try jpeg(image))?.cgImage
+      else {
+        throw DiagnosticError.message("Synthetic JPEG conversion failed.")
+      }
+      return decoded
+    }
+    let checker = try synthetic(checker: true)
+    let empty = try synthetic(checker: false)
+    let control = bestMatch(image: checker, displayFrame: display, fixtureFrame: fixture)
+    let retained = match(
+      image: checker, displayFrame: display, fixtureFrame: fixture,
+      topLeftY: control.topLeftY, reference: control.reference)
+    let excluded = match(
+      image: empty, displayFrame: display, fixtureFrame: fixture,
+      topLeftY: control.topLeftY, reference: control.reference)
+    let invalidControl = bestMatch(image: empty, displayFrame: display, fixtureFrame: fixture)
+    guard control.score >= 0.95, retained >= 0.95, excluded <= 0.05,
+      invalidControl.score == 0, invalidControl.reference == nil
+    else { throw DiagnosticError.message("Synthetic checker sampler regression failed.") }
   }
 
   @MainActor private static func jpeg(_ image: CGImage) throws -> Data {
@@ -231,9 +369,23 @@ enum CaptureAcceptance {
       to: output.appendingPathComponent("capture-metadata.json"), options: .atomic)
   }
 
+  private struct RGB {
+    var red: Double
+    var green: Double
+    var blue: Double
+    func distance(to other: RGB) -> Double {
+      sqrt(pow(red - other.red, 2) + pow(green - other.green, 2) + pow(blue - other.blue, 2))
+    }
+  }
+  private struct Reference {
+    let colors: [RGB]
+    let tolerance: Double
+    let minimumSeparation: Double
+  }
   private struct Match {
     let score: Double
     let topLeftY: Bool
+    let reference: Reference?
   }
   private struct Receipt: Codable {
     var status = "not-run"
@@ -252,6 +404,8 @@ enum CaptureAcceptance {
     var excludedPixels: [Int]?
     var sampleYMapping: String?
     var fixturePattern: [Int]?
+    var calibratedPaletteSRGB: [[Double]]?
+    var calibrationMinimumSeparation: Double?
     var note = "No capture has been verified."
   }
   private enum DiagnosticError: LocalizedError {

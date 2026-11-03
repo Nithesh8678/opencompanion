@@ -76,7 +76,13 @@ enum CodexIntegrationSmoke {
       scene.nodes.filter({ $0.kind == .text && !$0.text.isEmpty }).count >= 2,
       scene.nodes.contains(where: { $0.kind == .arrow || $0.kind == .line || $0.kind == .path })
     else {
-      throw ProviderError.message("Completed turn did not provide a substantive labeled diagram.")
+      let labels = scene.nodes.filter { $0.kind == .text && !$0.text.isEmpty }.count
+      let connectors = scene.nodes.filter {
+        $0.kind == .arrow || $0.kind == .line || $0.kind == .path
+      }.count
+      throw ProviderError.message(
+        "Completed turn did not provide a substantive labeled diagram (nodes=\(scene.nodes.count), visible labels=\(labels), connectors=\(connectors))."
+      )
     }
   }
 }

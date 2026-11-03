@@ -142,6 +142,7 @@ private final class ResidentCompanionPanel: NSPanel {
   }
 
   func toggle() { presentation.expanded ? collapse() : expand() }
+  func open() { expand() }
 
   func captureSelectedDisplay() {
     if let foreground = NSWorkspace.shared.frontmostApplication,

@@ -21,7 +21,8 @@ struct WorkspaceView: View {
       } else {
         workspace
       }
-    }.frame(minWidth: notebookOnly ? 760 : 1000, minHeight: notebookOnly ? 580 : 680).tint(blue)
+    }.frame(minWidth: notebookOnly ? 760 : 1000, minHeight: notebookOnly ? 580 : 680)
+      .background(Color(nsColor: .windowBackgroundColor)).tint(blue)
   }
   private var workspace: some View {
     HStack(spacing: 0) {
@@ -381,7 +382,15 @@ struct WorkspaceView: View {
             }.padding(.horizontal, 22).padding(.vertical, 8)
           }
         }
-        composer
+        if notebookOnly {
+          HStack {
+            Text("Ask follow-ups from the notch").font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Button("Open companion", action: model.showBadge)
+          }.controlSize(.small).padding(.horizontal, 22).padding(.vertical, 10)
+        } else {
+          composer
+        }
       } else {
         VStack(spacing: 20) {
           Image(systemName: "pencil.and.outline").font(.system(size: 48, weight: .ultraLight))

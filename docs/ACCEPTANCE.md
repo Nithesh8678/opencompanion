@@ -12,6 +12,7 @@
 - 6 provider-boundary tests: direct create/patch and legacy node updates share atomic validation; signed arrows, alternate point representations, omitted fields and failed updates are covered.
 - 7 shell capture tests: only fresh matching frames complete an invocation; Stop and superseding captures invalidate late results.
 - 5 shortcut tests: safe modifiers, duplicate actions, corrupted preferences and persistence.
+- 1 capture-sampler test: JPEG color conversion, negative display origins, retained fixtures and invalid controls.
 - 5 native host tests;6 selfhost relay integration tests;4 browser protocol/scope tests.
 - 10 real Chromium DOM assertions, including shadow DOM, stale document refs, protected/covered controls and fresh post-action evidence. Extension messaging was fixture-driven; this is not installed MV3/native-host pairing.
 - Real Swift browser bridge↔Unix socket↔Python host↔framed-message round trip.
@@ -36,10 +37,12 @@ A live question submitted through the expanded notch UI completed with a provide
 
 The earlier utility-window test opened/paused/saved the motor notebook and verified its record in Library. Own-window PNG renders of the notch and notebooks were inspected, exposing/fixing the initial dark-appearance contrast issue. These are local view renders, not displayed-FPS or acoustic measurements.
 
+After the user enabled Screen Recording, the updated installed bundle completed a real display capture. A distinctive own-app checker panel was visible in the included control and absent from the production filtered capture; the resident notch was also absent. Both local JPEGs were visually inspected. No screen image or OCR was submitted to a provider or committed. This verifies this fixture on the current display, rather than every display/Space configuration.
+
 ## Remaining installed/release acceptance
 
-The launched app reports Screen Recording permission absent and Accessibility unavailable. Those OS capabilities require user enablement before installed screen/desktop acceptance can run.
+Screen Recording is allowed and current-display capture/exclusion has been inspected. Accessibility is still unavailable, so installed desktop action acceptance remains pending.
 
-Microphone capture and acoustic output, route changes, screenshot own-window exclusion, denied/revoked permissions, physical multi-display/fullscreen/Spaces/StageManager, unfamiliar-app three-step tutorials, installed browser pairing, live MCP account, live selfhost upstream, minimum OS/Intel, long sessions and100+ cold/warm latency trials remain unverified. Distribution uses an ad-hoc signature; DeveloperID/notarization/stapling/signed updates remain blocked on release identity and credentials.
+Microphone capture and acoustic output, route changes, denied/revoked permissions, physical multi-display/fullscreen/Spaces/StageManager, unfamiliar-app three-step tutorials, installed browser pairing, live MCP account, live selfhost upstream, minimum OS/Intel, long sessions and100+ cold/warm latency trials remain unverified. Distribution uses an ad-hoc signature; DeveloperID/notarization/stapling/signed updates remain blocked on release identity and credentials.
 
 See FEATURE-STATUS.md for implementation gaps as well as external acceptance gates. This alpha does not satisfy every row in the full research specification.

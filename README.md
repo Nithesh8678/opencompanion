@@ -22,6 +22,8 @@ Press **⌘⇧Space** or click the companion to expand it. **Escape** stops outp
 
 Diagrams open in a separate notebook panel while conversation stays in the notch. Streaming updates retain the same canvas and leave keyboard focus where you are working.
 
+Settings includes configurable global shortcuts and an optional display-capture shortcut. Registration conflicts are reported; the last working shortcut stays available for that session.
+
 ### ChatGPT subscription mode
 
 Install the official Codex CLI and sign in with `codex login`. In Settings, select **ChatGPT via Codex**, choose its executable path, and run **Test live connection**. A blank model uses the catalog default; only a completed request verifies access. OpenCompanion uses the documented stdio app-server; it does not read or copy your login tokens. Teaching requests disable external tool capabilities and run in an ephemeral read-only thread. Model usage remains subject to your plan and limits.

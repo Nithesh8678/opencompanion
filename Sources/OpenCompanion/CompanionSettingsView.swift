@@ -427,7 +427,8 @@ import SwiftUI
         rowDivider
         permissionRow(
           "Screen Recording", status: permissions.screen ? "Allowed" : "Needs permission",
-          granted: permissions.screen, explanation: "Used when you choose to add screen context.",
+          granted: permissions.screen,
+          explanation: "Used when you ask for screen guidance or choose Add screen context.",
           buttonTitle: permissions.screen ? "Settings…" : "Request…"
         ) {
           if permissions.screen {
@@ -436,6 +437,12 @@ import SwiftUI
             _ = CGRequestScreenCaptureAccess()
             permissions = .current()
           }
+        }
+        if !permissions.screen {
+          detail(
+            "If macOS already shows OpenCompanion enabled, remove its old Screen Recording entry, add /Applications/OpenCompanion.app again, enable it, then quit and reopen the app."
+          )
+          Button("Screen Recording settings") { openPrivacy("Privacy_ScreenCapture") }
         }
         rowDivider
         permissionRow(

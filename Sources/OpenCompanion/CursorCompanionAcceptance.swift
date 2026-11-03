@@ -261,10 +261,45 @@ enum CursorCompanionAcceptance {
       !cursor.snapshot.displayLinkRunning && cursor.snapshot.text == "Done.",
       "A static reading hold kept the display clock running.")
     try await Task.sleep(for: .milliseconds(3_800))
+    try JSONEncoder().encode(cursor.snapshot).write(
+      to: output.appendingPathComponent("cursor-reading-hold-boundary.json"))
     try require(
       cursor.snapshot.text.isEmpty && cursor.snapshot.phase == "idle"
         && !cursor.snapshot.displayLinkRunning,
       "The bounded reading hold did not fade back to the idle follower.")
+
+    // Exercise the production failure boundary and its queued model observer.
+    // A retained error must not erase its own nearby explanation or open a notebook.
+    let failureGeneration = model.taskGeneration
+    let failurePolicy = ResponsePolicy.resolve(
+      text: "How do I create a new chat in ChatGPT?", screenGuidanceEnabled: true)
+    let previousMessages = model.messages
+    let previousScene = model.scene
+    model.configureResponseOutput(failurePolicy)
+    model.busy = true
+    model.state = "Thinking"
+    cursor.beginResponse(generation: failureGeneration, isGuidance: true)
+    model.finishTurnFailure(
+      error: ProviderError.message("Screen access needs repair."),
+      generation: failureGeneration, policy: failurePolicy)
+    try await Task.sleep(for: .milliseconds(1_300))
+    try require(
+      model.error != nil && model.cursorFailureGeneration == failureGeneration
+        && !model.busy && model.state == "Ready"
+        && cursor.snapshot.visible && cursor.snapshot.text == "Screen access needs repair.",
+      "Guidance failure feedback disappeared after the queued model update.")
+    try require(
+      model.messages.map(\.id) == previousMessages.map(\.id) && model.scene == previousScene
+        && NSApp.keyWindow == nil
+        && NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground,
+      "Failure feedback changed history, notebook or foreground focus.")
+    try await cursor.exportSnapshot(
+      to: output.appendingPathComponent("cursor-guidance-failure-feedback.png"))
+    model.stop()
+    try await Task.sleep(for: .milliseconds(300))
+    try require(
+      model.cursorFailureGeneration == nil && cursor.snapshot.text.isEmpty,
+      "Stop retained guidance failure feedback.")
     let statistics = cursor.snapshot
     try JSONEncoder().encode(statistics).write(
       to: output.appendingPathComponent("cursor-final.json"))
@@ -275,6 +310,8 @@ enum CursorCompanionAcceptance {
       "canonicalCompletedTextCommittedExactlyOnce": true,
       "guidanceLabelCapturedFromOwnedAnnotationPanel": true,
       "guidanceDoesNotDuplicateCursorCaption": true,
+      "guidanceFailureFeedbackSurvivesModelObserver": true,
+      "guidanceFailureDoesNotOpenNotebookOrStealFocus": true,
       "displayClockCallbacks": statistics.callbacks,
       "p95CallbackIntervalMS": statistics.p95CallbackIntervalMS,
       "callbackIntervalsAreNotPresentedFPS": true,

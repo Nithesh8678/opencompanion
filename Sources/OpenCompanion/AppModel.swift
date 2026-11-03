@@ -27,6 +27,8 @@ struct NotebookTurnBinding: Sendable, Equatable {
 
 enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
 
+private enum GuidanceTurnStage: String { case prepare, capture, provider, target }
+
 /// The actual selected-evidence payload for a turn. Manual capture provenance
 /// authorizes retaining a typed attachment's scope; an automatic frame cannot
 /// inherit that authority merely by remaining visible in the conversation.
@@ -143,6 +145,8 @@ struct ResponseInputPlan: Sendable {
   private var outputSceneIncludesExistingNotebook = false
   private var acceptedGuidanceTarget = false
   private var guidanceNarration: String?
+  private var guidanceTurnStage: GuidanceTurnStage?
+  private(set) var cursorFailureGeneration: UInt64?
   private var activeGuidanceRequest: ScreenGuidanceRequest?
   private var receivedTextPreview = false
   var capturePublicationRevision: UInt64 { captureGate.generation }
@@ -384,6 +388,7 @@ struct ResponseInputPlan: Sendable {
           try Task.checkCancellation()
           try await self?.acceptTextPreview(value, generation: current)
         }
+        self.setGuidanceStage(.provider, generation: current)
         if self.providerMode == "ChatGPT via Codex" {
           let adapter = CodexProvider()
           self.codex = adapter
@@ -414,14 +419,7 @@ struct ResponseInputPlan: Sendable {
         self.updateBadge()
         await self.persistConversation()
       } catch {
-        guard current == self.generation else { return }
-        self.activeGuidanceRequest = nil
-        self.busy = false
-        self.state = "Ready"
-        self.updateBadge()
-        if !(error is CancellationError) { self.showError(error) }
-        self.onCursorCancelled?(current)
-        self.record("turn.failed")
+        self.finishTurnFailure(error: error, generation: current, policy: policy)
       }
     }
   }
@@ -430,11 +428,67 @@ struct ResponseInputPlan: Sendable {
   /// retained document or previously selected sidebar destination.
   func configureResponseOutput(_ policy: ResponsePolicy) {
     responsePolicy = policy
+    cursorFailureGeneration = nil
+    guidanceTurnStage = nil
+    setGuidanceStage(.prepare, generation: generation)
     outputSceneIncludesExistingNotebook = policy.includesExistingNotebook
     outputSceneBinding =
       policy.allowsNotebook
       ? NotebookTurnBinding(documentID: scene?.id, revision: scene?.revision) : nil
     scenePresentedForTurn = false
+  }
+
+  /// Keep a current guidance failure readable without turning it into chat,
+  /// speech, notebook content, or a retry. Stale work cannot alter a newer turn.
+  func finishTurnFailure(error: Error, generation: UInt64, policy: ResponsePolicy) {
+    guard generation == self.generation else { return }
+    activeGuidanceRequest = nil
+    busy = false
+    state = "Ready"
+    updateBadge()
+    let cancelled = error is CancellationError
+    let showGuidanceFailure = policy.route == .screenGuidance && !cancelled
+    cursorFailureGeneration = showGuidanceFailure ? generation : nil
+    if !cancelled { showError(error) }
+    if showGuidanceFailure {
+      record("guidance.failed.\((guidanceTurnStage ?? .prepare).rawValue)")
+    }
+    guidanceTurnStage = nil
+    record(cancelled ? "turn.cancelled" : "turn.failed")
+    if showGuidanceFailure {
+      onCursorResponseStarted?(generation, false)
+      guard generation == self.generation, cursorFailureGeneration == generation else { return }
+      _ = onCursorTextPreview?(
+        generation,
+        ProviderTextPreview(
+          unitID: 0, text: Self.guidanceFailureText(error.localizedDescription), isComplete: true))
+    } else {
+      onCursorCancelled?(generation)
+    }
+  }
+
+  private func setGuidanceStage(_ stage: GuidanceTurnStage, generation: UInt64) {
+    guard generation == self.generation, responsePolicy.route == .screenGuidance else { return }
+    guidanceTurnStage = stage
+    record("guidance.stage.\(stage.rawValue)")
+  }
+
+  private static func guidanceFailureText(_ message: String) -> String {
+    let fallback = "Screen guidance could not continue. Try again."
+    let message = message.trimmingCharacters(in: .whitespacesAndNewlines)
+    var result = ""
+    var count = 0
+    var bytes = 0
+    for character in message {
+      let part = String(character)
+      guard count < 240, bytes + part.utf8.count <= 1_021 else {
+        return result.isEmpty ? fallback : result + "…"
+      }
+      result.append(character)
+      count += 1
+      bytes += part.utf8.count
+    }
+    return result.isEmpty ? fallback : result
   }
 
   /// Restore only the application of a deliberately selected capture. Preparing
@@ -488,9 +542,11 @@ struct ResponseInputPlan: Sendable {
       try await prepare(generation, intendedPID)
       try Task.checkCancellation()
       guard generation == self.generation, activeGuidanceRequest == request,
-        captureGate.permits(captureToken, cancelled: Task.isCancelled),
-        NSWorkspace.shared.frontmostApplication?.processIdentifier == intendedPID
+        captureGate.permits(captureToken, cancelled: Task.isCancelled)
       else { throw CancellationError() }
+      guard NSWorkspace.shared.frontmostApplication?.processIdentifier == intendedPID else {
+        throw ProviderError.message("The active app changed. Ask for screen guidance again.")
+      }
     } else if initialForeground == ownPID {
       throw ProviderError.message("Switch to the app you want help with, then ask again.")
     }
@@ -514,6 +570,7 @@ struct ResponseInputPlan: Sendable {
     guard expectedForegroundPID == nil || expectedForegroundPID == foregroundPID else {
       throw ProviderError.message("The active app changed. Ask for screen guidance again.")
     }
+    setGuidanceStage(.capture, generation: generation)
     record("guidance.capture.started")
     let frame = try await capture.capture(
       displayID: displayID, foregroundPID: foregroundPID,
@@ -634,6 +691,7 @@ struct ResponseInputPlan: Sendable {
         record("guidance.suppressed.responsePolicy")
         return
       }
+      setGuidanceStage(.target, generation: generation)
       guard let payload = unit.target, payload.instruction.utf8.count <= 32_000,
         (payload.label?.prefix(81).count ?? 0) <= 80
       else { throw ProviderError.message("Invalid or oversized screen guidance target.") }
@@ -663,11 +721,14 @@ struct ResponseInputPlan: Sendable {
       }
       messages.append(ChatLine(role: "assistant", text: target.instruction))
       record("guidance.presented.awaitingUser")
+      setGuidanceStage(.provider, generation: generation)
     default: throw ProviderError.message("Unsupported model output kind: \(unit.type)")
     }
   }
   func stop() {
     generation += 1
+    cursorFailureGeneration = nil
+    guidanceTurnStage = nil
     activeGuidanceRequest = nil
     onCursorCancelled?(generation)
     invalidateCapture()

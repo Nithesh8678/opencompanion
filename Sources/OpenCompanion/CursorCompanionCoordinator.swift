@@ -316,7 +316,7 @@ struct CursorCompanionSnapshot: Codable {
 
   private func syncModel() {
     guard let model, let generation, generation == model.taskGeneration else { return }
-    if model.error != nil {
+    if model.error != nil && model.cursorFailureGeneration != generation {
       cancel(generation: generation)
       return
     }

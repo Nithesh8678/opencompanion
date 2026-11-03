@@ -8,6 +8,13 @@ invocation does not deliver a global mouse-up event. The user separately reporte
 that the next Table name field was highlighted. These boundaries are separate
 from source and unit-test coverage.
 
+A later standalone GUI guidance attempt exposed a stale Screen Recording grant:
+the old System Settings entry appeared enabled, but the running app's permission
+preflight failed. With explicit user approval, that one entry was removed and
+the exact canonical app was re-added and enabled. The updated GUI app has been
+launched; the user's physical guidance retry remains pending. The successful
+CLI-context capture is not a substitute for that verification.
+
 ## Reference and implementation
 
 The supplied reference recordings informed the separate system pointer and
@@ -176,6 +183,55 @@ separately controlled by the shared edit policy. Manual Talk still prepares a
 draft for review rather than submitting it. There is no continuous screen capture
 or background AX polling.
 
+## Screen Recording grant repair
+
+Capture remains guarded by `CGPreflightScreenCaptureAccess()`. Screen access is
+used when the user explicitly asks for screen guidance or chooses Add screen
+context. Hovering, idle cursor following and ordinary voice questions do not
+authorize capture. A failed permission check stops the capture path; there is no
+alternate capture fallback or permission bypass.
+
+The diagnosed standalone GUI process returned a denied preflight while System
+Settings showed an older OpenCompanion entry enabled. The system TCC log reported
+`Failed to match existing code requirement` for `org.opencompanion.mac` and
+`kTCCServiceScreenCapture`. Invoking the same canonical Mach-O directly from
+Codex produced a successful preflight/capture in that launch context. That result
+does not establish the GUI-launched app's permission status. The configured local
+signing identity continues to be reused; this mismatch does not justify changing
+the signing identity or treating the old enabled row as a current grant.
+
+The capture error and Settings → Privacy & memory explain the repair:
+
+1. Quit OpenCompanion and open System Settings → Privacy & Security → Screen
+   Recording (called Screen & System Audio Recording on some macOS versions).
+2. If the existing OpenCompanion entry is already enabled but the app reports
+   unavailable access, remove that stale entry.
+3. Add `/Applications/OpenCompanion.app`, enable it, then quit and reopen the app
+   as macOS requests.
+4. Verify the normally launched canonical GUI app's permission status, then make
+   an explicit Add screen or screen-guidance request.
+
+These are user-operated repair instructions. The app does not reset TCC, remove
+permission entries or change system grants automatically. With explicit user
+approval, only OpenCompanion's Screen Recording row was removed through System
+Settings, `/Applications/OpenCompanion.app` was re-added, and its new row was
+enabled. Other apps' permission grants were not reset. The updated signed app was
+launched normally. GUI capture/focus/voice acceptance awaits the user's physical
+retry; an enabled new row alone does not establish that workflow's success.
+
+## Guidance failure feedback
+
+A current, non-cancellation screen-guidance failure keeps its full `model.error`
+available and shows bounded nearby failure text in the pink cursor capsule.
+The failure generation prevents a queued model observer from immediately
+clearing that feedback. This does not append an assistant message, mutate a
+notebook, open a dashboard or take focus. Stop clears the nearby feedback. Stale
+generations and intentional cancellation do not reopen it.
+
+This makes a capture/preparation/provider error distinguishable from Listening
+simply disappearing. It is terminal feedback, not a successful capture or a
+claim that a permission problem has been repaired.
+
 ## Target drawing and user-click continuation
 
 `AppModel` binds targets to an immutable frame identity. `OverlayHost` then
@@ -302,14 +358,22 @@ displays, fullscreen/Spaces and exact visual parity need separate acceptance.
 
 ## Recorded verification
 
-- Latest completed automated checkpoint: 233 Swift tests (193 app, 15 store,
+- Latest completed automated checkpoint: 241 Swift tests (201 app, 15 store,
   25 core) and 29 Python installer/signing tests passed, including capture
-  provenance, route admission and native target styling.
+  provenance, route admission, native target styling and eight failure-feedback
+  tests covering ten parameter cases.
 - Shared typed/PTT routing, notebook admission/new-document isolation and retained
   edit regressions passed automated tests. The live provider/synthetic-image
   routing check below passed; normal AppModel capture/focus preparation remains
   unverified by that entry point.
 - Certificate-signed native bundle built and installed at the canonical path.
+- A subsequent standalone GUI screen-guidance attempt was blocked by a stale
+  Screen Recording code requirement, despite an enabled old Settings row. Direct
+  CLI-context capture succeeded separately. The guarded error now explains the
+  one-entry remove/re-add/reopen repair. That repair was performed with explicit
+  user approval, the new canonical-app row is enabled and the updated GUI app is
+  launched. The configured signing identity and capture guard are unchanged;
+  the user's physical retry and GUI workflow acceptance remain pending.
 - Installed cursor acceptance passed again on the current binary: unfinished word waits, ordered whole-word
   reveal, one canonical Chat commit, immediate restart, four-row emoji caption,
   Reduce Motion, idle clock shutdown, fixed annotation capture and no focus theft.
@@ -320,6 +384,14 @@ displays, fullscreen/Spaces and exact visual parity need separate acceptance.
   These cursor/notch checks use synthetic controller input and owned panels;
   they do not live-test fresh guidance foreground preparation, physical clicks
   or microphone/audio routes.
+- Installed cursor failure-feedback acceptance passed using the actual
+  `AppModel.finishTurnFailure` path and queued coordinator observer. The pink
+  error capsule survived observer delivery, preserved `model.error`, and changed
+  neither focus, history nor notebook; Stop cleared the feedback. Its PNG was
+  inspected. The first native attempt failed at the existing reading-hold
+  deadline before reaching this new check. A rerun passed with the same
+  assertions and retained `cursor-reading-hold-boundary.json`; this is a passing
+  controlled rerun, not a stress or physical microphone guarantee.
 - Installed synthetic-image guidance routing passed through the real Codex
   default model for the exact new-chat request. It returned one text unit and
   one target, no scene units, with notebook capability disabled. The raw shape

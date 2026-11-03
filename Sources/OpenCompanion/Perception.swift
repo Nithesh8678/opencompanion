@@ -63,6 +63,8 @@ struct CaptureWindow: Identifiable, Sendable {
   let pid: pid_t
 }
 actor CaptureService {
+  static let screenRecordingRepairMessage =
+    "Screen Recording is unavailable to this running OpenCompanion app. Open System Settings → Privacy & Security → Screen Recording. If OpenCompanion is already enabled, remove that old entry and add /Applications/OpenCompanion.app again. Enable it, then quit and reopen OpenCompanion. Screen access is used only for requested screen guidance or Add screen context."
   func windows() async throws -> [CaptureWindow] {
     let content = try await SCShareableContent.excludingDesktopWindows(
       false, onScreenWindowsOnly: true)
@@ -84,8 +86,7 @@ actor CaptureService {
     region: CGRect? = nil, windowID: CGWindowID? = nil, screens: [CGDirectDisplayID: CGRect]
   ) async throws -> ScreenEvidence {
     guard CGPreflightScreenCaptureAccess() else {
-      throw ProviderError.message(
-        "Allow Screen Recording in System Settings, then relaunch OpenCompanion.")
+      throw ProviderError.message(Self.screenRecordingRepairMessage)
     }
     let content = try await SCShareableContent.excludingDesktopWindows(
       false, onScreenWindowsOnly: true)

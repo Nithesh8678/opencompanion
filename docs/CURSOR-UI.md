@@ -3,9 +3,10 @@
 Updated 4 November 2026. The installed cursor/annotation and notch checks passed,
 and a public conversational request completed through ChatGPT via Codex. A live
 public-screen request grounded its first target correctly. Physical click-to-next-
-frame continuation remains pending; the UI driver's button invocation does not
-deliver a global mouse-up event. These boundaries are separate from source and
-unit-test coverage.
+frame continuation remains pending in the saved trace; the UI driver's button
+invocation does not deliver a global mouse-up event. The user separately reported
+that the next Table name field was highlighted. These boundaries are separate
+from source and unit-test coverage.
 
 ## Reference and implementation
 
@@ -214,4 +215,6 @@ displays, fullscreen/Spaces and exact visual parity need separate acceptance.
   around “Open table settings.” The driver changed to the next page through
   native control invocation, but generated no global mouse-up; the two-step
   acceptance therefore did not pass. Its bounded target expired as designed.
-  Physical click continuation must be checked before claiming that full run.
+  The user separately reported the next Table name field was highlighted. The
+  timed physical test recorded target expiry without a second frame, so that
+  visual report is not treated as a trace-confirmed two-step run.

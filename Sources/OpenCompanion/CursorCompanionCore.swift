@@ -7,6 +7,16 @@ import Foundation
 struct CursorTextReveal: Sendable {
   static let maximumUnitUTF8Bytes = 32_768
   static let maximumPendingUnits = 8
+  // Authored presentation parameters, not recovered reference constants.
+  static let wordInterval = 0.22
+  static let maximumWordGroupCharacters = 24
+
+  private struct Group: Sendable {
+    let end: Int
+    let pause: Double
+  }
+
+  private enum WordKind { case ordinary, unspaced, symbol }
 
   private struct Unit: Sendable {
     let id: Int
@@ -14,10 +24,6 @@ struct CursorTextReveal: Sendable {
     var characters: [Character]
     var isComplete: Bool
     var revealed = 0
-    var started = false
-    var credit = 0.0
-    var delay = 0.0
-    var rate = 32.0
 
     // An unfinished final cluster may still receive a combining mark, CR/LF,
     // regional indicator, or ZWJ continuation in the next cumulative update.
@@ -26,9 +32,17 @@ struct CursorTextReveal: Sendable {
 
   private var units: [Unit] = []
   private var latestAcceptedID: Int?
+  private var remainingDelay = 0.0
   private(set) var visibleText = ""
   private(set) var currentUnitID: Int?
   var hasPending: Bool { !units.isEmpty }
+  /// A pending provisional tail needs transport, not display callbacks. Later
+  /// units cannot bypass that head. Completed empty heads still require cleanup.
+  var hasRevealableText: Bool {
+    guard let first = units.first else { return false }
+    return Self.nextGroup(in: first, after: first.revealed) != nil
+      || (first.isComplete && first.characters.isEmpty)
+  }
   var pendingUnitCount: Int { units.count }
 
   init() {}
@@ -36,6 +50,7 @@ struct CursorTextReveal: Sendable {
   mutating func reset() {
     units.removeAll(keepingCapacity: true)
     latestAcceptedID = nil
+    remainingDelay = 0
     visibleText = ""
     currentUnitID = nil
   }
@@ -66,57 +81,52 @@ struct CursorTextReveal: Sendable {
       units.append(Unit(id: unitID, text: text, characters: Array(text), isComplete: isComplete))
       latestAcceptedID = unitID
     }
-    accelerateForBacklog()
     return true
   }
 
-  /// Advance one visible unit per call, using elapsed time rather than frame
-  /// counts. Invalid time is ignored. Reduce Motion reveals one safe prefix
-  /// immediately, including when delta is zero; it never skips the whole queue.
+  /// Reveal at most ONE word group per display advance, even after a long frame
+  /// or large backlog. Words use a calm fixed cadence with punctuation rests;
+  /// arrival rate cannot accelerate them. Reduce Motion bypasses this pacing.
   @discardableResult mutating func advance(by delta: Double, reduceMotion: Bool = false) -> Bool {
     guard delta.isFinite, delta >= 0 else { return false }
     if reduceMotion { return fastForward() }
     guard delta > 0 else { return false }
+    remainingDelay = max(0, remainingDelay - delta)
     discardCompletedEmptyHeads()
-    guard !units.isEmpty else { return false }
+    guard !units.isEmpty, remainingDelay == 0,
+      let group = Self.nextGroup(in: units[0], after: units[0].revealed)
+    else { return false }
     var unit = units[0]
-    let available = unit.stableCount
-    guard unit.revealed < available else {
-      // Waiting for transport is not animation time to spend on future text.
-      units[0].credit = 0
-      return false
-    }
-    unit.credit += min(delta, 60)
-    if !unit.started {
-      unit.started = true
-      unit.revealed = 1
-      unit.delay = delay(after: unit.characters[0], rate: unit.rate)
-    }
-    // At most32,768 graphemes can be traversed, even after a suspended clock.
-    while unit.revealed < available && unit.credit >= unit.delay {
-      unit.credit -= unit.delay
-      unit.revealed += 1
-      unit.delay = delay(after: unit.characters[unit.revealed - 1], rate: unit.rate)
-    }
-    if unit.revealed == available { unit.credit = 0 }
+    unit.revealed = group.end
+    // Discard excess elapsed time: a stalled frame never creates a burst on the
+    // next callback, nor may a new semantic unit bypass the last word's rest.
+    remainingDelay = Self.wordInterval + group.pause
     let changed = present(unit)
     units[0] = unit
     if unit.isComplete && unit.revealed == unit.characters.count { units.removeFirst() }
     return changed
   }
 
-  /// Queue-pressure escape hatch: reveal only the head's safe prefix. A fully
-  /// completed head is retired so append can be retried once. An incomplete head
-  /// stays owned and cannot be discarded to make room for an unrelated caption.
+  /// Explicit queue-pressure/Reduce Motion escape hatch. A complete head can be
+  /// revealed immediately; an incomplete head exposes only complete word groups
+  /// or bounded unspaced chunks, retaining its unfinished word and Unicode tail.
   @discardableResult mutating func fastForward() -> Bool {
     discardCompletedEmptyHeads()
     guard !units.isEmpty else { return false }
     var unit = units[0]
-    guard unit.stableCount > 0 else { return false }
-    unit.revealed = unit.stableCount
-    unit.started = true
-    unit.credit = 0
-    unit.delay = 0
+    var end = unit.revealed
+    var pause = 0.0
+    if unit.isComplete {
+      end = unit.characters.count
+    } else {
+      while let group = Self.nextGroup(in: unit, after: end) {
+        end = group.end
+        pause = group.pause
+      }
+    }
+    guard end > unit.revealed else { return false }
+    unit.revealed = end
+    remainingDelay = Self.wordInterval + pause
     let changed = present(unit)
     units[0] = unit
     if unit.isComplete { units.removeFirst() }
@@ -145,23 +155,134 @@ struct CursorTextReveal: Sendable {
     }
   }
 
-  private mutating func accelerateForBacklog() {
-    let backlog = units.reduce(0) { $0 + max(0, $1.stableCount - $1.revealed) }
-    for index in units.indices {
-      let desired = max(32, Double(units[index].characters.count) / 1.6, Double(backlog) / 2.4)
-      units[index].rate = max(units[index].rate, min(150_000, desired))
+  /// Whitespace-delimited words retain attached punctuation. CJK runs use
+  /// two-grapheme groups; long URLs/unspaced runs use at most24 graphemes. These
+  /// are bounded presentation groups, not a claim of linguistic segmentation.
+  private static func nextGroup(in unit: Unit, after offset: Int) -> Group? {
+    let characters = unit.characters
+    let stable = unit.stableCount
+    guard offset < stable else { return nil }
+    var index = offset
+    while index < stable && characters[index].isWhitespace { index += 1 }
+    if index == stable {
+      return unit.isComplete ? Group(end: stable, pause: 0) : nil
+    }
+    var contentStart = index
+    while contentStart < stable, contentStart - index < maximumWordGroupCharacters,
+      isOpening(characters[contentStart])
+    { contentStart += 1 }
+    if contentStart - index == maximumWordGroupCharacters {
+      return Group(end: contentStart, pause: 0)
+    }
+    guard contentStart < stable else {
+      return unit.isComplete ? Group(end: stable, pause: 0) : nil
+    }
+    let wordKind = kind(of: characters[contentStart])
+    let limit = wordKind == .unspaced ? 2 : (wordKind == .symbol ? 1 : maximumWordGroupCharacters)
+    var count = 0
+    while index < stable {
+      let character = characters[index]
+      if character.isWhitespace { return Group(end: index, pause: pause(for: character)) }
+      if index > contentStart, !isPunctuation(character), kind(of: character) != wordKind {
+        return Group(end: index, pause: 0)
+      }
+      index += 1
+      if index > contentStart { count += 1 }
+      if pause(for: character) > 0 && !isInternalPunctuation(at: index - 1, in: characters) {
+        return finishGroup(in: unit, end: index, initialPause: pause(for: character))
+      }
+      if count >= limit { return finishGroup(in: unit, end: index, initialPause: 0) }
+    }
+    if unit.isComplete { return Group(end: index, pause: 0) }
+    // The final provisional cluster may establish a boundary without itself
+    // being shown. Otherwise hold the unfinished word until more text arrives.
+    if index < characters.count {
+      let next = characters[index]
+      if next.isWhitespace { return Group(end: index, pause: pause(for: next)) }
+      if !isPunctuation(next), kind(of: next) != wordKind { return Group(end: index, pause: 0) }
+    }
+    return nil
+  }
+
+  private static func finishGroup(in unit: Unit, end: Int, initialPause: Double) -> Group? {
+    var index = end
+    var rest = initialPause
+    var attached = 0
+    while index < unit.stableCount, attached < 8,
+      pause(for: unit.characters[index]) > 0 || isClosing(unit.characters[index])
+    {
+      rest = max(rest, pause(for: unit.characters[index]))
+      index += 1
+      attached += 1
+    }
+    if index == unit.stableCount, !unit.isComplete, index < unit.characters.count {
+      let tail = unit.characters[index]
+      if pause(for: tail) > 0 || isClosing(tail) { return nil }
+    }
+    if index < unit.characters.count, unit.characters[index].isWhitespace {
+      rest = max(rest, pause(for: unit.characters[index]))
+    }
+    return Group(end: index, pause: rest)
+  }
+
+  private static func kind(of character: Character) -> WordKind {
+    for scalar in character.unicodeScalars {
+      switch scalar.value {
+      case 0x3040...0x30FF, 0x31F0...0x31FF, 0x3400...0x9FFF, 0x20000...0x323AF:
+        return .unspaced
+      default: break
+      }
+    }
+    return character.unicodeScalars.contains { $0.properties.generalCategory == .otherSymbol }
+      ? .symbol : .ordinary
+  }
+
+  private static func isPunctuation(_ character: Character) -> Bool {
+    character.unicodeScalars.allSatisfy {
+      switch $0.properties.generalCategory {
+      case .connectorPunctuation, .dashPunctuation, .openPunctuation, .closePunctuation,
+        .initialPunctuation, .finalPunctuation, .otherPunctuation:
+        true
+      default: false
+      }
     }
   }
 
-  private func delay(after character: Character, rate: Double) -> Double {
-    let pause: Double
-    switch character {
-    case ".", "!", "?", "。", "！", "？": pause = 0.08
-    case ",", ";", ":", "，", "、", "；", "：": pause = 0.045
-    case "\n", "\r\n": pause = 0.09
-    default: pause = 0
+  private static func isOpening(_ character: Character) -> Bool {
+    character == "\"" || character == "'"
+      || character.unicodeScalars.allSatisfy {
+        $0.properties.generalCategory == .openPunctuation
+          || $0.properties.generalCategory == .initialPunctuation
+      }
+  }
+
+  private static func isClosing(_ character: Character) -> Bool {
+    character == "\"" || character == "'"
+      || character.unicodeScalars.allSatisfy {
+        $0.properties.generalCategory == .closePunctuation
+          || $0.properties.generalCategory == .finalPunctuation
+      }
+  }
+
+  private static func isInternalPunctuation(at index: Int, in characters: [Character]) -> Bool {
+    guard index > 0, index + 1 < characters.count else { return false }
+    let before = characters[index - 1]
+    let after = characters[index + 1]
+    switch characters[index] {
+    case ".", "．": return (before.isLetter || before.isNumber) && (after.isLetter || after.isNumber)
+    case ",", "，": return before.isNumber && after.isNumber
+    case ":": return after == "/"
+    default: return false
     }
-    return 1 / rate + pause * min(1, 32 / rate)
+  }
+
+  private static func pause(for character: Character) -> Double {
+    switch character {
+    case ".", "!", "?", "。", "！", "？", "؟", "।", "॥": 0.15
+    case ",", ";", ":", "，", "、", "；", "：", "،", "؛": 0.10
+    case "\n", "\r", "\r\n", "\u{2028}", "\u{2029}": 0.16
+    default: 0
+    }
   }
 }
 
@@ -190,8 +311,10 @@ struct CursorCompanionLayout: Sendable {
     let safe = region.insetBy(dx: min(6, region.width / 4), dy: min(6, region.height / 4))
     let width = min(bodySize.width, safe.width)
     let height = min(bodySize.height, safe.height)
-    let glowX = min(8, max(0, (safe.width - width) / 2))
-    let glowY = min(8, max(0, (safe.height - height) / 2))
+    // Enclose the rotated triangle's diagonal and its soft halo, not just
+    // the axis-aligned path. The panel stays small and never clips the flight.
+    let glowX = min(18, max(0, (safe.width - width) / 2))
+    let glowY = min(18, max(0, (safe.height - height) / 2))
     let center = CGPoint(
       x: clamped(
         anchor.x, fallback: safe.midX, low: safe.minX + width / 2 + glowX,
@@ -233,7 +356,9 @@ struct CursorCompanionLayout: Sendable {
         bubble = CGRect(
           x: min(max(safe.minX, x), safe.maxX - bubbleWidth), y: y,
           width: bubbleWidth, height: bubbleHeight)
-        frame = frame.union(bubble)
+        // Include the caption's soft halo in the tight native window. The
+        // logical bubble remains inside the visible region at display edges.
+        frame = frame.union(bubble.insetBy(dx: -12, dy: -12).intersection(safe))
       }
     }
     return CursorCompanionPlacement(

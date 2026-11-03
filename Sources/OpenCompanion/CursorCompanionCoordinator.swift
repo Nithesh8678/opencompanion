@@ -35,7 +35,9 @@ struct CursorCompanionSnapshot: Codable {
     let expires: TimeInterval
     let evidence: ScreenEvidenceIdentity
     let capturedAt: TimeInterval
-    let label: String
+    let labelFrame: CGRect
+    let prefixWidths: [CGFloat]
+    let ellipse: CGRect?
   }
 
   private let panel: CursorCompanionPanel
@@ -59,15 +61,18 @@ struct CursorCompanionSnapshot: Codable {
   private var generation: UInt64?
   private var watermark: UInt64 = 0
   private var stage: Stage?
+  private var isGuidance = false
   private var phase = NotchActivityPhase.idle
   private var reveal = CursorTextReveal()
   private var highestAcceptedPreviewID: Int?
   private var guidance: Guidance?
-  private var guidanceReveal = CursorTextReveal()
   private var lastPlacement: CursorCompanionPlacement?
   private var dismissal: TimeInterval?
+  private var dismissalTask: Task<Void, Never>?
   private var visibleText = ""
   private var firstGlyphRecorded = false
+  private var wordSerial: UInt64 = 0
+  private var word: CursorCaptionWord?
   private var lastBodyCenter = CGPoint.zero
   private var syntheticReduceMotion: Bool?
   private var beganAt = 0.0
@@ -118,7 +123,6 @@ struct CursorCompanionSnapshot: Codable {
         MainActor.assumeIsolated {
           guard let self else { return }
           self.guidance = nil
-          self.guidanceReveal.reset()
           self.lastPlacement = nil
           self.initialized = false
           self.pointerMoved(to: self.observesPointer ? NSEvent.mouseLocation : self.pointer)
@@ -178,9 +182,10 @@ struct CursorCompanionSnapshot: Codable {
     begin(generation: generation, stage: .input, phase: .preparing)
   }
 
-  func beginResponse(generation: UInt64) {
+  func beginResponse(generation: UInt64, isGuidance: Bool = false) {
     guard generation >= watermark else { return }
     begin(generation: generation, stage: .response, phase: .thinking)
+    self.isGuidance = isGuidance
   }
 
   private func begin(generation: UInt64, stage: Stage, phase: NotchActivityPhase) {
@@ -204,23 +209,21 @@ struct CursorCompanionSnapshot: Codable {
     wake()
   }
 
-  func accept(_ preview: ProviderTextPreview, generation: UInt64) {
-    guard self.generation == generation, stage == .response, preferences.showReplies else { return }
-    var accepted = reveal.append(
+  @discardableResult func accept(_ preview: ProviderTextPreview, generation: UInt64) -> Bool {
+    guard self.generation == generation, stage == .response, !isGuidance, preferences.enabled,
+      preferences.showReplies
+    else { return true }
+    let accepted = reveal.append(
       unitID: preview.unitID, text: preview.text, isComplete: preview.isComplete)
-    // Bound queued captions without evicting unseen canonical chat content.
-    // A burst can finish the current complete caption immediately, then retry.
     if !accepted, reveal.pendingUnitCount == CursorTextReveal.maximumPendingUnits,
       preview.unitID > (highestAcceptedPreviewID ?? -1),
       preview.text.utf8.count <= CursorTextReveal.maximumUnitUTF8Bytes
     {
-      _ = reveal.fastForward()
-      accepted = reveal.append(
-        unitID: preview.unitID, text: preview.text, isComplete: preview.isComplete)
+      return false
     }
     guard accepted else {
       model?.record("cursor.preview.rejectedOrBackpressured")
-      return
+      return true
     }
     highestAcceptedPreviewID = max(highestAcceptedPreviewID ?? -1, preview.unitID)
     let elapsed = (ProcessInfo.processInfo.systemUptime - beganAt) * 1_000
@@ -228,31 +231,53 @@ struct CursorCompanionSnapshot: Codable {
     if timing.firstCompleteTextMS == nil && preview.isComplete {
       timing.firstCompleteTextMS = elapsed
     }
-    dismissal = nil
+    cancelDismissal()
+    view.cancelCaptionDismissal()
     wake()
+    return true
   }
 
   /// Called only after OverlayHost accepted the target against the selected
   /// evidence. Guidance has a separate lifetime from pointer-following.
-  func guide(target: ProviderTarget, evidence: ScreenEvidence, generation: UInt64) {
+  @discardableResult func guide(
+    target: ProviderTarget, evidence: ScreenEvidence, generation: UInt64
+  ) -> TimeInterval {
     guard self.generation == generation, stage == .response,
       evidence.screenRect.width > 0, evidence.screenRect.height > 0,
       target.instruction.utf8.count <= 32_000
-    else { return }
+    else { return 0 }
     let display = evidence.screenRect
-    let destination = CGPoint(
-      x: display.minX + target.x * display.width - 14,
-      y: display.maxY - (target.y + target.height / 2) * display.height)
+    let targetFrame = CGRect(
+      x: display.minX + target.x * display.width,
+      y: display.maxY - (target.y + target.height) * display.height,
+      width: target.width * display.width, height: target.height * display.height)
+    let labelFrame = GuidanceAnnotationLayout.labelFrame(
+      target: target, display: display)
+    let widths = GuidanceAnnotationLayout.labelPrefixWidths(
+      text: GuidanceAnnotationLayout.labelText(target: target))
+    let ellipse = target.shape == "ellipse" ? targetFrame : nil
+    let destination =
+      ellipse.map { Self.ellipsePoint($0, progress: 0) }
+      ?? (labelFrame.isEmpty
+        ? CGPoint(x: targetFrame.minX - 14, y: targetFrame.midY)
+        : CGPoint(x: labelFrame.minX + 10, y: labelFrame.minY - 5))
     let now = ProcessInfo.processInfo.systemUptime
+    let flight = CursorFlight(start: lastBodyCenter, end: destination)
+    let writing =
+      ellipse != nil
+      ? 0.35
+      : GuidanceAnnotationLayout.labelFadeDuration + Double(max(0, widths.count - 1))
+        * GuidanceAnnotationLayout.glyphInterval
     guidance = Guidance(
-      flight: CursorFlight(start: lastBodyCenter, end: destination),
-      began: now, expires: now + 7.5, evidence: ScreenEvidenceIdentity(evidence),
-      capturedAt: evidence.capturedAt, label: target.instruction)
-    guidanceReveal.reset()
-    guidanceReveal.append(unitID: 0, text: target.instruction, isComplete: true)
-    dismissal = nil
+      flight: flight, began: now,
+      expires: now + (reduceMotion ? 0 : flight.duration + writing) + 0.35,
+      evidence: ScreenEvidenceIdentity(evidence), capturedAt: evidence.capturedAt,
+      labelFrame: labelFrame, prefixWidths: widths, ellipse: ellipse)
+    cancelDismissal()
+    view.cancelCaptionDismissal()
     model?.record("cursor.guidance.flightStarted")
     wake()
+    return reduceMotion ? 0 : flight.duration
   }
 
   func pointerMoved(to point: CGPoint) {
@@ -268,6 +293,9 @@ struct CursorCompanionSnapshot: Codable {
     y.target = target.y
     // Hide immediately when the user enters the notch, including while settled.
     if exclusionFrames().contains(where: { $0.contains(pointer) }) { panel.orderOut(nil) }
+    // NSView's display link does not tick an offscreen window. Mount the first
+    // pose (or returning follower) before asking the clock to animate it.
+    if !panel.isVisible { renderNow() }
     wake()
   }
 
@@ -322,7 +350,22 @@ struct CursorCompanionSnapshot: Codable {
     if reveal.visibleText.isEmpty {
       clearPresentation()
     } else {
-      dismissal = ProcessInfo.processInfo.systemUptime + 3.5
+      let deadline = ProcessInfo.processInfo.systemUptime + 3.5
+      dismissal = deadline
+      let owner = generation
+      dismissalTask = Task { @MainActor [weak self] in
+        do { try await Task.sleep(for: .milliseconds(3_500)) } catch { return }
+        guard let self, self.generation == owner, self.dismissal == deadline else { return }
+        self.view.dismissCaption(animated: !self.reduceMotion)
+        if !self.reduceMotion {
+          do { try await Task.sleep(for: .milliseconds(180)) } catch { return }
+        }
+        guard self.generation == owner, self.dismissal == deadline else { return }
+        self.dismissalTask = nil
+        self.clearPresentation()
+        self.renderNow()
+        self.wake()
+      }
     }
   }
 
@@ -333,15 +376,16 @@ struct CursorCompanionSnapshot: Codable {
     }
     generation = nil
     stage = nil
+    isGuidance = false
     phase = .idle
     reveal.reset()
     highestAcceptedPreviewID = nil
     visibleText = ""
     firstGlyphRecorded = false
+    word = nil
     timing = CursorCompanionTiming()
     guidance = nil
-    guidanceReveal.reset()
-    dismissal = nil
+    cancelDismissal()
     view.reset()
   }
 
@@ -376,8 +420,6 @@ struct CursorCompanionSnapshot: Codable {
         x = NotchSpring(lastBodyCenter.x, frequency: 38)
         y = NotchSpring(lastBodyCenter.y, frequency: 38)
         model?.record("cursor.guidance.invalidated")
-      } else if now - guidance.began >= guidance.flight.duration * 0.65 || reduceMotion {
-        _ = guidanceReveal.advance(by: min(elapsed, 0.1), reduceMotion: reduceMotion)
       }
     }
     if guidance == nil {
@@ -392,14 +434,16 @@ struct CursorCompanionSnapshot: Codable {
         y.advance(by: min(elapsed, 0.1))
       }
     }
-    if guidance == nil { _ = reveal.advance(by: min(elapsed, 0.1), reduceMotion: reduceMotion) }
+    if guidance == nil {
+      let previous = reveal.visibleText
+      let previousID = reveal.currentUnitID
+      if reveal.advance(by: min(elapsed, 0.1), reduceMotion: reduceMotion) {
+        word = nextWord(previous: previous, previousID: previousID, reveal: reveal)
+      }
+    }
     finishIfReady()
-    if let dismissal, now >= dismissal { clearPresentation() }
     renderNow()
-    let animatingActivity = phase == .listening || phase == .thinking || phase == .speaking
-    if guidance == nil && x.isSettled && y.isSettled && !reveal.hasPending
-      && !animatingActivity && dismissal == nil
-    {
+    if guidance == nil && x.isSettled && y.isSettled && !reveal.hasRevealableText {
       stopClock()
     }
   }
@@ -414,15 +458,39 @@ struct CursorCompanionSnapshot: Codable {
     let now = ProcessInfo.processInfo.systemUptime
     var center = CGPoint(x: x.value, y: y.value)
     var rotation: CGFloat = 0
-    var text = preferences.showReplies ? reveal.visibleText : ""
+    var text = preferences.showReplies && !isGuidance ? reveal.visibleText : ""
     if let guidance {
       let progress = reduceMotion ? 1 : min(1, (now - guidance.began) / guidance.flight.duration)
       center = guidance.flight.point(at: progress)
       if progress < 1 {
         let tangent = guidance.flight.tangent(at: progress)
         rotation = atan2(-tangent.y, tangent.x)
+      } else if let ellipse = guidance.ellipse {
+        let trace =
+          reduceMotion
+          ? 1 : min(1, max(0, (now - guidance.began - guidance.flight.duration) / 0.35))
+        center = Self.ellipsePoint(ellipse, progress: trace)
+        let angle = CGFloat(trace) * 2 * .pi - .pi * 0.72
+        rotation = atan2(ellipse.height * cos(angle), -ellipse.width * sin(angle))
+      } else if !guidance.labelFrame.isEmpty {
+        let elapsed =
+          now - guidance.began - guidance.flight.duration
+          - GuidanceAnnotationLayout.labelFadeDuration
+        let glyphProgress =
+          reduceMotion
+          ? Double(max(0, guidance.prefixWidths.count - 1))
+          : max(0, elapsed) / GuidanceAnnotationLayout.glyphInterval
+        let index = min(guidance.prefixWidths.count - 1, Int(glyphProgress))
+        let next = min(guidance.prefixWidths.count - 1, index + 1)
+        let fraction = CGFloat(min(1, glyphProgress - Double(index)))
+        let width =
+          guidance.prefixWidths[index]
+          + (guidance.prefixWidths[next] - guidance.prefixWidths[index]) * fraction
+        center = CGPoint(
+          x: guidance.labelFrame.minX + 10 + min(guidance.labelFrame.width - 20, width),
+          y: guidance.labelFrame.minY - 5)
       }
-      text = preferences.showReplies ? guidanceReveal.visibleText : ""
+      text = ""
     }
     // The full reply remains in Chat. A rolling caption bounds layout work and
     // keeps long answers beside the pointer rather than covering the display.
@@ -443,7 +511,7 @@ struct CursorCompanionSnapshot: Codable {
     view.update(
       phase: phase, text: visibleText, level: model?.microphoneLevel ?? 0,
       bodyPoint: placement.bodyPoint, bubbleFrame: placement.bubbleFrame,
-      rotation: rotation, reduceMotion: reduceMotion)
+      rotation: rotation, reduceMotion: reduceMotion, word: guidance == nil ? word : nil)
     lastBodyCenter = CGPoint(
       x: placement.frame.minX + placement.bodyPoint.x,
       y: placement.frame.maxY - placement.bodyPoint.y)
@@ -464,6 +532,16 @@ struct CursorCompanionSnapshot: Codable {
       return "…" + suffix[suffix.index(after: boundary)...]
     }
     return "…" + suffix
+  }
+
+  private func nextWord(previous: String, previousID: Int?, reveal: CursorTextReveal)
+    -> CursorCaptionWord
+  {
+    wordSerial &+= 1
+    let appended =
+      previousID == reveal.currentUnitID && reveal.visibleText.hasPrefix(previous)
+      ? String(reveal.visibleText.dropFirst(previous.count)) : reveal.visibleText
+    return CursorCaptionWord(serial: wordSerial, suffix: appended)
   }
 
   func setReduceMotionForAcceptance(_ enabled: Bool?) {
@@ -493,9 +571,25 @@ struct CursorCompanionSnapshot: Codable {
     try data.write(to: url, options: .atomic)
   }
 
+  private static func ellipsePoint(_ rect: CGRect, progress: Double) -> CGPoint {
+    let angle = CGFloat(min(1, max(0, progress))) * 2 * .pi - .pi * 0.72
+    let rx = max(0.25, rect.width / 2 - 2)
+    let ry = max(0.25, rect.height / 2 - 2)
+    let wobble = min(0.7, rx * 0.06, ry * 0.06) * sin(angle * 3 + 0.4)
+    return CGPoint(
+      x: rect.midX + (rx + wobble) * cos(angle),
+      y: rect.midY - (ry + wobble) * sin(angle))
+  }
+
   private func stopClock() {
     link?.invalidate()
     link = nil
+  }
+
+  private func cancelDismissal() {
+    dismissalTask?.cancel()
+    dismissalTask = nil
+    dismissal = nil
   }
 
   func shutdown() {

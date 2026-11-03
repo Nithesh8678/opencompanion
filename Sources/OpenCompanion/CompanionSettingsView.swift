@@ -268,6 +268,20 @@ import SwiftUI
       .toggleStyle(.switch).controlSize(.small)
       .disabled(!cursorPreferences.enabled)
       .accessibilityIdentifier("companion.settings.cursor.showReplies")
+      rowDivider
+      Toggle(isOn: $cursorPreferences.screenGuidanceEnabled) {
+        VStack(alignment: .leading, spacing: 5) {
+          Text("Screen guidance").fontWeight(.medium)
+          detail(
+            "When you ask for on-screen help, use one capture of the active screen to guide you. Your screen is not continuously monitored."
+          )
+        }
+      }
+      .toggleStyle(.switch).controlSize(.small)
+      .accessibilityIdentifier("companion.settings.cursor.screenGuidance")
+      detail(
+        "Requests are recognized in English and may be missed. You can always add a screen manually in Chat."
+      )
       detail("Changes apply immediately.")
     }
   }

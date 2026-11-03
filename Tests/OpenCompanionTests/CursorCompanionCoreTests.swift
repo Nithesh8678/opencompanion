@@ -10,7 +10,7 @@ import Testing
     let characters = Array(text)
     #expect(reveal.append(unitID: 0, text: text, isComplete: true) == true)
     var previousCount = 0
-    for _ in 0..<100 {
+    for _ in 0..<500 {
       reveal.advance(by: 0.01)
       let visible = Array(reveal.visibleText)
       #expect(visible.count >= previousCount)
@@ -31,12 +31,12 @@ import Testing
     #expect(reveal.append(unitID: 1, text: "e\u{301}", isComplete: false) == true)
     reveal.fastForward()
     #expect(reveal.visibleText.isEmpty)
-    #expect(reveal.append(unitID: 1, text: "e\u{301}x", isComplete: false) == true)
+    #expect(reveal.append(unitID: 1, text: "e\u{301} x", isComplete: false) == true)
     reveal.advance(by: 0.01)
     #expect(reveal.visibleText == "e\u{301}")
-    #expect(reveal.append(unitID: 1, text: "e\u{301}x", isComplete: true) == true)
+    #expect(reveal.append(unitID: 1, text: "e\u{301} x", isComplete: true) == true)
     reveal.fastForward()
-    #expect(reveal.visibleText == "e\u{301}x")
+    #expect(reveal.visibleText == "e\u{301} x")
 
     reveal.reset()
     for partial in ["👨", "👨‍", "👨‍👩", "👨‍👩‍👧‍👦"] {
@@ -60,8 +60,38 @@ import Testing
     reveal.advance(by: 1)
     #expect(reveal.visibleText == "First")
     reveal.append(unitID: 2, text: "e!", isComplete: false)
-    #expect(reveal.advance(by: 0.001) == true)
-    #expect(reveal.visibleText == "e" && reveal.currentUnitID == 2)
+    #expect(reveal.advance(by: 1) == false)
+    reveal.append(unitID: 2, text: "e! ", isComplete: false)
+    #expect(reveal.advance(by: 0.3) == true)
+    #expect(reveal.visibleText == "e!" && reveal.currentUnitID == 2)
+  }
+
+  @Test func pendingTransportDoesNotRequireARevealClockOrSkipTheHead() {
+    var reveal = CursorTextReveal()
+    reveal.append(unitID: 1, text: "one ", isComplete: false)
+    #expect(reveal.hasRevealableText)
+    reveal.fastForward()
+    #expect(reveal.visibleText == "one")
+    #expect(reveal.hasPending && !reveal.hasRevealableText)
+    reveal.append(unitID: 2, text: "Later", isComplete: true)
+    #expect(reveal.hasPending && !reveal.hasRevealableText)
+    reveal.append(unitID: 1, text: "one two", isComplete: false)
+    #expect(!reveal.hasRevealableText)
+    reveal.append(unitID: 1, text: "one two ", isComplete: false)
+    #expect(reveal.hasRevealableText)
+    reveal.advance(by: 0.23)
+    #expect(reveal.visibleText == "one two")
+    #expect(reveal.hasPending && !reveal.hasRevealableText)
+    reveal.append(unitID: 1, text: "one two ", isComplete: true)
+    #expect(reveal.hasRevealableText)
+    reveal.fastForward()
+    #expect(reveal.visibleText == "one two " && reveal.hasRevealableText)
+
+    reveal.reset()
+    reveal.append(unitID: 0, text: "", isComplete: true)
+    #expect(reveal.hasPending && reveal.hasRevealableText)
+    #expect(reveal.advance(by: 0.01) == false)
+    #expect(!reveal.hasPending && !reveal.hasRevealableText)
   }
 
   @Test func cumulativeUpdatesPreserveQueueOrderAndRejectRetiredOrRewrittenUnits() {
@@ -135,24 +165,106 @@ import Testing
     #expect(reveal.finishSpeech(unitID: 1) == false)
   }
 
-  @Test func punctuationPausesAreShortAndLongContentCatchesUp() {
+  @Test func wordsHaveACalmCadenceAndPunctuationAddsAShortRest() {
     var plain = CursorTextReveal()
     var paused = CursorTextReveal()
-    plain.append(unitID: 1, text: "abcdefg", isComplete: true)
-    paused.append(unitID: 1, text: "abc,def", isComplete: true)
-    plain.advance(by: 0.15)
-    paused.advance(by: 0.15)
-    #expect(paused.visibleText.count < plain.visibleText.count)
-    paused.advance(by: 1)
-    #expect(paused.visibleText == "abc,def")
+    plain.append(unitID: 1, text: "One two three", isComplete: true)
+    paused.append(unitID: 1, text: "One, two three", isComplete: true)
+    plain.advance(by: 0.001)
+    paused.advance(by: 0.001)
+    #expect(plain.visibleText == "One" && paused.visibleText == "One,")
+    #expect(plain.advance(by: 0.1) == false)
+    #expect(plain.advance(by: 0.13) == true)
+    #expect(plain.visibleText == "One two")
+    #expect(paused.advance(by: 0.23) == false)
+    #expect(paused.visibleText == "One,")
+    #expect(paused.advance(by: 0.10) == true)
+    #expect(paused.visibleText == "One, two")
+  }
 
+  @Test func aLongFrameOrLargeBacklogReleasesOnlyOneBoundedWordGroup() {
     var long = CursorTextReveal()
     let text = String(repeating: "x", count: 10_000)
     long.append(unitID: 1, text: text, isComplete: true)
     long.advance(by: 0.5)
-    #expect(long.visibleText.count > 1000)
-    for _ in 0..<120 { long.advance(by: 1.0 / 60) }
-    #expect(long.visibleText == text && !long.hasPending)
+    #expect(long.visibleText.count == CursorTextReveal.maximumWordGroupCharacters)
+    long.advance(by: 60)
+    #expect(long.visibleText.count == CursorTextReveal.maximumWordGroupCharacters * 2)
+    #expect(long.advance(by: 0.001) == false)
+    #expect(long.hasPending)
+
+    var words = CursorTextReveal()
+    words.append(unitID: 0, text: "one two three four", isComplete: true)
+    words.advance(by: 60)
+    #expect(words.visibleText == "one")
+    words.advance(by: 60)
+    #expect(words.visibleText == "one two")
+    #expect(words.advance(by: 0.001) == false)
+  }
+
+  @Test func transportWaitsForACompleteWordAndKeepsUnicodePunctuationTogether() {
+    var reveal = CursorTextReveal()
+    reveal.append(unitID: 1, text: "Hel", isComplete: false)
+    #expect(!reveal.hasRevealableText)
+    #expect(reveal.advance(by: 1) == false)
+    reveal.append(unitID: 1, text: "Hello ", isComplete: false)
+    #expect(reveal.hasRevealableText)
+    reveal.advance(by: 0.001)
+    #expect(reveal.visibleText == "Hello")
+    reveal.append(unitID: 1, text: "Hello wor", isComplete: false)
+    #expect(!reveal.hasRevealableText)
+    reveal.advance(by: 1)
+    reveal.append(unitID: 1, text: "Hello world!", isComplete: false)
+    #expect(!reveal.hasRevealableText)
+    reveal.append(unitID: 1, text: "Hello world! ", isComplete: false)
+    #expect(reveal.hasRevealableText)
+    reveal.advance(by: 0.3)
+    #expect(reveal.visibleText == "Hello world!")
+
+    reveal.reset()
+    let text = "வணக்கம், दुनिया! 你好世界。 👨‍👩‍👧‍👦"
+    reveal.append(unitID: 0, text: text, isComplete: true)
+    for expected in [
+      "வணக்கம்,", "வணக்கம், दुनिया!", "வணக்கம், दुनिया! 你好",
+      "வணக்கம், दुनिया! 你好世界。", text,
+    ] {
+      reveal.advance(by: 1)
+      #expect(reveal.visibleText == expected)
+    }
+    #expect(!reveal.hasPending)
+  }
+
+  @Test func aNewUnitCannotBypassThePreviousWordsInterval() {
+    var reveal = CursorTextReveal()
+    reveal.append(unitID: 0, text: "First", isComplete: true)
+    reveal.append(unitID: 1, text: "Second", isComplete: true)
+    reveal.advance(by: 0.001)
+    #expect(reveal.visibleText == "First")
+    #expect(reveal.advance(by: 0.01) == false)
+    #expect(reveal.visibleText == "First")
+    reveal.advance(by: 0.22)
+    #expect(reveal.visibleText == "Second")
+  }
+
+  @Test func quotesBracketsAndInternalApostrophesStayWithTheirWords() {
+    var reveal = CursorTextReveal()
+    let text = "\"👨‍👩‍👧‍👦\" (hello) don't"
+    reveal.append(unitID: 0, text: text, isComplete: true)
+    for expected in ["\"👨‍👩‍👧‍👦\"", "\"👨‍👩‍👧‍👦\" (hello)", text] {
+      reveal.advance(by: 1)
+      #expect(reveal.visibleText == expected)
+    }
+    #expect(!reveal.hasPending)
+  }
+
+  @Test func completedWhitespaceAndOpeningPunctuationCannotPinTheQueue() {
+    for text in ["   ", "((", "\"", "\n\r\n"] {
+      var reveal = CursorTextReveal()
+      reveal.append(unitID: 0, text: text, isComplete: true)
+      #expect(reveal.hasRevealableText)
+      reveal.advance(by: 1)
+      #expect(reveal.visibleText == text && !reveal.hasPending)
+    }
   }
 
   @Test func resetAndSpeechIdentityCannotReviveAnOlderCaption() {
@@ -179,7 +291,7 @@ import Testing
     #expect(placement.frame.maxY - placement.bodyPoint.y == anchor.y)
     #expect(placement.bubbleFrame.minX > placement.bodyPoint.x)
     #expect(placement.bubbleFrame.minY > placement.bodyPoint.y)
-    #expect(placement.frame.width < 230 && placement.frame.height < 110)
+    #expect(placement.frame.width < 250 && placement.frame.height < 130)
   }
 
   @Test func edgeAndOversizedCaptionsStayInsideTheVisibleSafetyRegion() {
@@ -207,7 +319,11 @@ import Testing
       bubbleSize: CGSize(width: CGFloat.infinity, height: CGFloat.nan),
       display: .null, visible: .infinite)
     #expect(placement.frame.origin.x.isFinite && placement.frame.origin.y.isFinite)
-    #expect(placement.frame.width == 34 && placement.frame.height == 38)
+    // A diagonal 18×22 body and its 8-point halo must fit even without a reply.
+    let rotatedRadius = hypot(18.0, 22.0) / 2 + 8
+    #expect(placement.frame.width / 2 >= rotatedRadius)
+    #expect(placement.frame.height / 2 >= rotatedRadius)
+    #expect(placement.frame.width <= 64 && placement.frame.height <= 64)
     #expect(placement.bubbleFrame == .zero)
     #expect(placement.bodyPoint.x.isFinite && placement.bodyPoint.y.isFinite)
     let tiny = CursorCompanionLayout.placement(

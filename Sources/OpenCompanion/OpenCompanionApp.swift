@@ -17,6 +17,7 @@ import SwiftUI
   private var model: AppModel!
   private var shell: CompanionShell?
   private var cursor: CursorCompanionCoordinator?
+  private var screenGuidance: ScreenGuidanceCoordinator?
   private var utilityWindow: NSWindow?
   private var explanationPanel: NSPanel?
   private let hotkey = HotkeyService()
@@ -39,6 +40,7 @@ import SwiftUI
     let acceptanceMode = [
       "--keychain-acceptance", "--smoke-test-codex", "--render-acceptance", "--capture-acceptance",
       "--interaction-acceptance", "--cursor-acceptance", "--cursor-live-acceptance",
+      "--guidance-live-acceptance",
     ].contains(where: CommandLine.arguments.contains)
     model = AppModel(acceptanceMode: acceptanceMode)
     model.onOpen = { [weak self] in self?.openRequestedSurface() }
@@ -94,6 +96,7 @@ import SwiftUI
     shell?.show(anchor: .notch)
     if !acceptanceMode || CommandLine.arguments.contains("--cursor-acceptance")
       || CommandLine.arguments.contains("--cursor-live-acceptance")
+      || CommandLine.arguments.contains("--guidance-live-acceptance")
     {
       cursor = CursorCompanionCoordinator(
         model: model, observePointer: !acceptanceMode,
@@ -105,18 +108,45 @@ import SwiftUI
       model.onCursorInputStarted = { [weak self] generation in
         self?.cursor?.beginInput(generation: generation)
       }
-      model.onCursorResponseStarted = { [weak self] generation in
-        self?.cursor?.beginResponse(generation: generation)
+      model.onCursorResponseStarted = { [weak self] generation, guidance in
+        self?.cursor?.beginResponse(generation: generation, isGuidance: guidance)
       }
       model.onCursorTextPreview = { [weak self] generation, preview in
-        self?.cursor?.accept(preview, generation: generation)
+        self?.cursor?.accept(preview, generation: generation) ?? true
       }
       model.onCursorTargetAccepted = { [weak self] generation, target, evidence in
-        self?.cursor?.guide(target: target, evidence: evidence, generation: generation)
+        self?.cursor?.guide(target: target, evidence: evidence, generation: generation) ?? 0
       }
       model.onCursorCancelled = { [weak self] generation in
         self?.cursor?.cancel(generation: generation)
+        self?.screenGuidance?.cancel()
       }
+    }
+    if !acceptanceMode || CommandLine.arguments.contains("--guidance-live-acceptance") {
+      screenGuidance = ScreenGuidanceCoordinator(model: model)
+      model.onScreenGuidanceTargetAccepted = { [weak self] target, evidence, generation, request in
+        self?.screenGuidance?.accept(
+          target: target, evidence: evidence,
+          generation: generation, request: request)
+      }
+    }
+    if let index = CommandLine.arguments.firstIndex(of: "--guidance-live-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 1 < CommandLine.arguments.count, let cursor else {
+            throw ProviderError.message("Provide an output directory for live guidance acceptance.")
+          }
+          try await ScreenGuidanceLiveAcceptance.run(
+            model: model, cursor: cursor,
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+          print("GUIDANCE_LIVE_ACCEPTANCE_PASSED")
+        } catch {
+          print("GUIDANCE_LIVE_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
     }
     if let index = CommandLine.arguments.firstIndex(of: "--cursor-live-acceptance") {
       Task { @MainActor in
@@ -462,6 +492,7 @@ import SwiftUI
   func applicationWillTerminate(_ notification: Notification) {
     voiceShortcut.stop()
     cursor?.shutdown()
+    screenGuidance?.shutdown()
     shell?.shutdown()
     model.stop()
     model.runner.stop()

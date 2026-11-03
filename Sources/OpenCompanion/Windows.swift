@@ -7,25 +7,40 @@ final class AnnotationPanel: NSPanel {
   override var canBecomeMain: Bool { false }
 }
 @MainActor final class OverlayHost {
-  private var panels: [NSPanel] = []
-  private var expiry: Task<Void, Never>?
-  func clear() {
-    expiry?.cancel()
-    panels.forEach { $0.orderOut(nil) }
-    panels.removeAll()
+  private struct Mark {
+    let panel: NSPanel
+    let expiresAt: TimeInterval
   }
-  func show(target: ProviderTarget, evidence: ScreenEvidence, showInstruction: Bool = true) throws {
-    guard target.x.isFinite, target.y.isFinite, target.width.isFinite, target.height.isFinite,
-      target.x >= 0, target.y >= 0, target.width > 0, target.height > 0,
-      target.x + target.width <= 1.001, target.y + target.height <= 1.001,
-      ProcessInfo.processInfo.systemUptime - evidence.capturedAt < 15,
-      NSWorkspace.shared.frontmostApplication?.processIdentifier == evidence.foregroundPID
-    else {
-      throw ProviderError.message(
-        "Screen target expired or was invalid. Capture again to refresh guidance.")
+  private var marks: [Mark] = []
+  private var expiry: Task<Void, Never>?
+  private var evidenceIdentity: ScreenEvidenceIdentity?
+  private var generation: UInt64 = 0
+
+  func clear() {
+    generation &+= 1
+    expiry?.cancel()
+    expiry = nil
+    marks.forEach { Self.remove($0.panel) }
+    marks.removeAll()
+    evidenceIdentity = nil
+  }
+
+  func show(
+    target: ProviderTarget, evidence: ScreenEvidence, showInstruction: Bool = true,
+    append: Bool = false, lifetime: TimeInterval = 45, introDelay: TimeInterval = 0
+  ) throws {
+    guard lifetime.isFinite, lifetime > 0, introDelay.isFinite, introDelay >= 0, introDelay <= 2 else {
+      throw ProviderError.message("Screen guidance timing was invalid.")
     }
-    clear()
+    let shape = try validatedShape(target: target, evidence: evidence)
+    let now = ProcessInfo.processInfo.systemUptime
     let display = evidence.screenRect
+    let identity = ScreenEvidenceIdentity(evidence)
+    if !append || evidenceIdentity != identity { clear() }
+    evidenceIdentity = identity
+    // Sequential targets from the same captured scene can remain together.
+    // Each mark retains its own deadline, so appending never extends old marks.
+    while marks.count >= 8 { Self.remove(marks.removeFirst().panel) }
     let panel = AnnotationPanel(
       contentRect: display, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
       defer: false)
@@ -33,47 +48,75 @@ final class AnnotationPanel: NSPanel {
     panel.backgroundColor = .clear
     panel.hasShadow = false
     panel.ignoresMouseEvents = true
+    panel.isReleasedWhenClosed = false
     panel.level = .floating
     panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-    let rect = CGRect(
+    let proposed = CGRect(
       x: target.x * display.width, y: target.y * display.height,
       width: target.width * display.width, height: target.height * display.height)
-    panel.contentView = NSHostingView(
-      rootView: AnnotationView(rect: rect, text: showInstruction ? target.instruction : ""))
+    let rect = proposed.intersection(CGRect(origin: .zero, size: display.size))
+    let annotation = GuidanceAnnotationView(
+      frame: CGRect(origin: .zero, size: display.size), target: rect, shape: shape,
+      text: GuidanceAnnotationLayout.labelText(target: target, showInstruction: showInstruction),
+      reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+    panel.contentView = annotation
     panel.orderFrontRegardless()
-    panels.append(panel)
+    annotation.animateAppearance(introDelay: introDelay)
+    marks.append(Mark(panel: panel, expiresAt: now + min(45, lifetime)))
+    guard expiry == nil else { return }
+    let token = generation
+    let foregroundPID = evidence.foregroundPID
     expiry = Task { @MainActor [weak self] in
-      for _ in 0..<30 {
+      while !Task.isCancelled {
         try? await Task.sleep(for: .milliseconds(250))
-        guard !Task.isCancelled else { return }
-        if NSWorkspace.shared.frontmostApplication?.processIdentifier != evidence.foregroundPID {
-          self?.clear()
+        guard !Task.isCancelled, let self, self.generation == token else { return }
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier != foregroundPID {
+          self.clear()
+          return
+        }
+        let currentTime = ProcessInfo.processInfo.systemUptime
+        self.marks.removeAll { mark in
+          guard mark.expiresAt <= currentTime else { return false }
+          Self.remove(mark.panel)
+          return true
+        }
+        if self.marks.isEmpty {
+          self.clear()
           return
         }
       }
-      self?.clear()
     }
   }
-}
-struct AnnotationView: View {
-  let rect: CGRect
-  let text: String
-  @Environment(\.accessibilityReduceMotion) var reduceMotion
-  var body: some View {
-    GeometryReader { geometry in
-      ZStack(alignment: .topLeading) {
-        RoundedRectangle(cornerRadius: 8).stroke(Color.red, lineWidth: 3.5).shadow(
-          color: .red.opacity(0.5), radius: 10
-        ).frame(width: rect.width, height: rect.height).offset(x: rect.minX, y: rect.minY)
-        if !text.isEmpty {
-          Text(text).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white).padding(10)
-            .background(.red, in: RoundedRectangle(cornerRadius: 9)).frame(
-              maxWidth: 330, alignment: .leading
-            ).offset(
-              x: min(rect.minX, max(0, geometry.size.width - 340)), y: max(8, rect.minY - 58))
-        }
-      }
-    }.allowsHitTesting(false)
+
+  func validate(target: ProviderTarget, evidence: ScreenEvidence) throws {
+    _ = try validatedShape(target: target, evidence: evidence)
+  }
+
+  private func validatedShape(
+    target: ProviderTarget, evidence: ScreenEvidence
+  ) throws -> GuidanceAnnotationView.Shape {
+    let age = ProcessInfo.processInfo.systemUptime - evidence.capturedAt
+    let display = evidence.screenRect
+    let shapeName = target.shape ?? GuidanceAnnotationView.Shape.roundedRectangle.rawValue
+    guard target.x.isFinite, target.y.isFinite, target.width.isFinite, target.height.isFinite,
+      target.x >= 0, target.y >= 0, target.width > 0, target.height > 0,
+      target.x + target.width <= 1.001, target.y + target.height <= 1.001,
+      display.minX.isFinite, display.minY.isFinite,
+      display.width.isFinite, display.height.isFinite,
+      display.width > 0, display.height > 0, display.width <= 100_000, display.height <= 100_000,
+      age.isFinite, age >= 0, age < 15,
+      let shape = GuidanceAnnotationView.Shape(rawValue: shapeName),
+      NSWorkspace.shared.frontmostApplication?.processIdentifier == evidence.foregroundPID
+    else {
+      throw ProviderError.message(
+        "Screen target expired or was invalid. Capture again to refresh guidance.")
+    }
+    return shape
+  }
+
+  private static func remove(_ panel: NSPanel) {
+    panel.orderOut(nil)
+    panel.contentView = nil
   }
 }
 struct HotkeyRegistrationError: Error, Equatable, LocalizedError {

@@ -70,7 +70,7 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
   @Published var windowPickerHost: CapturePickerHost = .workspace
   var lastExternalPID: pid_t = 0
   private var workspaceObserver: NSObjectProtocol?
-  private var displayObserver: NSObjectProtocol?
+  private var displaySubscription: AnyCancellable?
   @Published var selectedDisplay: CGDirectDisplayID?
   @Published var memoryTitle = ""
   @Published var memoryBody = ""
@@ -96,10 +96,13 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
   /// Only a successfully recognized held utterance transfers compact HUD ownership.
   var onVoiceResponseSubmitted: ((UInt64, UInt64) -> Void)?
   var onCursorInputStarted: ((UInt64) -> Void)?
-  var onCursorResponseStarted: ((UInt64) -> Void)?
-  var onCursorTextPreview: ((UInt64, ProviderTextPreview) -> Void)?
-  var onCursorTargetAccepted: ((UInt64, ProviderTarget, ScreenEvidence) -> Void)?
+  var onCursorResponseStarted: ((UInt64, Bool) -> Void)?
+  var onCursorTextPreview: ((UInt64, ProviderTextPreview) -> Bool)?
+  var onCursorTargetAccepted: ((UInt64, ProviderTarget, ScreenEvidence) -> TimeInterval)?
+  var onScreenGuidanceTargetAccepted:
+    ((ProviderTarget, ScreenEvidence, UInt64, ScreenGuidanceRequest) -> Void)?
   var onCursorCancelled: ((UInt64) -> Void)?
+  private var activeGuidanceRequest: ScreenGuidanceRequest?
   private var receivedTextPreview = false
   var capturePublicationRevision: UInt64 { captureGate.generation }
   var captureResultID: UUID? { evidence?.frameID }
@@ -182,9 +185,9 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
         self.overlay.clear()
       }
     }
-    displayObserver = NotificationCenter.default.addObserver(
-      forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
-    ) { [weak self] _ in
+    displaySubscription = NotificationCenter.default.publisher(
+      for: NSApplication.didChangeScreenParametersNotification
+    ).sink { [weak self] _ in
       MainActor.assumeIsolated { self?.invalidateScreenEvidence() }
     }
     if !acceptanceMode {
@@ -251,7 +254,11 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
     }
   }
   func send() { send(textOverride: nil, voiceOnly: false, speakAloud: false) }
-  private func send(textOverride: String?, voiceOnly: Bool, speakAloud: Bool) {
+  private func send(
+    textOverride: String?, voiceOnly: Bool, speakAloud: Bool,
+    guidanceRequest: ScreenGuidanceRequest? = nil,
+    expectedGuidanceForegroundPID: pid_t? = nil
+  ) {
     let text = (textOverride ?? input).trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty else { return }
     let sourceGeneration = generation
@@ -262,26 +269,47 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
     error = nil
     generation += 1
     let current = generation
+    activeGuidanceRequest = guidanceRequest
+    let captureToken = captureGate.generation
     scenePresentedForTurn = false
     busy = true
     state = "Thinking"
     receivedTextPreview = false
-    onCursorResponseStarted?(current)
+    onCursorResponseStarted?(current, guidanceRequest != nil)
     if voiceOnly { onVoiceResponseSubmitted?(sourceGeneration, current) }
     updateBadge()
     record("turn.declaredEnd.textSubmit")
     messages.append(ChatLine(role: "user", text: text))
     let history = messages
     let context = voiceOnly ? "" : selectedContext + (evidence?.semanticText ?? "")
-    outputSceneBinding = NotebookTurnBinding(documentID: scene?.id, revision: scene?.revision)
-    let turnEvidence = voiceOnly ? nil : evidence.map(ScreenEvidenceIdentity.init)
+    outputSceneBinding =
+      guidanceRequest == nil
+      ? NotebookTurnBinding(documentID: scene?.id, revision: scene?.revision) : nil
+    let selectedEvidence = voiceOnly ? nil : evidence.map(ScreenEvidenceIdentity.init)
     let screenshot = voiceOnly ? nil : evidence?.image
-    let activeScene = scene
+    let activeScene = guidanceRequest == nil ? scene : nil
     let config = configuration
     let key = apiKey
     turn = Task { [weak self] in
       guard let self else { return }
       do {
+        let turnContext: String
+        let turnImage: Data?
+        let turnEvidence: ScreenEvidenceIdentity?
+        if let guidanceRequest {
+          let frame = try await self.captureGuidanceEvidence(
+            request: guidanceRequest, generation: current, captureToken: captureToken,
+            expectedForegroundPID: expectedGuidanceForegroundPID)
+          turnContext = frame.semanticText
+          turnImage = frame.image
+          turnEvidence = ScreenEvidenceIdentity(frame)
+        } else {
+          turnContext = context
+          turnImage = screenshot
+          turnEvidence = selectedEvidence
+        }
+        try Task.checkCancellation()
+        guard current == self.generation else { throw CancellationError() }
         let handler: @Sendable (ProviderUnit) async throws -> Void = { [weak self] unit in
           try Task.checkCancellation()
           try await self?.accept(unit, generation: current, expectedEvidence: turnEvidence)
@@ -294,11 +322,13 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
           let adapter = CodexProvider()
           self.codex = adapter
           try await adapter.stream(
-            executable: self.codexPath, model: self.codexModel, messages: history, context: context,
-            image: screenshot, scene: activeScene, onUnit: handler, onText: preview)
+            executable: self.codexPath, model: self.codexModel, messages: history,
+            context: turnContext,
+            image: turnImage, scene: activeScene, onUnit: handler, onText: preview)
         } else {
           try await self.provider.stream(
-            configuration: config, key: key, messages: history, context: context, image: screenshot,
+            configuration: config, key: key, messages: history, context: turnContext,
+            image: turnImage,
             scene: activeScene, onUnit: handler, onText: preview)
         }
         guard current == self.generation else { return }
@@ -309,6 +339,7 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
         await self.persistConversation()
       } catch {
         guard current == self.generation else { return }
+        self.activeGuidanceRequest = nil
         self.busy = false
         self.state = "Ready"
         self.updateBadge()
@@ -318,7 +349,97 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
       }
     }
   }
-  private func acceptTextPreview(_ preview: ProviderTextPreview, generation: UInt64) throws {
+
+  /// Capture only the current active screen for this explicit guidance turn.
+  /// Selected file/memory context stays in the UI and is never part of this payload.
+  private func captureGuidanceEvidence(
+    request: ScreenGuidanceRequest, generation: UInt64, captureToken: UInt64,
+    expectedForegroundPID: pid_t?
+  ) async throws -> ScreenEvidence {
+    try Task.checkCancellation()
+    guard generation == self.generation, activeGuidanceRequest == request,
+      request.expires.isFinite, ProcessInfo.processInfo.systemUptime < request.expires,
+      CursorCompanionPreferences.load().screenGuidanceEnabled,
+      captureGate.permits(captureToken, cancelled: Task.isCancelled)
+    else { throw CancellationError() }
+    let screens = Dictionary(
+      uniqueKeysWithValues: NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, CGRect)? in
+        guard
+          let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+            as? NSNumber
+        else { return nil }
+        return (number.uint32Value, screen.frame)
+      })
+    let pointer = NSEvent.mouseLocation
+    guard
+      let displayID = screens.first(where: { $0.value.contains(pointer) })?.key
+        ?? selectedDisplay.flatMap({ screens[$0] == nil ? nil : $0 })
+    else { throw ProviderError.message("No active display is available for screen guidance.") }
+    let ownPID = ProcessInfo.processInfo.processIdentifier
+    let foreground = NSWorkspace.shared.frontmostApplication
+    let previous = NSRunningApplication(processIdentifier: lastExternalPID)
+    let app = foreground?.processIdentifier == ownPID ? previous : (foreground ?? previous)
+    let foregroundPID = app?.processIdentifier == ownPID ? 0 : (app?.processIdentifier ?? 0)
+    guard expectedForegroundPID == nil || expectedForegroundPID == foregroundPID else {
+      throw ProviderError.message("The active app changed. Ask for screen guidance again.")
+    }
+    record("guidance.capture.started")
+    let frame = try await capture.capture(
+      displayID: displayID, foregroundPID: foregroundPID,
+      foregroundName: foregroundPID == 0 ? "Desktop" : (app?.localizedName ?? "Application"),
+      screens: screens)
+    try Task.checkCancellation()
+    guard generation == self.generation, activeGuidanceRequest == request,
+      ProcessInfo.processInfo.systemUptime < request.expires,
+      CursorCompanionPreferences.load().screenGuidanceEnabled,
+      captureGate.permits(captureToken, cancelled: Task.isCancelled)
+    else { throw CancellationError() }
+    guard frame.displayID == displayID else {
+      throw ProviderError.message("The active display changed. Ask for screen guidance again.")
+    }
+    let currentForeground = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+    let currentExternal = currentForeground == ownPID ? lastExternalPID : currentForeground
+    guard foregroundPID == 0 || currentExternal == foregroundPID else {
+      throw ProviderError.message("The active app changed. Ask for screen guidance again.")
+    }
+    evidence = frame
+    contextTitle = "Screen: \(frame.foregroundName)"
+    record("guidance.capture.accepted")
+    return frame
+  }
+
+  /// An observed user click requests fresh perception, never an automatic click
+  /// or an assumption that the previous instruction succeeded.
+  func beginScreenGuidance(_ prompt: String, speakAloud: Bool = true) {
+    guard CursorCompanionPreferences.load().screenGuidanceEnabled else { return }
+    send(
+      textOverride: prompt, voiceOnly: true, speakAloud: speakAloud,
+      guidanceRequest: ScreenGuidanceRequest(prompt: prompt, speakAloud: speakAloud))
+  }
+
+  func continueScreenGuidance(
+    request: ScreenGuidanceRequest, expectedEvidence: ScreenEvidenceIdentity, generation: UInt64
+  ) {
+    guard generation == self.generation, activeGuidanceRequest == request,
+      (0..<5).contains(request.step), request.expires.isFinite,
+      ProcessInfo.processInfo.systemUptime < request.expires,
+      CursorCompanionPreferences.load().screenGuidanceEnabled,
+      expectedEvidence.matches(evidence)
+    else { return }
+    let next = ScreenGuidanceRequest(
+      id: request.id, prompt: request.prompt, step: request.step + 1, expires: request.expires,
+      speakAloud: request.speakAloud)
+    let instruction = """
+      The user clicked the highlighted control. Inspect the new screen capture to verify what changed; do not assume the click succeeded. Continue the original task with the next grounded target and a short instruction. If the task is complete, say so without another target. If progress is unclear, explain the ambiguity rather than invent a control.
+      Original task: \(request.prompt)
+      Guidance step: \(next.step)
+      """
+    send(
+      textOverride: instruction, voiceOnly: true, speakAloud: request.speakAloud,
+      guidanceRequest: next,
+      expectedGuidanceForegroundPID: expectedEvidence.foregroundPID)
+  }
+  private func acceptTextPreview(_ preview: ProviderTextPreview, generation: UInt64) async throws {
     guard generation == self.generation else { throw CancellationError() }
     // Inert presentation only. Chat, speech, scenes and actions still wait for
     // a complete validated ProviderUnit through accept(_:generation:...).
@@ -326,7 +447,13 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
       receivedTextPreview = true
       record("cursor.firstTextPreview.received")
     }
-    onCursorTextPreview?(generation, preview)
+    while onCursorTextPreview?(generation, preview) == false {
+      // Bound presentation without accelerating words or dropping a paragraph.
+      // This suspends one provider task; it never blocks the render/audio thread.
+      try await Task.sleep(for: .milliseconds(50))
+      guard generation == self.generation else { throw CancellationError() }
+      try Task.checkCancellation()
+    }
   }
   func accept(_ unit: ProviderUnit, generation: UInt64, expectedEvidence: ScreenEvidenceIdentity?)
     throws
@@ -360,17 +487,31 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
       }
       record("visual.accepted")
     case "target":
-      guard let target = unit.target, target.instruction.utf8.count <= 32_000, let evidence,
-        let expectedEvidence, expectedEvidence.matches(evidence)
+      guard let target = unit.target, target.instruction.utf8.count <= 32_000,
+        (target.label?.prefix(81).count ?? 0) <= 80
+      else { throw ProviderError.message("Invalid or oversized screen guidance target.") }
+      guard let evidence, let expectedEvidence, expectedEvidence.matches(evidence)
       else {
         throw ProviderError.message(
           "The selected screen evidence changed. Capture again before requesting guidance.")
       }
       let cursorPreferences = CursorCompanionPreferences.load()
+      if let request = activeGuidanceRequest {
+        guard cursorPreferences.screenGuidanceEnabled,
+          ProcessInfo.processInfo.systemUptime < request.expires
+        else { throw CancellationError() }
+      }
+      try overlay.validate(target: target, evidence: evidence)
+      let introDelay = onCursorTargetAccepted?(generation, target, evidence) ?? 0
       try overlay.show(
         target: target, evidence: evidence,
-        showInstruction: !(cursorPreferences.enabled && cursorPreferences.showReplies))
-      onCursorTargetAccepted?(generation, target, evidence)
+        showInstruction: true,
+        append: true, introDelay: introDelay)
+      if let request = activeGuidanceRequest, cursorPreferences.screenGuidanceEnabled,
+        ProcessInfo.processInfo.systemUptime < request.expires
+      {
+        onScreenGuidanceTargetAccepted?(target, evidence, generation, request)
+      }
       messages.append(ChatLine(role: "assistant", text: target.instruction))
       record("guidance.presented.awaitingUser")
     default: throw ProviderError.message("Unsupported model output kind: \(unit.type)")
@@ -378,6 +519,7 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
   }
   func stop() {
     generation += 1
+    activeGuidanceRequest = nil
     onCursorCancelled?(generation)
     invalidateCapture()
     cancelWindowPicker()
@@ -509,9 +651,15 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
     }
     if completion.mode.submitsOnCompletion {
       record(completion.isFinal ? "ptt.finalTranscript" : "ptt.recognizedTailDeadline")
-      // Keep the ordinary conversation/notebook workflow and typed draft. Only
-      // selected screen/file/memory evidence is omitted from this voice turn.
-      send(textOverride: completion.transcript, voiceOnly: true, speakAloud: true)
+      let guidance =
+        CursorCompanionPreferences.load().screenGuidanceEnabled
+          && GuidanceIntent.requestsScreenGuidance(text: completion.transcript)
+        ? ScreenGuidanceRequest(prompt: completion.transcript) : nil
+      // Keep the typed draft and ordinary conversation. Screen help uses one
+      // fresh capture; ordinary voice questions omit selected file/memory/image evidence.
+      send(
+        textOverride: completion.transcript, voiceOnly: true, speakAloud: true,
+        guidanceRequest: guidance)
     } else {
       notice = "Transcript ready. Review the draft and send when ready."
       updateBadge()

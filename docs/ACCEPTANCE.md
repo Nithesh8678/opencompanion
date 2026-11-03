@@ -15,6 +15,7 @@
 - 1 capture-sampler test: JPEG color conversion, negative display origins, retained fixtures and invalid controls.
 - 5 notch layout/hover tests: exact cutout footprint, negative display origins, notchless fallback, physical top-edge boundaries, pointer exit, pinned conversation and hover rearming. A separate run-loop test verifies pointer polling without mouse-event delivery, using an injected location source.
 - 11 voice input tests: permission/start/release/Stop ordering, final/deadline races, cancellation after release, old tails after a new hold and typed-draft preservation.
+- 6 background-callback tests: Speech authorization completion from a real background queue, recognition value snapshots and TTS event delivery onto MainActor, stale utterance-token rejection and bounded token storage. No microphone recording or acoustic claim.
 - 9 modifier-voice tests: Control+Option edges, repeats, extra keys/modifiers, lock-bit policy, cancellation and preference migration.
 - 29 isolated installer/signing tests: verified replacement and rollback, running-app and process-lock refusal, recoverable cleanup, unchanged saved-data fixtures, strict Launch Services errors and local signing configuration.
 - 5 native host tests;6 selfhost relay integration tests;4 browser protocol/scope tests.
@@ -42,6 +43,8 @@ The corrected notch implementation replaces that earlier floating idle chip: the
 A live question submitted through the expanded notch UI completed with a provider answer, returning the panel to Ready. This verifies the actual UI→provider→UI path.
 
 The user's subsequent physical check failed for both hover and Control+Option. Inspection of that normally launched GUI found Input Monitoring unavailable. The hover target also excluded the display's exact top edge and relied solely on mouse-event delivery. Closed-edge hit testing and a permission-free pointer timer now address hover; the compact HUD exposes voice setup. These corrections still require physical retesting in the updated app. Synthetic geometry tests do not establish that result.
+
+After the user enabled Input Monitoring and reopened the certificate-signed app, normal-process diagnostics confirmed an enabled event tap and two real Control+Option press/release pairs. Speech authorization then exposed a Swift actor-isolation trap in its background callback, confirmed by the matching own-app crash report. Authorization, recognition, audio-tap and TTS callbacks now have explicit thread boundaries; background regression tests cover the crash path and stale TTS delivery. Live speech and acoustic output require another installed retest.
 
 The earlier utility-window test opened/paused/saved the motor notebook and verified its record in Library. Own-window PNG renders of the notch and notebooks were inspected, exposing/fixing the initial dark-appearance contrast issue. These are local view renders, not displayed-FPS or acoustic measurements.
 

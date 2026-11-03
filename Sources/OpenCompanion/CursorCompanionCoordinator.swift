@@ -242,7 +242,7 @@ struct CursorCompanionSnapshot: Codable {
   @discardableResult func guide(
     target: ProviderTarget, evidence: ScreenEvidence, generation: UInt64
   ) -> TimeInterval {
-    guard self.generation == generation, stage == .response,
+    guard preferences.enabled, !suspended, self.generation == generation, stage == .response,
       evidence.screenRect.width > 0, evidence.screenRect.height > 0,
       target.instruction.utf8.count <= 32_000
     else { return 0 }

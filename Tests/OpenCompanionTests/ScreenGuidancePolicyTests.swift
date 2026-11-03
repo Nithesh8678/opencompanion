@@ -4,6 +4,39 @@ import Testing
 @testable import OpenCompanion
 
 struct ScreenGuidancePolicyTests {
+  @Test func quartzMouseUpConvertsToGlobalAppKitAcrossDisplays() throws {
+    let point = try #require(
+      ScreenGuidancePolicy.appKitPoint(quartz: CGPoint(x: -1_300, y: 300), mainTop: 900))
+    #expect(point == CGPoint(x: -1_300, y: 600))
+    let target = ProviderTarget(x: 0.25, y: 0.1, width: 0.2, height: 0.3, instruction: "Review")
+    let rect = try #require(
+      ScreenGuidancePolicy.targetRect(
+        target, in: CGRect(x: -1_920, y: -200, width: 1_920, height: 1_080)))
+    #expect(rect.contains(point))
+    #expect(
+      ScreenGuidancePolicy.appKitPoint(quartz: CGPoint(x: -300, y: -200), mainTop: 900)
+        == CGPoint(x: -300, y: 1_100))
+    #expect(
+      ScreenGuidancePolicy.appKitPoint(quartz: CGPoint(x: 100, y: 1_000), mainTop: 900)
+        == CGPoint(x: 100, y: -100))
+  }
+
+  @Test func absentNonfiniteAndOverflowingEventCoordinatesFailClosed() {
+    #expect(ScreenGuidancePolicy.appKitPoint(quartz: nil, mainTop: 900) == nil)
+    #expect(ScreenGuidancePolicy.appKitPoint(quartz: .zero, mainTop: nil) == nil)
+    for invalid in [CGFloat.nan, CGFloat.infinity, -CGFloat.infinity] {
+      #expect(
+        ScreenGuidancePolicy.appKitPoint(quartz: CGPoint(x: invalid, y: 0), mainTop: 900) == nil)
+      #expect(
+        ScreenGuidancePolicy.appKitPoint(quartz: CGPoint(x: 0, y: invalid), mainTop: 900) == nil)
+      #expect(ScreenGuidancePolicy.appKitPoint(quartz: .zero, mainTop: invalid) == nil)
+    }
+    #expect(
+      ScreenGuidancePolicy.appKitPoint(
+        quartz: CGPoint(x: 0, y: -CGFloat.greatestFiniteMagnitude),
+        mainTop: CGFloat.greatestFiniteMagnitude) == nil)
+  }
+
   @Test func normalizedTopLeftTargetMapsToNegativeOriginDisplay() throws {
     let display = CGRect(x: -1_920, y: -200, width: 1_920, height: 1_080)
     let target = ProviderTarget(x: 0.25, y: 0.1, width: 0.2, height: 0.3, instruction: "Review")

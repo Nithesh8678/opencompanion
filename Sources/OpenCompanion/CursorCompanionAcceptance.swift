@@ -285,6 +285,10 @@ enum CursorCompanionAcceptance {
       .write(to: output.appendingPathComponent("cursor-acceptance.json"))
   }
 
+  @MainActor static func exportGuidanceAnnotation(label: String, to url: URL) async throws {
+    try await exportAnnotationSnapshot(panel: annotationPanel(label: label), to: url)
+  }
+
   @MainActor private static func annotationPanel(label: String) throws -> AnnotationPanel {
     for case let panel as AnnotationPanel in NSApp.windows
     where panel.isVisible && panel.contentView is GuidanceAnnotationView {

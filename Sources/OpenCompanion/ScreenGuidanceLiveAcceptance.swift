@@ -15,6 +15,15 @@ enum ScreenGuidanceLiveAcceptance {
     }
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
     defer {
+      let diagnostics: [String: Any] = [
+        "events": model.diagnosticEvents, "state": model.state, "busy": model.busy,
+        "error": model.error ?? "", "generation": model.taskGeneration,
+      ]
+      if let data = try? JSONSerialization.data(
+        withJSONObject: diagnostics, options: [.prettyPrinted, .sortedKeys])
+      {
+        try? data.write(to: output.appendingPathComponent("guidance-diagnostics.json"))
+      }
       model.stop()
       cursor.shutdown()
     }
@@ -55,13 +64,18 @@ enum ScreenGuidanceLiveAcceptance {
     guard let first = stages[0], let second = stages[1], frames[0] != frames[1],
       first["foregroundIsFixture"] as? Bool == true,
       second["foregroundIsFixture"] as? Bool == true,
-      first["advanceOn"] as? String == "click"
+      first["advanceOn"] as? String == "click",
+      contains(first, point: CGPoint(x: 0.4, y: 0.45)),
+      contains(second, point: tableFieldCenter(displaySize: screen.frame.size))
     else {
       throw ProviderError.message(
         "The public fixture did not complete a fresh grounded two-step guidance flow.")
     }
     try await Task.sleep(for: .seconds(2))
     try await cursor.exportSnapshot(to: output.appendingPathComponent("guidance-cursor-final.png"))
+    try await CursorCompanionAcceptance.exportGuidanceAnnotation(
+      label: second["label"] as? String ?? "",
+      to: output.appendingPathComponent("guidance-attached-field-label.png"))
     let result: [String: Any] = [
       "result": "passed", "provider": "ChatGPT via Codex app-server", "publicFixtureOnly": true,
       "steps": [first, second], "freshFrameAfterObservedUserClick": true,
@@ -70,6 +84,24 @@ enum ScreenGuidanceLiveAcceptance {
     ]
     try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
       .write(to: output.appendingPathComponent("guidance-live-acceptance.json"))
+  }
+
+  private static func contains(_ stage: [String: Any], point: CGPoint) -> Bool {
+    guard let x = stage["x"] as? Double, let y = stage["y"] as? Double,
+      let width = stage["width"] as? Double, let height = stage["height"] as? Double,
+      width > 0, width < 0.7, height > 0, height < 0.3
+    else { return false }
+    return CGRect(x: x, y: y, width: width, height: height).contains(point)
+  }
+
+  /// Known public fixture geometry is an independent target-grounding oracle;
+  /// it is never supplied to the provider or the product's perception code.
+  private static func tableFieldCenter(displaySize size: CGSize) -> CGPoint {
+    let contentWidth = min(620, max(240, size.width - 96))
+    let left = max(32, size.width * 0.4 - contentWidth / 2)
+    return CGPoint(
+      x: (left + min(contentWidth, 420) / 2) / size.width,
+      y: (size.height * 0.45 + 37) / size.height)
   }
 
   @MainActor private static func fixtureCoversDisplay(pid: pid_t, screen: NSScreen) -> Bool {

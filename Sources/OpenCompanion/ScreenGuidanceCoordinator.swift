@@ -9,6 +9,17 @@ enum ScreenGuidancePolicy {
   static let admissionEvidenceAge: TimeInterval = 15
   static let markedTargetLifetime: TimeInterval = 45
 
+  /// Quartz mouse-event locations use the primary display's top-left origin;
+  /// AppKit uses global upward coordinates. Preserve negative display origins.
+  static func appKitPoint(quartz point: CGPoint?, mainTop: CGFloat?) -> CGPoint? {
+    guard let point, let mainTop, point.x.isFinite, point.y.isFinite, mainTop.isFinite else {
+      return nil
+    }
+    let y = mainTop - point.y
+    guard y.isFinite else { return nil }
+    return CGPoint(x: point.x, y: y)
+  }
+
   static func targetRect(_ target: ProviderTarget, in screen: CGRect) -> CGRect? {
     // CGRect's width/height getters standardize negative stored dimensions.
     // Validate the capture's raw size before deriving its coordinate bounds.
@@ -108,7 +119,9 @@ enum ScreenGuidancePolicy {
       // control. Those marks cannot replace click ownership on the same frame.
       if let owner = mark, owner.generation == generation, owner.request == request,
         owner.evidence == ScreenEvidenceIdentity(evidence), owns(owner)
-      { return }
+      {
+        return
+      }
       cancel()
       return
     }
@@ -122,27 +135,35 @@ enum ScreenGuidancePolicy {
       ScreenEvidenceIdentity(evidence).matches(model.evidence),
       NSWorkspace.shared.frontmostApplication?.processIdentifier == evidence.foregroundPID,
       ScreenGuidancePolicy.permitsAdmission(
-        step: request.step, requestExpires: request.expires, capturedAt: evidence.capturedAt, now: now),
+        step: request.step, requestExpires: request.expires, capturedAt: evidence.capturedAt,
+        now: now),
       let rect = ScreenGuidancePolicy.targetRect(target, in: evidence.screenRect)
     else { return }
     let owner = Mark(
       lease: UUID(), rect: rect, evidence: ScreenEvidenceIdentity(evidence),
       generation: generation, request: request, admittedAt: now)
     mark = owner
+    model.record("guidance.clickObservation.armed")
     guard observesInput else { return }
     let lease = owner.lease
-    globalMouse = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] _ in
-      // AppKit delivers event-monitor handlers on its main thread. Sample only
-      // this mouse-up edge; do not record continuous pointer movement.
+    globalMouse = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+      // Use the actual edge's recorded location. A later live pointer sample can
+      // already have moved away from the control by the time this handler runs.
       MainActor.assumeIsolated {
-        self?.mouseUp(at: NSEvent.mouseLocation, lease: lease)
+        let point = ScreenGuidancePolicy.appKitPoint(
+          quartz: event.cgEvent?.location, mainTop: NSScreen.screens.first?.frame.maxY)
+        self?.mouseUp(at: point, lease: lease)
       }
     }
     localMouse = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
       MainActor.assumeIsolated {
         // A click delivered to one of our own nonactivating windows must not
         // count as a click through to an external app underneath that window.
-        if event.window == nil { self?.mouseUp(at: NSEvent.mouseLocation, lease: lease) }
+        if event.window == nil {
+          let point = ScreenGuidancePolicy.appKitPoint(
+            quartz: event.cgEvent?.location, mainTop: NSScreen.screens.first?.frame.maxY)
+          self?.mouseUp(at: point, lease: lease)
+        }
       }
       return event
     }
@@ -156,6 +177,7 @@ enum ScreenGuidancePolicy {
     expiryTask = Task { @MainActor [weak self] in
       do { try await Task.sleep(for: .seconds(max(0, deadline - now))) } catch { return }
       guard let self, self.mark?.lease == lease else { return }
+      self.model?.record("guidance.clickObservation.expired")
       self.cancel()
     }
   }
@@ -175,10 +197,15 @@ enum ScreenGuidancePolicy {
     subscriptions.removeAll()
   }
 
-  private func mouseUp(at point: CGPoint, lease: UUID) {
+  private func mouseUp(at point: CGPoint?, lease: UUID) {
     guard continuationTask == nil, let owner = mark, owner.lease == lease else { return }
-    guard owns(owner) else { cancel(); return }
-    guard point.x.isFinite, point.y.isFinite, owner.rect.contains(point) else { return }
+    model?.record("guidance.mouseUp.received")
+    guard owns(owner) else {
+      model?.record("guidance.clickObservation.ownershipLost")
+      cancel()
+      return
+    }
+    guard let point, point.x.isFinite, point.y.isFinite, owner.rect.contains(point) else { return }
     // Remove observation synchronously before queuing work. Repeated clicks,
     // queued old callbacks, or a subsequent target cannot schedule a second step.
     removeClickMonitors()
@@ -188,7 +215,10 @@ enum ScreenGuidancePolicy {
     continuationTask = Task { @MainActor [weak self] in
       do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
       guard let self, self.mark?.lease == lease, !Task.isCancelled else { return }
-      guard self.owns(owner), let model = self.model else { self.cancel(); return }
+      guard self.owns(owner), let model = self.model else {
+        self.cancel()
+        return
+      }
       self.mark = nil
       self.continuationTask = nil
       // A fresh capture and model verification belong to AppModel. This event

@@ -204,6 +204,7 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
     ])
     if trace.count > 10000 { trace.removeFirst(1000) }
   }
+  var diagnosticEvents: [[String: String]] { trace }
   func showError(_ error: Error) { self.error = error.localizedDescription }
   func reload() async {
     guard let store else { return }
@@ -403,7 +404,7 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
       throw ProviderError.message("The active app changed. Ask for screen guidance again.")
     }
     evidence = frame
-    contextTitle = "Screen: \(frame.foregroundName)"
+    if selectedContext.isEmpty { contextTitle = "Screen: \(frame.foregroundName)" }
     record("guidance.capture.accepted")
     return frame
   }
@@ -723,7 +724,7 @@ enum CapturePickerHost: Sendable, Equatable { case notch, workspace }
         if !strokes.isEmpty {
           selectedContext = "User-drawn spatial context (normalized top-left points): " + strokes
         }
-        contextTitle = "Screen: \(frame.foregroundName)"
+        if selectedContext.isEmpty { contextTitle = "Screen: \(frame.foregroundName)" }
         notice = "One screen frame selected. It will be sent with your next question."
         state = "Ready"
         captureTask = nil

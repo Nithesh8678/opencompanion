@@ -1,8 +1,11 @@
 # Cursor companion and screen guidance
 
-Updated 4 November 2026. This describes current source behavior. The latest
-combined visual and guidance revision still needs its final native acceptance;
-the commands below are verification entry points, not recorded pass results.
+Updated 4 November 2026. The installed cursor/annotation and notch checks passed,
+and a public conversational request completed through ChatGPT via Codex. A live
+public-screen request grounded its first target correctly. Physical click-to-next-
+frame continuation remains pending; the UI driver's button invocation does not
+deliver a global mouse-up event. These boundaries are separate from source and
+unit-test coverage.
 
 ## Reference and implementation
 
@@ -133,7 +136,10 @@ Foreground changes and explicit cancellation clear them. The triangle's brief
 writing flight and the fixed annotation's longer lifetime are separate.
 
 `ScreenGuidanceCoordinator` passively observes a left-mouse-up only while a
-validated target with `advanceOn: "click"` is active. A click inside that target
+validated target with `advanceOn: "click"` is active. The handler converts the
+recorded event's Quartz coordinates to global AppKit coordinates, rather than
+sampling a pointer that may already have moved. Missing/nonfinite event
+coordinates fail closed. A click inside that target
 is evidence of a user click, not proof that the requested action succeeded.
 Observation is removed immediately to prevent duplicate continuation. After a
 300 ms settling interval, the current generation, frame, request, foreground,
@@ -186,6 +192,26 @@ or an explicitly authorized UI acceptance driver must click its highlighted
 “Open table settings” control.
 It checks that the next grounded target uses a different frame identity on the
 fixture's second page. This entry point does not test microphone recognition or
-inject a click itself. Final captures/results for the latest revision remain
-pending; physical hotkey/audio feel, prolonged use, mixed-scale displays,
-fullscreen/Spaces and exact visual parity need separate acceptance.
+inject a click itself. Physical hotkey/audio feel, prolonged use, mixed-scale
+displays, fullscreen/Spaces and exact visual parity need separate acceptance.
+
+## Recorded verification
+
+- Swift suites: 198 tests passed; Python installer/signing suites: 29 passed.
+- Certificate-signed native bundle built and installed at the canonical path.
+- Installed cursor acceptance passed: unfinished word waits, ordered whole-word
+  reveal, one canonical Chat commit, immediate restart, four-row emoji caption,
+  Reduce Motion, idle clock shutdown, fixed annotation capture and no focus theft.
+  Transparent capture inspection used alpha compositing onto a neutral dark
+  background; raw transparent PNG RGB is not the composited on-screen appearance.
+- Installed notch regression passed: compact voice state lifecycle, cutout
+  placement, repeated synthetic hover, draft preservation and foreground focus.
+- One live public Moon question passed with incremental previews. First preview
+  arrived at 5,413.49 ms, first-glyph render submission at 5,422.36 ms and complete
+  text at 5,900.48 ms. The local preview-to-submission gap was 8.87 ms. This was
+  one cold request, not a latency distribution or measured display presentation.
+- The live public practice screen produced a correct click-advancing target
+  around “Open table settings.” The driver changed to the next page through
+  native control invocation, but generated no global mouse-up; the two-step
+  acceptance therefore did not pass. Its bounded target expired as designed.
+  Physical click continuation must be checked before claiming that full run.

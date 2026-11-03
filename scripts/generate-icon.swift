@@ -1,8 +1,43 @@
 import AppKit
+
 let size = 1024
-let image = NSImage(size:NSSize(width:size,height:size)); image.lockFocus()
-NSColor(srgbRed:0.94,green:0.97,blue:1,alpha:1).setFill(); NSBezierPath(roundedRect:NSRect(x:40,y:40,width:944,height:944),xRadius:215,yRadius:215).fill()
-let color = NSColor(srgbRed:0.16,green:0.36,blue:0.73,alpha:1);color.setFill()
-let path = NSBezierPath();path.move(to:NSPoint(x:512,y:818));path.curve(to:NSPoint(x:818,y:512),controlPoint1:NSPoint(x:542,y:579),controlPoint2:NSPoint(x:579,y:542));path.curve(to:NSPoint(x:512,y:206),controlPoint1:NSPoint(x:579,y:482),controlPoint2:NSPoint(x:542,y:445));path.curve(to:NSPoint(x:206,y:512),controlPoint1:NSPoint(x:482,y:445),controlPoint2:NSPoint(x:445,y:482));path.curve(to:NSPoint(x:512,y:818),controlPoint1:NSPoint(x:445,y:542),controlPoint2:NSPoint(x:482,y:579));path.close();path.fill();image.unlockFocus()
-let root = URL(fileURLWithPath:CommandLine.arguments[1]);try FileManager.default.createDirectory(at:root,withIntermediateDirectories:true)
-for s in [16,32,128,256,512] { for scale in [1,2] { let n=s*scale;let rep=NSBitmapImageRep(bitmapDataPlanes:nil,pixelsWide:n,pixelsHigh:n,bitsPerSample:8,samplesPerPixel:4,hasAlpha:true,isPlanar:false,colorSpaceName:.deviceRGB,bytesPerRow:0,bitsPerPixel:0)!;NSGraphicsContext.saveGraphicsState();NSGraphicsContext.current=NSGraphicsContext(bitmapImageRep:rep);image.draw(in:NSRect(x:0,y:0,width:n,height:n));NSGraphicsContext.restoreGraphicsState();let data=rep.representation(using:.png,properties:[:])!;try data.write(to:root.appendingPathComponent("icon_\(s)x\(s)\(scale==2 ? "@2x" : "").png")) } }
+let image = NSImage(size: NSSize(width: size, height: size))
+image.lockFocus()
+NSColor(srgbRed: 0.94, green: 0.97, blue: 1, alpha: 1).setFill()
+NSBezierPath(roundedRect: NSRect(x: 40, y: 40, width: 944, height: 944), xRadius: 215, yRadius: 215)
+  .fill()
+let color = NSColor(srgbRed: 0.16, green: 0.36, blue: 0.73, alpha: 1)
+color.setFill()
+let path = NSBezierPath()
+path.move(to: NSPoint(x: 512, y: 818))
+path.curve(
+  to: NSPoint(x: 818, y: 512), controlPoint1: NSPoint(x: 542, y: 579),
+  controlPoint2: NSPoint(x: 579, y: 542))
+path.curve(
+  to: NSPoint(x: 512, y: 206), controlPoint1: NSPoint(x: 579, y: 482),
+  controlPoint2: NSPoint(x: 542, y: 445))
+path.curve(
+  to: NSPoint(x: 206, y: 512), controlPoint1: NSPoint(x: 482, y: 445),
+  controlPoint2: NSPoint(x: 445, y: 482))
+path.curve(
+  to: NSPoint(x: 512, y: 818), controlPoint1: NSPoint(x: 445, y: 542),
+  controlPoint2: NSPoint(x: 482, y: 579))
+path.close()
+path.fill()
+image.unlockFocus()
+let root = URL(fileURLWithPath: CommandLine.arguments[1])
+try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+for s in [16, 32, 128, 256, 512] {
+  for scale in [1, 2] {
+    let n = s * scale
+    let rep = NSBitmapImageRep(
+      bitmapDataPlanes: nil, pixelsWide: n, pixelsHigh: n, bitsPerSample: 8, samplesPerPixel: 4,
+      hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    image.draw(in: NSRect(x: 0, y: 0, width: n, height: n))
+    NSGraphicsContext.restoreGraphicsState()
+    let data = rep.representation(using: .png, properties: [:])!
+    try data.write(to: root.appendingPathComponent("icon_\(s)x\(s)\(scale==2 ? "@2x" : "").png"))
+  }
+}

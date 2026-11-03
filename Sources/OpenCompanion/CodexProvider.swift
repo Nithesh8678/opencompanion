@@ -104,17 +104,36 @@ actor CodexProvider {
           "Sign in to the Codex CLI with ChatGPT before using subscription mode.")
       }
       var selectedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
-      if selectedModel.isEmpty {
+      var guidanceEffort: String? = nil
+      if selectedModel.isEmpty || requestPolicy.route == .screenGuidance {
         try session.send(
           method: "model/list", id: 10,
           params: .object(["includeHidden": .bool(false), "limit": .number(100)]))
         let catalog = try await Self.response(id: 10, iterator: &iterator)
-        let models = catalog["data"]?.array ?? []
-        let choice = models.first(where: { $0["isDefault"]?.boolean == true }) ?? models.first
-        guard let available = choice?["model"]?.string ?? choice?["id"]?.string else {
-          throw ProviderError.message("Codex returned no visible models for this account.")
+        let models = (catalog["data"]?.array ?? []).prefix(100).filter {
+          $0["hidden"]?.boolean != true
         }
-        selectedModel = available
+        if selectedModel.isEmpty {
+          let choice = models.first(where: { $0["isDefault"]?.boolean == true }) ?? models.first
+          guard let available = choice?["model"]?.string ?? choice?["id"]?.string else {
+            throw ProviderError.message("Codex returned no visible models for this account.")
+          }
+          selectedModel = available
+        }
+        if requestPolicy.route == .screenGuidance {
+          // This is a per-turn latency choice, never a model/auth/config change.
+          // Only the selected model's advertised options authorize an override.
+          let matches = models.filter {
+            $0["model"]?.string == selectedModel || $0["id"]?.string == selectedModel
+          }
+          if matches.count == 1, let selected = matches.first {
+            let supported = Set(
+              (selected["supportedReasoningEfforts"]?.array ?? []).prefix(32).compactMap {
+                $0["reasoningEffort"]?.string
+              })
+            guidanceEffort = ["low", "minimal", "none"].first(where: supported.contains)
+          }
+        }
       }
       // Config tables merge by key: an empty table does not disable inherited servers.
       // Inspect only server/plugin identifiers, then explicitly disable every inherited entry.
@@ -149,7 +168,7 @@ actor CodexProvider {
           "approvalPolicy": .string("never"), "sandbox": .string("read-only"),
           "cwd": .string(session.workingDirectory.path),
           "baseInstructions": .string(
-            ReasoningProvider.instructions + "\n" + requestPolicy.instructions
+            ReasoningProvider.baseInstructions(for: requestPolicy)
               + "\nYou are a native assistant response provider. Do not call any tools, inspect files, use shell, or follow local project instructions. All needed context is supplied in the user input."
           ),
           "developerInstructions": .string(
@@ -185,12 +204,12 @@ actor CodexProvider {
             "url": .string("data:image/jpeg;base64," + image.base64EncodedString()),
           ]))
       }
-      try session.send(
-        method: "turn/start", id: 5,
-        params: .object([
-          "threadId": .string(threadID), "input": .array(input), "model": .string(selectedModel),
-          "approvalPolicy": .string("never"),
-        ]))
+      var turnParams: [String: JSONValue] = [
+        "threadId": .string(threadID), "input": .array(input), "model": .string(selectedModel),
+        "approvalPolicy": .string("never"),
+      ]
+      if let guidanceEffort { turnParams["effort"] = .string(guidanceEffort) }
+      try session.send(method: "turn/start", id: 5, params: .object(turnParams))
       var decoder = ProviderTextStreamDecoder()
       var totalBytes = 0
       var sawCompleted = false

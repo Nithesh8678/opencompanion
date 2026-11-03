@@ -56,6 +56,10 @@ struct CodexTransportTests {
 
     let turn = try #require(requests.first { $0["method"] as? String == "turn/start" })
     let turnParams = try #require(turn["params"] as? [String: Any])
+    #expect(turnParams["effort"] as? String == (route == .screenGuidance ? "low" : nil))
+    #expect(
+      requests.filter { $0["method"] as? String == "model/list" }.count
+        == (route == .screenGuidance ? 1 : 0))
     let input = try #require(turnParams["input"] as? [[String: Any]])
     let turnText = try #require(input.first { $0["type"] as? String == "text" }?["text"] as? String)
     #expect(turnText.contains(prompt))
@@ -76,6 +80,69 @@ struct CodexTransportTests {
       #expect(!turnText.contains("retained-stable-label"))
       #expect(!turnText.contains("Public retained fixture content"))
     }
+  }
+
+  struct EffortFixture: Sendable {
+    let supported: [String]?
+    var included = true
+    var visible = true
+    let expected: String?
+  }
+
+  @Test(arguments: [
+    EffortFixture(supported: ["medium", "none", "minimal", "low"], expected: "low"),
+    EffortFixture(supported: ["medium", "minimal", "none"], expected: "minimal"),
+    EffortFixture(supported: ["none", "medium"], expected: "none"),
+    EffortFixture(supported: ["medium", "high"], expected: nil),
+    EffortFixture(supported: nil, expected: nil),
+    EffortFixture(supported: [], expected: nil),
+    EffortFixture(supported: ["low"], included: false, expected: nil),
+    EffortFixture(supported: ["low"], visible: false, expected: nil),
+  ])
+  func guidanceUsesOnlyAnAdvertisedEffortWithoutChangingTheConfiguredModel(
+    _ effort: EffortFixture
+  ) async throws {
+    let chosen = "fixture-chosen"
+    let fixture = try makeFixture(
+      completeTurn: true, selectedModel: chosen, supportedEfforts: effort.supported,
+      catalogIncludesSelected: effort.included, selectedModelVisible: effort.visible)
+    defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+    let provider = CodexProvider()
+    let receiver = TransportUnitReceiver()
+    let timeout = Task {
+      try await Task.sleep(for: .seconds(3))
+      await provider.stop()
+    }
+    defer { timeout.cancel() }
+    let policy = ResponsePolicy.resolve(
+      text: "Show me where to click", screenGuidanceEnabled: true)
+    try await provider.stream(
+      executable: fixture.path, model: chosen,
+      messages: [.init(role: "user", text: "Public screen guidance fixture")], context: "",
+      image: nil, scene: nil, onUnit: { unit in await receiver.append(unit.text ?? "") },
+      responsePolicy: policy)
+    #expect(await receiver.text == "ready")
+
+    let requests = try String(
+      contentsOf: URL(fileURLWithPath: fixture.path + ".requests"), encoding: .utf8
+    ).split(separator: "\n").map { line in
+      try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+    }
+    let catalog = try #require(requests.first { $0["method"] as? String == "model/list" })
+    let catalogParams = try #require(catalog["params"] as? [String: Any])
+    #expect(catalogParams["includeHidden"] as? Bool == false)
+    #expect(catalogParams["limit"] as? Int == 100)
+    let thread = try #require(requests.first { $0["method"] as? String == "thread/start" })
+    let threadParams = try #require(thread["params"] as? [String: Any])
+    let turn = try #require(requests.first { $0["method"] as? String == "turn/start" })
+    let turnParams = try #require(turn["params"] as? [String: Any])
+    #expect(threadParams["model"] as? String == chosen)
+    #expect(turnParams["model"] as? String == chosen)
+    #expect(threadParams["effort"] == nil)
+    #expect(turnParams["effort"] as? String == effort.expected)
+    if effort.expected == nil { #expect(turnParams["effort"] == nil) }
+    let overrides = try #require(threadParams["config"] as? [String: Any])
+    #expect(overrides["model_reasoning_effort"] == nil)
   }
 
   @Test func shortStdioResponsesStreamWithoutWaitingForPipeEOF() async throws {
@@ -136,7 +203,11 @@ struct CodexTransportTests {
     #expect(await receiver.text.isEmpty)
   }
 
-  private func makeFixture(completeTurn: Bool) throws -> URL {
+  private func makeFixture(
+    completeTurn: Bool, selectedModel: String = "fixture-default",
+    supportedEfforts: [String]? = ["medium", "low"], catalogIncludesSelected: Bool = true,
+    selectedModelVisible: Bool = true
+  ) throws -> URL {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
       "OpenCompanionTransportFixture-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -148,14 +219,25 @@ struct CodexTransportTests {
     }
     let initialize = try encoded(["id": 1, "result": ["userAgent": "fixture"]])
     let account = try encoded(["id": 2, "result": ["account": ["type": "chatgpt"]]])
+    var models: [[String: Any]] = [
+      [
+        "model": "fixture-other", "isDefault": selectedModel != "fixture-default",
+        "supportedReasoningEfforts": [["reasoningEffort": "low"]],
+      ]
+    ]
+    if catalogIncludesSelected {
+      var selected: [String: Any] = [
+        "model": selectedModel, "isDefault": selectedModel == "fixture-default",
+        "hidden": !selectedModelVisible,
+      ]
+      if let supportedEfforts {
+        selected["supportedReasoningEfforts"] = supportedEfforts.map { ["reasoningEffort": $0] }
+      }
+      models.append(selected)
+    }
     let catalog = try encoded([
       "id": 10,
-      "result": [
-        "data": [
-          ["model": "fixture-other", "isDefault": false],
-          ["model": "fixture-default", "isDefault": true],
-        ]
-      ],
+      "result": ["data": models],
     ])
     let config = try encoded([
       "id": 3,
@@ -176,6 +258,7 @@ struct CodexTransportTests {
       "method": "turn/completed", "params": ["turn": ["status": "completed"]],
     ])
     let responses: [String: Any] = [
+      "_expectedModel": selectedModel,
       "initialize": try JSONSerialization.jsonObject(with: Data(initialize.utf8)),
       "account/read": try JSONSerialization.jsonObject(with: Data(account.utf8)),
       "model/list": try JSONSerialization.jsonObject(with: Data(catalog.utf8)),
@@ -190,6 +273,7 @@ struct CodexTransportTests {
       import json,sys
       from pathlib import Path
       responses=json.loads(Path(__file__+".responses").read_text())
+      expected_model=responses.pop("_expectedModel")
       for line in sys.stdin:
           with open(__file__+".requests","a") as log: log.write(line)
           request=json.loads(line)
@@ -197,7 +281,7 @@ struct CodexTransportTests {
           if method in responses:
               response=responses[method]
               response["id"]=request["id"]
-              if method == "thread/start" and request["params"]["model"] != "fixture-default":
+              if method == "thread/start" and request["params"]["model"] != expected_model:
                   response=json.loads(r'''\(wrongModel)''')
               print(json.dumps(response),flush=True)
           if method == "turn/start" and \(completeTurn ? "True" : "False"):

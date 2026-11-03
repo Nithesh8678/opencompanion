@@ -220,17 +220,19 @@ struct ResponseInputPlan: Sendable {
       self.voiceNotice = notice
     }
     voice.onSpeechEvent = { [weak self] event in self?.record(event) }
-    lastExternalPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
-    workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
-      forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
-    ) { [weak self] notification in
-      let pid =
-        (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?
-        .processIdentifier
-      Task { @MainActor [weak self] in
-        guard let self, let pid, pid != ProcessInfo.processInfo.processIdentifier else { return }
-        self.lastExternalPID = pid
-        self.overlay.clear()
+    if !acceptanceMode {
+      lastExternalPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+      workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+        forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+      ) { [weak self] notification in
+        let pid =
+          (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?
+          .processIdentifier
+        Task { @MainActor [weak self] in
+          guard let self, let pid, pid != ProcessInfo.processInfo.processIdentifier else { return }
+          self.lastExternalPID = pid
+          self.overlay.clear()
+        }
       }
     }
     displaySubscription = NotificationCenter.default.publisher(
@@ -329,6 +331,9 @@ struct ResponseInputPlan: Sendable {
     let automaticGuidance =
       inputPlan.requiresFreshGuidanceCapture
       ? guidanceRequest ?? ScreenGuidanceRequest(prompt: text, speakAloud: speakAloud) : nil
+    let previousGuidanceInstruction =
+      (guidanceRequest?.step ?? 0) > 0
+      ? messages.last(where: { $0.role == "assistant" }).map { String($0.text.prefix(800)) } : nil
     let sourceGeneration = generation
     stop()
     if textOverride == nil { input = "" }
@@ -352,7 +357,16 @@ struct ResponseInputPlan: Sendable {
     updateBadge()
     record("turn.declaredEnd.textSubmit")
     messages.append(ChatLine(role: "user", text: text))
-    let history = messages
+    // Guidance needs the current goal and preceding step, rather than unrelated
+    // lesson/chat history that increases both latency and evidence ambiguity.
+    let history: [ChatLine]
+    if policy.route == .screenGuidance {
+      history =
+        (previousGuidanceInstruction.map { [ChatLine(role: "assistant", text: $0)] } ?? [])
+        + [ChatLine(role: "user", text: text)]
+    } else {
+      history = messages
+    }
     let activeScene = policy.includesExistingNotebook ? scene : nil
     let config = configuration
     let key = apiKey
@@ -380,9 +394,19 @@ struct ResponseInputPlan: Sendable {
         }
         try Task.checkCancellation()
         guard current == self.generation else { throw CancellationError() }
+        let guidanceBinding: ScreenGuidanceTurnBinding?
+        if policy.route == .screenGuidance, let frame = self.evidence,
+          turnEvidence?.matches(frame) == true
+        {
+          guidanceBinding = ScreenGuidanceTurnBinding(source: frame)
+        } else {
+          guidanceBinding = nil
+        }
         let handler: @Sendable (ProviderUnit) async throws -> Void = { [weak self] unit in
           try Task.checkCancellation()
-          try await self?.accept(unit, generation: current, expectedEvidence: turnEvidence)
+          try await self?.acceptProviderUnit(
+            unit, generation: current, expectedEvidence: turnEvidence,
+            guidanceBinding: guidanceBinding, captureToken: captureToken)
         }
         let preview: @Sendable (ProviderTextPreview) async throws -> Void = { [weak self] value in
           try Task.checkCancellation()
@@ -421,6 +445,84 @@ struct ResponseInputPlan: Sendable {
       } catch {
         self.finishTurnFailure(error: error, generation: current, policy: policy)
       }
+    }
+  }
+
+  /// Slow model output may only advance after one real, same-scope capture
+  /// corroborates the old target. Never extend the original frame's timestamp.
+  private func acceptProviderUnit(
+    _ unit: ProviderUnit, generation: UInt64, expectedEvidence: ScreenEvidenceIdentity?,
+    guidanceBinding: ScreenGuidanceTurnBinding?, captureToken: UInt64
+  ) async throws {
+    guard unit.type == "target", responsePolicy.route == .screenGuidance,
+      let binding = guidanceBinding, let payload = unit.target
+    else {
+      try accept(unit, generation: generation, expectedEvidence: expectedEvidence)
+      return
+    }
+    setGuidanceStage(.target, generation: generation)
+    let previous = ScreenEvidenceIdentity(binding.current)
+    let request = activeGuidanceRequest
+    func stillOwned() -> Bool {
+      generation == self.generation
+        && captureGate.permits(captureToken, cancelled: Task.isCancelled)
+        && previous.matches(evidence) && activeGuidanceRequest == request
+        && CursorCompanionPreferences.load().screenGuidanceEnabled
+        && (request.map { ProcessInfo.processInfo.systemUptime < $0.expires } ?? true)
+    }
+    guard stillOwned() else { throw CancellationError() }
+    try requireGuidanceForeground(binding.source.foregroundPID)
+    let prepared = try await binding.prepare(
+      payload,
+      refresh: {
+        guard stillOwned() else { throw CancellationError() }
+        self.record("guidance.lateTarget.refresh.started")
+        return try await self.refreshGuidanceEvidence(binding.source)
+      }, stillOwned: stillOwned)
+    guard stillOwned() else { throw CancellationError() }
+    try requireGuidanceForeground(binding.source.foregroundPID)
+    if previous != ScreenEvidenceIdentity(binding.current) {
+      evidence = binding.current
+      if explicitManualEvidence == previous {
+        explicitManualEvidence = ScreenEvidenceIdentity(binding.current)
+      }
+      record("guidance.lateTarget.refresh.verified")
+    }
+    var resolvedUnit = unit
+    resolvedUnit.target = prepared
+    try accept(
+      resolvedUnit, generation: generation,
+      expectedEvidence: ScreenEvidenceIdentity(binding.current))
+  }
+
+  private func refreshGuidanceEvidence(_ source: ScreenEvidence) async throws -> ScreenEvidence {
+    try Task.checkCancellation()
+    try requireGuidanceForeground(source.foregroundPID)
+    let screens = Dictionary(
+      uniqueKeysWithValues: NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, CGRect)? in
+        guard
+          let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+            as? NSNumber
+        else { return nil }
+        return (number.uint32Value, screen.frame)
+      })
+    guard let display = screens[source.displayID], display.contains(source.screenRect) else {
+      throw ProviderError.message("The selected screen changed. Ask for screen guidance again.")
+    }
+    // Exact original display/window/crop, regardless of the pointer's new display.
+    // A region limits the recapture and omits application-wide AX enrichment.
+    let fresh = try await capture.capture(
+      displayID: source.displayID, foregroundPID: source.foregroundPID,
+      foregroundName: source.foregroundName, region: source.screenRect,
+      windowID: source.windowID, screens: screens)
+    try Task.checkCancellation()
+    try requireGuidanceForeground(source.foregroundPID)
+    return fresh
+  }
+
+  private func requireGuidanceForeground(_ pid: pid_t) throws {
+    guard pid > 0, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+      throw ProviderError.message("The active app changed. Ask for screen guidance again.")
     }
   }
 

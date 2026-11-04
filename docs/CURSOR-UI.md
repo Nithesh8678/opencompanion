@@ -40,8 +40,31 @@ share a bounded per-turn speech deduplicator.
 The implementation checkpoint passed 333 Swift tests (293 app, 15 store,
 25 core), 29 installer/signing tests, a certificate-signed app build and installed
 native cursor acceptance, including source invalidation during flight and the
-stopped reading hold. Expanded live-provider authored-screen acceptance and a
-physical profile-navigation check are tracked separately from these checks.
+stopped reading hold. The expanded installed-bundle/live-provider run passed all
+13 public authored-screen cases with `gpt-5.6-terra`, low effort: eleven grounded
+click/manual targets and two bounded clarification envelopes. Seven targets used
+native pixel conversion. The image-only cases cover the exact profile request,
+appearance settings, chart export, a nondefault-size document reader, an unlabeled
+triangle tool and a failed-status badge. Independent expected bounds never enter
+the model request. Native final-render profile and badge images were inspected.
+
+First oracle-valid target receipts ranged from 4.507 to 9.049 seconds (median
+5.164); the exact profile trial was 4.507 seconds. These startup-inclusive
+callback times exclude real capture, AppModel admission, displayed animation and
+physical actions. One trial per case is not a reliability or latency guarantee.
+The two clarification tests validate their safe bounded format, not prose
+meaning. Screen-answer instructions are checked for nonempty bounded content,
+not automatically scored for semantic correctness.
+
+Earlier batches exposed an unarmed manual tool target, an oversized normalized
+Export box and a navigation/edit-icon confusion. The prompt now distinguishes
+click continuation and navigation level, and native pixel conversion removes
+model-side normalization. A separate false failure was corrected in the oracle:
+manual rounded rectangles are valid production shapes, with unchanged strict
+badge geometry. Source-bound manual-caption and notch regressions passed in the
+installed app. The real GUI profile/physical click continuation remains a
+separate acceptance step; no universal app accuracy or exact HeyClicky parity is
+claimed.
 
 Updated 4 November 2026. The installed cursor/annotation and notch checks passed,
 and a public conversational request completed through ChatGPT via Codex. A live

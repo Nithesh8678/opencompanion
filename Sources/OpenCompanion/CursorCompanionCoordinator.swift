@@ -62,6 +62,8 @@ struct CursorCompanionSnapshot: Codable {
   private var watermark: UInt64 = 0
   private var stage: Stage?
   private var isGuidance = false
+  private var showingGuidanceExplanation = false
+  private var guidanceExplanationEvidence: ScreenEvidenceIdentity?
   private var phase = NotchActivityPhase.idle
   private var reveal = CursorTextReveal()
   private var highestAcceptedPreviewID: Int?
@@ -111,8 +113,7 @@ struct CursorCompanionSnapshot: Codable {
         guard let self else { return }
         self.preferences = .load()
         if !self.preferences.showReplies {
-          self.reveal.reset()
-          self.visibleText = ""
+          self.clearGuidanceExplanation()
         }
         self.renderNow()
         self.wake()
@@ -122,6 +123,7 @@ struct CursorCompanionSnapshot: Codable {
       .sink { [weak self] _ in
         MainActor.assumeIsolated {
           guard let self else { return }
+          if self.guidanceExplanationEvidence != nil { self.clearGuidanceExplanation() }
           self.guidance = nil
           self.lastPlacement = nil
           self.initialized = false
@@ -129,6 +131,14 @@ struct CursorCompanionSnapshot: Codable {
           self.renderNow()
         }
       }.store(in: &subscriptions)
+    // The display clock sleeps during a completed caption's reading hold.
+    // App activation must therefore invalidate screen-bound text independently.
+    NSWorkspace.shared.notificationCenter.publisher(
+      for: NSWorkspace.didActivateApplicationNotification
+    )
+    .sink { [weak self] _ in
+      Task { @MainActor [weak self] in self?.syncModel() }
+    }.store(in: &subscriptions)
     for name in [NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification]
     {
       NSWorkspace.shared.notificationCenter.publisher(for: name).sink { [weak self] _ in
@@ -246,6 +256,9 @@ struct CursorCompanionSnapshot: Codable {
       evidence.screenRect.width > 0, evidence.screenRect.height > 0,
       target.instruction.utf8.count <= 32_000
     else { return 0 }
+    if let previous = guidanceExplanationEvidence, previous != ScreenEvidenceIdentity(evidence) {
+      clearGuidanceExplanation()
+    }
     let display = evidence.screenRect
     let targetFrame = CGRect(
       x: display.minX + target.x * display.width,
@@ -273,6 +286,20 @@ struct CursorCompanionSnapshot: Codable {
       expires: now + (reduceMotion ? 0 : flight.duration + writing) + 0.35,
       evidence: ScreenEvidenceIdentity(evidence), capturedAt: evidence.capturedAt,
       labelFrame: labelFrame, prefixWidths: widths, ellipse: ellipse)
+    // A short attached label is not a substitute for the full screen answer.
+    // Reveal the explanation beside the follower after its pointing animation.
+    if target.advanceOn == "manual",
+      target.instruction.trimmingCharacters(in: .whitespacesAndNewlines)
+        != target.label?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !target.instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    {
+      let id = (highestAcceptedPreviewID ?? -1) + 1
+      if reveal.append(unitID: id, text: target.instruction, isComplete: true) {
+        highestAcceptedPreviewID = id
+        showingGuidanceExplanation = true
+        guidanceExplanationEvidence = ScreenEvidenceIdentity(evidence)
+      }
+    }
     cancelDismissal()
     view.cancelCaptionDismissal()
     model?.record("cursor.guidance.flightStarted")
@@ -316,6 +343,7 @@ struct CursorCompanionSnapshot: Codable {
 
   private func syncModel() {
     guard let model, let generation, generation == model.taskGeneration else { return }
+    validateGuidanceExplanation()
     if model.error != nil && model.cursorFailureGeneration != generation {
       cancel(generation: generation)
       return
@@ -377,6 +405,8 @@ struct CursorCompanionSnapshot: Codable {
     generation = nil
     stage = nil
     isGuidance = false
+    showingGuidanceExplanation = false
+    guidanceExplanationEvidence = nil
     phase = .idle
     reveal.reset()
     highestAcceptedPreviewID = nil
@@ -408,6 +438,7 @@ struct CursorCompanionSnapshot: Codable {
     let elapsed = max(0, now - lastTick)
     if intervals.count < 2_400 { intervals.append(elapsed) }
     lastTick = now
+    validateGuidanceExplanation()
     if let guidance {
       let valid =
         guidance.evidence.matches(model?.evidence)
@@ -449,6 +480,7 @@ struct CursorCompanionSnapshot: Codable {
   }
 
   private func renderNow() {
+    validateGuidanceExplanation()
     guard preferences.enabled, !suspended,
       !exclusionFrames().contains(where: { $0.contains(pointer) })
     else {
@@ -458,7 +490,9 @@ struct CursorCompanionSnapshot: Codable {
     let now = ProcessInfo.processInfo.systemUptime
     var center = CGPoint(x: x.value, y: y.value)
     var rotation: CGFloat = 0
-    var text = preferences.showReplies && !isGuidance ? reveal.visibleText : ""
+    var text =
+      preferences.showReplies && (!isGuidance || showingGuidanceExplanation)
+      ? reveal.visibleText : ""
     if let guidance {
       let progress = reduceMotion ? 1 : min(1, (now - guidance.began) / guidance.flight.duration)
       center = guidance.flight.point(at: progress)
@@ -521,6 +555,35 @@ struct CursorCompanionSnapshot: Codable {
       timing.firstGlyphRenderSubmissionMS = (now - beganAt) * 1_000
       model?.record("cursor.firstGlyph.renderSubmitted")
     }
+  }
+
+  /// A manual answer remains tied to its source after the pointing animation
+  /// ends. Natural flight expiry keeps the answer; changed evidence/apps do not.
+  private func validateGuidanceExplanation() {
+    guard let source = guidanceExplanationEvidence else { return }
+    guard generation == model?.taskGeneration, source.matches(model?.evidence),
+      NSWorkspace.shared.frontmostApplication?.processIdentifier == source.foregroundPID
+    else {
+      if guidance != nil {
+        guidance = nil
+        x = NotchSpring(lastBodyCenter.x, frequency: 38)
+        y = NotchSpring(lastBodyCenter.y, frequency: 38)
+      }
+      clearGuidanceExplanation()
+      model?.record("cursor.guidance.explanationInvalidated")
+      return
+    }
+  }
+
+  private func clearGuidanceExplanation() {
+    showingGuidanceExplanation = false
+    guidanceExplanationEvidence = nil
+    reveal.reset()
+    highestAcceptedPreviewID = nil
+    visibleText = ""
+    word = nil
+    cancelDismissal()
+    view.reset()
   }
 
   static func captionWindow(_ text: String) -> String {

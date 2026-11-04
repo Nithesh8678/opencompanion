@@ -150,16 +150,14 @@ struct ScreenGroundingTests {
     }
   }
 
-  @Test func manualMarksPermitEnabledNonactionableAxAndOcr() throws {
-    for native in [candidate(actionable: false), candidate(source: .ocr, actionable: false)] {
+  @Test func manualMarksExplainNonactionableAndDisabledElementsWithoutClickAuthority() throws {
+    for native in [
+      candidate(actionable: false), candidate(source: .ocr, actionable: false),
+      candidate(enabled: false, actionable: false),
+    ] {
       let result = try ScreenGrounding.resolve(
         target(id: native.id, advanceOn: "manual"), candidates: [native], frameID: frameID)
       #expect(result.x == native.x && result.width == native.width)
-    }
-    let disabled = candidate(source: .ocr, enabled: false, actionable: false)
-    #expect(throws: ProviderError.self) {
-      try ScreenGrounding.resolve(
-        target(id: disabled.id, advanceOn: "manual"), candidates: [disabled], frameID: frameID)
     }
     #expect(throws: ProviderError.self) {
       try ScreenGrounding.resolve(

@@ -145,6 +145,142 @@ struct CodexTransportTests {
     #expect(overrides["model_reasoning_effort"] == nil)
   }
 
+  @Test func terraGuidanceSelectsOnlyTheLatestVisibleImageCapableNumericFamily() async throws {
+    let models: [[String: Any]] = [
+      catalogModel("gpt-5.6-sol", isDefault: true),
+      catalogModel("gpt-5.9-terra"),
+      catalogModel("gpt-5.10-terra"),
+      catalogModel("gpt-6-terra", modalities: ["text"]),
+      catalogModel("gpt-6.1-terra", hidden: true),
+      catalogModel("gpt-99-terra-fast"),
+      catalogModel("gpt-9.5-sol"),
+    ]
+    try await assertRouting(
+      models: models,
+      expected: .init(model: "gpt-5.10-terra", effort: "low", reason: .terraGuidance))
+  }
+
+  @Test func theActualAvailableTerraFamilyIsSelectedWithoutInventingANewerAlias() async throws {
+    try await assertRouting(
+      models: [
+        catalogModel("gpt-5.6-sol", isDefault: true), catalogModel("gpt-5.6-terra"),
+        catalogModel("gpt-5.6-luna"),
+      ],
+      expected: .init(model: "gpt-5.6-terra", effort: "low", reason: .terraGuidance))
+  }
+
+  @Test func configuredGuidancePreferenceKeepsTheConversationModelWhenTerraIsAvailable()
+    async throws
+  {
+    try await assertRouting(
+      models: [catalogModel("gpt-5.6-sol", isDefault: true), catalogModel("gpt-5.6-terra")],
+      preference: .conversation,
+      expected: .init(model: "gpt-5.6-sol", effort: "low", reason: .configuredGuidance))
+  }
+
+  @Test(arguments: [ResponsePolicy.Route.conversation, .notebook])
+  func nonGuidanceTurnsIgnoreTheTerraPreference(_ route: ResponsePolicy.Route) async throws {
+    try await assertRouting(
+      models: [catalogModel("gpt-5.6-sol", isDefault: true), catalogModel("gpt-5.6-terra")],
+      route: route, expected: .init(model: "gpt-5.6-sol", effort: nil, reason: .conversation))
+  }
+
+  @Test func unavailableTerraReportsFallbackWithoutChangingTheConfiguredModel() async throws {
+    try await assertRouting(
+      models: [
+        catalogModel("gpt-5.6-sol", isDefault: true),
+        catalogModel("gpt-6-terra", hidden: true),
+        catalogModel("gpt-5.6-terra", modalities: ["text"]),
+      ],
+      expected: .init(model: "gpt-5.6-sol", effort: "low", reason: .terraUnavailableFallback))
+  }
+
+  @Test func legacyCatalogWithMissingModalitiesKeepsDocumentedImageCompatibility() async throws {
+    try await assertRouting(
+      models: [
+        catalogModel("gpt-5.6-sol", isDefault: true),
+        catalogModel("gpt-5.6-terra", modalities: nil),
+      ],
+      expected: .init(model: "gpt-5.6-terra", effort: "low", reason: .terraGuidance))
+  }
+
+  @Test func ambiguousTerraEntriesAndEntriesBeyondTheRequestedCatalogBoundAreExcluded() async throws
+  {
+    var models = [
+      catalogModel("gpt-5.6-sol", isDefault: true),
+      catalogModel("gpt-5.6-terra"), catalogModel("gpt-5.6-terra"),
+    ]
+    models += (0..<97).map { catalogModel("public-fixture-\($0)") }
+    models.append(catalogModel("gpt-6.1-terra"))
+    #expect(models.count == 101)
+    try await assertRouting(
+      models: models,
+      expected: .init(model: "gpt-5.6-sol", effort: "low", reason: .terraUnavailableFallback))
+  }
+
+  private func catalogModel(
+    _ id: String, isDefault: Bool = false, hidden: Bool = false,
+    modalities: [String]? = ["text", "image"]
+  ) -> [String: Any] {
+    var result: [String: Any] = [
+      "model": id, "id": id, "isDefault": isDefault, "hidden": hidden,
+      "supportedReasoningEfforts": [["reasoningEffort": "medium"], ["reasoningEffort": "low"]],
+    ]
+    if let modalities { result["inputModalities"] = modalities }
+    return result
+  }
+
+  private func assertRouting(
+    models: [[String: Any]], preference: GuidanceModelPreference = .terra,
+    route: ResponsePolicy.Route = .screenGuidance, expected: CodexRoutingSelection
+  ) async throws {
+    let fixture = try makeFixture(
+      completeTurn: true, selectedModel: "gpt-5.6-sol", modelCatalog: models,
+      expectedRequestModel: expected.model)
+    defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+    let provider = CodexProvider()
+    let receiver = TransportUnitReceiver()
+    let routing = TransportRoutingReceiver()
+    let timeout = Task {
+      try await Task.sleep(for: .seconds(3))
+      await provider.stop()
+    }
+    defer { timeout.cancel() }
+    let prompt =
+      route == .screenGuidance
+      ? "Show me where to click"
+      : (route == .notebook ? "Draw a diagram of a lever" : "Hello")
+    let policy = ResponsePolicy.resolve(text: prompt, screenGuidanceEnabled: true)
+    #expect(policy.route == route)
+    try await provider.stream(
+      executable: fixture.path, model: "gpt-5.6-sol",
+      messages: [.init(role: "user", text: prompt)], context: "", image: nil, scene: nil,
+      guidanceModel: preference, onRouting: { selection in await routing.append(selection) },
+      onUnit: { unit in await receiver.append(unit.text ?? "") }, responsePolicy: policy)
+    #expect(await receiver.text == "ready")
+    #expect(await routing.selections == [expected])
+    let requests = try String(
+      contentsOf: URL(fileURLWithPath: fixture.path + ".requests"), encoding: .utf8
+    ).split(separator: "\n").map { line in
+      try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+    }
+    let thread = try #require(requests.first { $0["method"] as? String == "thread/start" })
+    let threadParams = try #require(thread["params"] as? [String: Any])
+    let turn = try #require(requests.first { $0["method"] as? String == "turn/start" })
+    let turnParams = try #require(turn["params"] as? [String: Any])
+    #expect(threadParams["model"] as? String == expected.model)
+    #expect(turnParams["model"] as? String == expected.model)
+    #expect(turnParams["effort"] as? String == expected.effort)
+    #expect(threadParams["serviceTier"] == nil && turnParams["serviceTier"] == nil)
+    #expect(turnParams["serviceTierForTurn"] == nil)
+    #expect(threadParams["sandbox"] as? String == "read-only")
+    #expect(threadParams["approvalPolicy"] as? String == "never")
+    #expect((threadParams["dynamicTools"] as? [Any])?.isEmpty == true)
+    #expect(
+      requests.filter { $0["method"] as? String == "model/list" }.count
+        == (route == .screenGuidance ? 1 : 0))
+  }
+
   @Test func shortStdioResponsesStreamWithoutWaitingForPipeEOF() async throws {
     let fixture = try makeFixture(completeTurn: true)
     defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
@@ -206,7 +342,8 @@ struct CodexTransportTests {
   private func makeFixture(
     completeTurn: Bool, selectedModel: String = "fixture-default",
     supportedEfforts: [String]? = ["medium", "low"], catalogIncludesSelected: Bool = true,
-    selectedModelVisible: Bool = true
+    selectedModelVisible: Bool = true, modelCatalog: [[String: Any]]? = nil,
+    expectedRequestModel: String? = nil
   ) throws -> URL {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
       "OpenCompanionTransportFixture-\(UUID().uuidString)", isDirectory: true)
@@ -237,7 +374,7 @@ struct CodexTransportTests {
     }
     let catalog = try encoded([
       "id": 10,
-      "result": ["data": models],
+      "result": ["data": modelCatalog ?? models],
     ])
     let config = try encoded([
       "id": 3,
@@ -258,7 +395,7 @@ struct CodexTransportTests {
       "method": "turn/completed", "params": ["turn": ["status": "completed"]],
     ])
     let responses: [String: Any] = [
-      "_expectedModel": selectedModel,
+      "_expectedModel": expectedRequestModel ?? selectedModel,
       "initialize": try JSONSerialization.jsonObject(with: Data(initialize.utf8)),
       "account/read": try JSONSerialization.jsonObject(with: Data(account.utf8)),
       "model/list": try JSONSerialization.jsonObject(with: Data(catalog.utf8)),
@@ -297,4 +434,9 @@ struct CodexTransportTests {
 private actor TransportUnitReceiver {
   var text = ""
   func append(_ value: String) { text += value }
+}
+
+private actor TransportRoutingReceiver {
+  var selections: [CodexRoutingSelection] = []
+  func append(_ selection: CodexRoutingSelection) { selections.append(selection) }
 }

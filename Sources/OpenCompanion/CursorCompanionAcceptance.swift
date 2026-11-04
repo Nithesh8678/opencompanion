@@ -204,20 +204,89 @@ enum CursorCompanionAcceptance {
       panel: annotation, to: output.appendingPathComponent("guidance-attached-label.png"))
     try await cursor.exportSnapshot(
       to: output.appendingPathComponent("cursor-guidance-caption.png"))
-    // The writing flight deliberately returns to following after settling.
-    // Acquire a fresh flight before testing invalidation, so an already expired
-    // animation cannot make the evidence-change assertion pass vacuously.
+    var explanation = unit
+    let answer = "This status means the sync failed. Open logs for details."
+    explanation.target?.instruction = answer
+    explanation.target?.label = "Failed sync"
+    explanation.target?.shape = "ellipse"
     try model.accept(
-      unit, generation: model.taskGeneration, expectedEvidence: ScreenEvidenceIdentity(fixture))
+      explanation, generation: model.taskGeneration,
+      expectedEvidence: ScreenEvidenceIdentity(fixture))
+    let explanationDeadline = ProcessInfo.processInfo.systemUptime + 3
+    while cursor.snapshot.text.isEmpty
+      && ProcessInfo.processInfo.systemUptime < explanationDeadline
+    {
+      try await Task.sleep(for: .milliseconds(30))
+    }
+    try require(
+      cursor.snapshot.following && cursor.snapshot.text.hasPrefix("This")
+        && cursor.snapshot.text != answer,
+      "A manual screen answer did not reveal a paced follower explanation after pointing.")
+    try await cursor.exportSnapshot(
+      to: output.appendingPathComponent("cursor-screen-explanation.png"))
+    let completeExplanationDeadline = ProcessInfo.processInfo.systemUptime + 4
+    while cursor.snapshot.text != answer
+      && ProcessInfo.processInfo.systemUptime < completeExplanationDeadline
+    {
+      try await Task.sleep(for: .milliseconds(30))
+    }
+    model.busy = false
+    model.state = "Ready"
+    try await Task.sleep(for: .milliseconds(150))
+    try require(
+      cursor.snapshot.text == answer && !cursor.snapshot.displayLinkRunning,
+      "A completed manual answer did not enter its static reading hold.")
+
+    // Each frame below is newly authored synthetic presentation metadata with
+    // no captured pixels. An old evidence timestamp is never extended.
+    func syntheticFrame(revision: UInt64) -> ScreenEvidence {
+      ScreenEvidence(
+        frameID: UUID(), revision: revision, capturedAt: ProcessInfo.processInfo.systemUptime,
+        displayID: fixture.displayID, foregroundPID: fixture.foregroundPID,
+        foregroundName: "Public synthetic presentation fixture", screenRect: display,
+        image: Data(), semanticText: "Public synthetic metadata; no screen pixels captured.")
+    }
+    model.evidence = syntheticFrame(revision: 2)
+    try await Task.sleep(for: .milliseconds(100))
+    try require(
+      cursor.snapshot.following && cursor.snapshot.text.isEmpty,
+      "Changed evidence retained a manual answer while its display clock was stopped.")
+
+    // Queue a different public explanation, then invalidate its actual source
+    // while the new flight is active. It must never reveal after that flight.
+    model.stop()
+    model.configureResponseOutput(
+      .resolve(text: "Show me this control on screen", screenGuidanceEnabled: true))
+    model.busy = true
+    model.state = "Thinking"
+    cursor.beginResponse(generation: model.taskGeneration, isGuidance: true)
+    let queuedFrame = syntheticFrame(revision: 3)
+    model.evidence = queuedFrame
+    var queuedExplanation = explanation
+    queuedExplanation.target?.instruction =
+      "This queued explanation must stay hidden after its source screen changes."
+    queuedExplanation.target?.label = "Queued note"
+    try model.accept(
+      queuedExplanation, generation: model.taskGeneration,
+      expectedEvidence: ScreenEvidenceIdentity(queuedFrame))
     try await Task.sleep(for: .milliseconds(25))
     try require(
-      !cursor.snapshot.following, "A repeated validated target did not begin a new flight.")
-    var replaced = fixture
-    replaced.frameID = UUID()
+      !cursor.snapshot.following && cursor.snapshot.text.isEmpty,
+      "The manual explanation was not queued behind its active pointing flight.")
+    let replaced = syntheticFrame(revision: 4)
     model.evidence = replaced
+    model.busy = false
+    model.state = "Ready"
     try await Task.sleep(for: .milliseconds(80))
     try require(
-      cursor.snapshot.following, "A newer evidence frame did not invalidate old guidance.")
+      cursor.snapshot.following && cursor.snapshot.text.isEmpty,
+      "A newer evidence frame did not clear queued screen guidance.")
+    try await Task.sleep(for: .milliseconds(1_500))
+    try require(
+      cursor.snapshot.following && cursor.snapshot.text.isEmpty && cursor.snapshot.phase == "idle",
+      "An invalidated manual explanation revived after the old flight ended.")
+    try await cursor.exportSnapshot(
+      to: output.appendingPathComponent("cursor-invalidated-screen-explanation.png"))
     model.overlay.clear()
     NotificationCenter.default.post(
       name: NSApplication.didChangeScreenParametersNotification, object: nil)
@@ -310,6 +379,8 @@ enum CursorCompanionAcceptance {
       "canonicalCompletedTextCommittedExactlyOnce": true,
       "guidanceLabelCapturedFromOwnedAnnotationPanel": true,
       "guidanceDoesNotDuplicateCursorCaption": true,
+      "manualExplanationClearsDuringFlight": true,
+      "manualExplanationClearsDuringStoppedReadingHold": true,
       "guidanceFailureFeedbackSurvivesModelObserver": true,
       "guidanceFailureDoesNotOpenNotebookOrStealFocus": true,
       "displayClockCallbacks": statistics.callbacks,

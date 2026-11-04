@@ -142,14 +142,14 @@ enum ScreenGrounding {
     }
     let matches = candidates.filter { $0.id == id }
     guard matches.count == 1, let candidate = matches.first,
-      validCandidate(candidate, frameID: frameID), candidate.enabled
+      validCandidate(candidate, frameID: frameID)
     else {
-      throw ProviderError.message("Screen target is unknown, ambiguous, disabled, or invalid.")
+      throw ProviderError.message("Screen target is unknown, ambiguous, or invalid.")
     }
     switch payload.advanceOn {
     case nil, "click":
-      guard candidate.source == .accessibility, candidate.actionable else {
-        throw ProviderError.message("Click guidance requires an actionable accessibility control.")
+      guard candidate.enabled, candidate.source == .accessibility, candidate.actionable else {
+        throw ProviderError.message("Click guidance requires an enabled actionable accessibility control.")
       }
     case "manual":
       break

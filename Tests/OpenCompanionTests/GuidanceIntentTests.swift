@@ -5,6 +5,100 @@ import Testing
 
 struct GuidanceIntentTests {
   @Test(arguments: [
+    "how to check my profile, in the current screen",
+    "how to check my profile in the current screen",
+    "How do I check my profile?",
+    "Show my profile",
+    "Where can I view my account?",
+    "How do I access my account?",
+    "Where is my avatar?",
+    "How do I duplicate this?",
+    "Can you help me duplicate this?",
+    "Help me rename this file",
+    "Walk me through renaming this document",
+    "Guide me through exporting a PDF",
+    "Walk me through saving a copy",
+    "How do I change the theme?",
+    "Help me enable dark mode",
+    "How do I create a document in Obsidian?",
+    "How do I create a chart in Excel?",
+    "How do I recolor this arrow?",
+    "Show me how to rename this label",
+    "Guide me through moving the selected node",
+    "How do I resize this?",
+    "Guide me through resizing the window",
+    "How can I zoom in here?",
+    "Help me sort this table",
+    "How do I go to the next page of this document?",
+    "How do I move to the next page of this document?",
+    "How do I proceed to the next page of this document?",
+    "Point out the failed job on this screen.",
+    "Highlight the failed job on this screen.",
+    "Identify the error on this screen.",
+  ])
+  func genericCurrentUiGoalsDoNotDependOnAppNamesOrExactVerbInflections(_ text: String) {
+    #expect(GuidanceIntent.requestsScreenGuidance(text: text))
+  }
+
+  @Test(arguments: [
+    "What does this button do?",
+    "What does this icon do?",
+    "How does this button work?",
+    "Why is this disabled?",
+    "Why is that option greyed out?",
+    "Explain the error on this screen",
+    "Explain this chart",
+    "What is this?",
+    "What's this?",
+    "What is that here?",
+    "Summarize this screen",
+    "Read the text on this screen",
+    "Translate this screen into Tamil",
+    "What does the ‘Sync’ button do?",
+  ])
+  func currentScreenQuestionsCanRequestGroundedExplanatoryMarks(_ text: String) {
+    #expect(GuidanceIntent.requestsScreenGuidance(text: text))
+  }
+
+  @Test(arguments: [
+    "Text only. What does this button do?",
+    "Only in text, how do I check my profile?",
+    "No visuals. Guide me through exporting a PDF",
+    "Do not capture my screen. How do I duplicate this?",
+    "Don't look at my screen. What is this?",
+    "How do I check my profile without screenshots?",
+    "Keep my screen private. What does this icon do?",
+    "No screenshot. Walk me through saving a copy",
+    "Translate ‘What does this button do?’ into Tamil",
+    "Rewrite ‘how to check my profile in the current screen’",
+    "Explain ‘How does this button work?’",
+    "Is ‘What is this?’ a good question?",
+    "Write a tutorial titled ‘How to export a PDF’",
+    "Show me a conversation between Alice and Bob",
+    "Help me start this motor",
+    "Guide me through how a motor works",
+    "What is this motor?",
+    "Explain screenshot compression",
+    "What is a screenshot?",
+    "How do I create a database in SQL?",
+    "Create an interactive motor diagram",
+    "Walk me through creating a diagram of a motor",
+    "How do I go about learning math?",
+    "How do I go about learning this math topic?",
+    "Point out flaws in this poem",
+    "Highlight the problems in this essay",
+    "Identify the metaphor in this poem",
+    "Recolor the selected arrow red",
+    "Rename this label",
+    "Move the selected node to the left",
+    "Change the selected label in this notebook",
+    "Please resize this rectangle",
+  ])
+  func privacyAuthoredExamplesAndConceptualLearningDoNotGrantScreenAccess(_ text: String) {
+    #expect(!GuidanceIntent.requestsScreenGuidance(text: text))
+  }
+
+  @Test(arguments: [
     "I want to create a new chat in ChatGPT",
     "Could you please open a new conversation in Chat GPT?",
     "How can I create a table in Supabase?",

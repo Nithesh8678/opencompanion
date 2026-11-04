@@ -1,5 +1,43 @@
 # Cursor companion and screen guidance
 
+## General screen questions and Terra routing
+
+Screen guidance now defaults to the newest image-capable numeric Terra model
+advertised by the signed-in Codex account. The locally queried catalog exposed
+`gpt-5.6-terra`; the app uses catalog-supported low effort for these turns.
+Conversation keeps its independently selected model. Settings exposes this
+choice and the actual last guidance model/effort. If Terra is unavailable, a
+visible notice identifies the conversation-model fallback. No account-wide
+configuration, credentials or service tier is changed.
+
+The bounded English request route includes profile/account navigation, unfamiliar
+software actions, exports, document navigation and questions about visible
+controls/errors. The exact reported request, “how to check my profile, in the
+current screen”, now requests screen evidence. Ordinary conversation, quoted
+examples, privacy/text-only choices and direct retained-notebook edits preserve
+their separate capabilities.
+
+The model receives the current screenshot, its dimensions, the question and
+bounded current-frame AX/OCR evidence. It infers the next visible destination or
+parent navigation control from the whole page, rather than requiring a literal
+label match. Native code validates frame ownership and coordinates before
+drawing. User clicks trigger fresh perception before the next step. A genuinely
+ambiguous or incompatible page calls for a specific clarification; invented
+coordinates do not improve guidance.
+
+Manual explanatory marks may identify disabled/nonactionable elements without
+granting click authority. A short attached label is followed by the full answer
+in the existing word-paced follower capsule. Its source binding survives the
+pointing animation and reading hold; frame/foreground changes, Stop and a new
+generation clear queued and visible explanations. Text and target narration
+share a bounded per-turn speech deduplicator.
+
+The implementation checkpoint passed 319 Swift tests (279 app, 15 store,
+25 core), 29 installer/signing tests, a certificate-signed app build and installed
+native cursor acceptance, including source invalidation during flight and the
+stopped reading hold. Expanded live-provider authored-screen acceptance and a
+physical profile-navigation check are tracked separately from these checks.
+
 Updated 4 November 2026. The installed cursor/annotation and notch checks passed,
 and a public conversational request completed through ChatGPT via Codex. A live
 public-screen request grounded its first target correctly. Physical click-to-next-
@@ -367,8 +405,9 @@ label fades in over 0.16 seconds, then its shaped-prefix mask advances one Swift
 `Character` every 0.06 seconds; this preserves joined emoji and combining marks.
 For an ellipse the body traces its contour; for a label it follows the writing
 edge. After that short presentation it returns smoothly to the real pointer.
-The conversational reply text bubble is suppressed for guidance turns, so the
-fixed label owns the instruction. Reduce Motion presents the final geometry/text
+The conversational reply text bubble is suppressed for click guidance, so the
+fixed label owns the instruction. A manual mark with a distinct full explanation
+reveals that answer beside the follower after pointing. Reduce Motion presents the final geometry/text
 without the flight/write-on animation.
 
 If a guidance response has no valid target because the scene is ambiguous or the

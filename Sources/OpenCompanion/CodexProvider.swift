@@ -72,6 +72,8 @@ actor CodexProvider {
   func stream(
     executable: String, model: String, messages: [ChatLine], context: String, image: Data?,
     scene: SceneDocument?,
+    guidanceModel: GuidanceModelPreference = .terra,
+    onRouting: (@Sendable (CodexRoutingSelection) async -> Void)? = nil,
     onUnit: @escaping @Sendable (ProviderUnit) async throws -> Void,
     onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil,
     responsePolicy: ResponsePolicy? = nil
@@ -103,38 +105,23 @@ actor CodexProvider {
         throw ProviderError.message(
           "Sign in to the Codex CLI with ChatGPT before using subscription mode.")
       }
-      var selectedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
-      var guidanceEffort: String? = nil
-      if selectedModel.isEmpty || requestPolicy.route == .screenGuidance {
+      var catalogModels: [CodexRoutingModel] = []
+      if model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        || requestPolicy.route == .screenGuidance
+      {
         try session.send(
           method: "model/list", id: 10,
           params: .object(["includeHidden": .bool(false), "limit": .number(100)]))
         let catalog = try await Self.response(id: 10, iterator: &iterator)
-        let models = (catalog["data"]?.array ?? []).prefix(100).filter {
-          $0["hidden"]?.boolean != true
-        }
-        if selectedModel.isEmpty {
-          let choice = models.first(where: { $0["isDefault"]?.boolean == true }) ?? models.first
-          guard let available = choice?["model"]?.string ?? choice?["id"]?.string else {
-            throw ProviderError.message("Codex returned no visible models for this account.")
-          }
-          selectedModel = available
-        }
-        if requestPolicy.route == .screenGuidance {
-          // This is a per-turn latency choice, never a model/auth/config change.
-          // Only the selected model's advertised options authorize an override.
-          let matches = models.filter {
-            $0["model"]?.string == selectedModel || $0["id"]?.string == selectedModel
-          }
-          if matches.count == 1, let selected = matches.first {
-            let supported = Set(
-              (selected["supportedReasoningEfforts"]?.array ?? []).prefix(32).compactMap {
-                $0["reasoningEffort"]?.string
-              })
-            guidanceEffort = ["low", "minimal", "none"].first(where: supported.contains)
-          }
-        }
+        catalogModels = Self.routingModels(catalog["data"]?.array ?? [])
       }
+      let routing = try CodexModelRouting.select(
+        configuredModel: model, policy: requestPolicy, preference: guidanceModel,
+        catalog: catalogModels)
+      let selectedModel = routing.model
+      try Task.checkCancellation()
+      if let onRouting { await onRouting(routing) }
+      try Task.checkCancellation()
       // Config tables merge by key: an empty table does not disable inherited servers.
       // Inspect only server/plugin identifiers, then explicitly disable every inherited entry.
       try session.send(
@@ -208,7 +195,7 @@ actor CodexProvider {
         "threadId": .string(threadID), "input": .array(input), "model": .string(selectedModel),
         "approvalPolicy": .string("never"),
       ]
-      if let guidanceEffort { turnParams["effort"] = .string(guidanceEffort) }
+      if let effort = routing.effort { turnParams["effort"] = .string(effort) }
       try session.send(method: "turn/start", id: 5, params: .object(turnParams))
       var decoder = ProviderTextStreamDecoder()
       var totalBytes = 0
@@ -271,6 +258,26 @@ actor CodexProvider {
     ]),
     "capabilities": .object(["experimentalApi": .bool(true)]),
   ])
+  private static func routingModels(_ entries: [JSONValue]) -> [CodexRoutingModel] {
+    entries.prefix(100).compactMap { entry in
+      guard entry["hidden"]?.boolean != true,
+        let model = entry["model"]?.string ?? entry["id"]?.string,
+        !model.isEmpty, model.utf8.prefix(201).count <= 200
+      else { return nil }
+      let modalities = entry["inputModalities"]
+      // Official older catalogs omit this field; that legacy contract supports
+      // text and image. An explicitly present non-image capability is excluded.
+      let supportsImages =
+        modalities == nil || (modalities?.array ?? []).prefix(8).contains { $0.string == "image" }
+      let supported = Set(
+        (entry["supportedReasoningEfforts"]?.array ?? []).prefix(32).compactMap {
+          $0["reasoningEffort"]?.string
+        }.filter { ["low", "minimal", "none"].contains($0) })
+      return CodexRoutingModel(
+        model: model, alias: entry["id"]?.string, isDefault: entry["isDefault"]?.boolean == true,
+        supportsImages: supportsImages, supportedEfforts: supported)
+    }
+  }
   private static func response(
     id: Int, iterator: inout AsyncThrowingStream<JSONValue, any Error>.Iterator
   ) async throws -> JSONValue {

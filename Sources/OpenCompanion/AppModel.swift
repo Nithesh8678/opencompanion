@@ -89,6 +89,10 @@ struct ResponseInputPlan: Sendable {
     ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/codex")
     .path
   @Published var codexModel = UserDefaults.standard.string(forKey: "codexModel") ?? ""
+  @Published var guidanceModelPreference =
+    GuidanceModelPreference(rawValue: UserDefaults.standard.string(forKey: "guidanceModel") ?? "")
+    ?? .terra
+  @Published private(set) var guidanceProviderStatus = "Terra for screen guidance"
   @Published var apiKey = ""
   @Published var scene: SceneDocument?
   @Published var selectedNodeID: String?
@@ -145,6 +149,7 @@ struct ResponseInputPlan: Sendable {
   private var outputSceneIncludesExistingNotebook = false
   private var acceptedGuidanceTarget = false
   private var guidanceNarration: String?
+  private var narrationGate = TurnNarrationGate()
   private var guidanceTurnStage: GuidanceTurnStage?
   private(set) var cursorFailureGeneration: UInt64?
   private var activeGuidanceRequest: ScreenGuidanceRequest?
@@ -269,6 +274,7 @@ struct ResponseInputPlan: Sendable {
       UserDefaults.standard.set(providerMode, forKey: "providerMode")
       UserDefaults.standard.set(codexPath, forKey: "codexPath")
       UserDefaults.standard.set(codexModel, forKey: "codexModel")
+      UserDefaults.standard.set(guidanceModelPreference.rawValue, forKey: "guidanceModel")
       if apiKey.isEmpty {
         try credentials.delete(
           service: "org.opencompanion.provider", account: configuration.endpoint)
@@ -370,6 +376,7 @@ struct ResponseInputPlan: Sendable {
     let activeScene = policy.includesExistingNotebook ? scene : nil
     let config = configuration
     let key = apiKey
+    let guidanceModel = guidanceModelPreference
     turn = Task { [weak self] in
       guard let self else { return }
       do {
@@ -419,7 +426,10 @@ struct ResponseInputPlan: Sendable {
           try await adapter.stream(
             executable: self.codexPath, model: self.codexModel, messages: history,
             context: turnContext,
-            image: turnImage, scene: activeScene, onUnit: handler, onText: preview,
+            image: turnImage, scene: activeScene, guidanceModel: guidanceModel,
+            onRouting: { [weak self] selection in
+              await self?.acceptModelRouting(selection, generation: current, policy: policy)
+            }, onUnit: handler, onText: preview,
             responsePolicy: policy)
         } else {
           try await self.provider.stream(
@@ -445,6 +455,19 @@ struct ResponseInputPlan: Sendable {
       } catch {
         self.finishTurnFailure(error: error, generation: current, policy: policy)
       }
+    }
+  }
+
+  private func acceptModelRouting(
+    _ selection: CodexRoutingSelection, generation: UInt64, policy: ResponsePolicy
+  ) {
+    guard generation == self.generation, policy.route == .screenGuidance else { return }
+    let modelName = String(selection.model.prefix(120))
+    guidanceProviderStatus = "\(modelName) · \(selection.effort ?? "default") effort"
+    record("guidance.model.\(selection.reason.rawValue)")
+    if selection.reason == .terraUnavailableFallback {
+      notice =
+        "Terra is unavailable for images in this account. Using \(modelName) for this request."
     }
   }
 
@@ -759,7 +782,7 @@ struct ResponseInputPlan: Sendable {
       messages.append(ChatLine(role: "assistant", text: text))
       if responsePolicy.route == .screenGuidance { guidanceNarration = text }
       record("semantic.text.accepted")
-      if configuration.speechEnabled || turnSpeaksAloud { voice.speak(text) }
+      speakNarration(text)
     case "scene":
       guard responsePolicy.allowsNotebook else {
         record("visual.suppressed.responsePolicy")
@@ -825,11 +848,17 @@ struct ResponseInputPlan: Sendable {
         onScreenGuidanceTargetAccepted?(target, evidence, generation, request)
       }
       messages.append(ChatLine(role: "assistant", text: target.instruction))
+      speakNarration(target.instruction)
       record("guidance.presented.awaitingUser")
       setGuidanceStage(.provider, generation: generation)
     default: throw ProviderError.message("Unsupported model output kind: \(unit.type)")
     }
   }
+  private func speakNarration(_ text: String) {
+    guard configuration.speechEnabled || turnSpeaksAloud, narrationGate.admit(text) else { return }
+    voice.speak(text)
+  }
+
   func stop() {
     generation += 1
     cursorFailureGeneration = nil
@@ -849,6 +878,7 @@ struct ResponseInputPlan: Sendable {
     voiceDraftGuard = nil
     turnSpeaksAloud = false
     voice.stop()
+    narrationGate.reset()
     listening = false
     pushToTalkActive = false
     microphoneLevel = 0

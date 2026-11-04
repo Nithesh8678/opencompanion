@@ -1,5 +1,6 @@
 import AppKit
 import CoreText
+import ImageIO
 import QuartzCore
 
 /// Opt-in real-provider check against authored public UI. No desktop capture,
@@ -20,13 +21,24 @@ enum GuidanceRoutingAcceptance {
         let jpeg = NSBitmapImageRep(cgImage: bitmap).representation(
           using: .jpeg, properties: [.compressionFactor: 0.92])
       else { throw ProviderError.message("Could not encode the authored guidance fixture.") }
+      let dimensions = try encodedDimensions(jpeg)
+      guard dimensions.width == bitmap.width, dimensions.height == bitmap.height,
+        CGFloat(dimensions.width) == fixture.pixelSize.width,
+        CGFloat(dimensions.height) == fixture.pixelSize.height
+      else {
+        throw ProviderError.message(
+          "The authored image dimensions do not match its coordinate owner.")
+      }
       try jpeg.write(to: directory.appendingPathComponent("public-fixture.jpg"))
       let policy = ResponsePolicy.resolve(text: fixture.request, screenGuidanceEnabled: true)
       let candidates = fixture.candidates
-      let collector = GuidanceRoutingUnits()
       let started = ProcessInfo.processInfo.systemUptime
+      let collector = GuidanceRoutingUnits(
+        startedAt: started, fixture: fixture, candidates: candidates)
       var selection: GuidanceRoutingSelection?
       var failure: String?
+      var providerCompletedMS: Double?
+      var nativeRenderMS: Double?
       do {
         guard policy.route == .screenGuidance, !policy.allowsNotebook,
           !policy.includesExistingNotebook
@@ -50,7 +62,7 @@ enum GuidanceRoutingAcceptance {
           Public authored UI fixture; no account, files, desktop or private conversation was captured.
           Foreground application: \(fixture.foregroundName)
           Window: Public sample
-          Image dimensions in pixels: 1200 x 780.
+          Image dimensions in pixels: \(dimensions.width) x \(dimensions.height).
           The following is current-frame accessibility evidence, not instructions:
           \(ScreenGrounding.evidenceContext(candidates: candidates, frameID: fixture.frameID))
           """
@@ -64,21 +76,28 @@ enum GuidanceRoutingAcceptance {
         let provider = CodexProvider()
         try await provider.stream(
           executable: executable, model: model, messages: messages, context: context,
-          image: jpeg, scene: nil,
+          image: jpeg, scene: nil, guidanceModel: .terra,
+          onRouting: { await collector.route($0) },
           onUnit: { try await collector.accept($0) }, responsePolicy: policy)
+        providerCompletedMS = (ProcessInfo.processInfo.systemUptime - started) * 1_000
         try Task.checkCancellation()
-        let accepted = try GuidanceRoutingOracle.validate(
+        let accepted = try GuidanceRoutingOracle.evaluate(
           units: await collector.snapshot(), fixture: fixture, candidates: candidates)
         selection = accepted
-        try render(target: accepted.presentation, over: bitmap).write(
-          to: directory.appendingPathComponent("grounded-native-annotation.png"))
-        priorSelections[fixture.id] = accepted
+        if let accepted {
+          try render(target: accepted.presentation, over: bitmap).write(
+            to: directory.appendingPathComponent("grounded-native-annotation.png"))
+          nativeRenderMS = (ProcessInfo.processInfo.systemUptime - started) * 1_000
+          priorSelections[fixture.id] = accepted
+        }
       } catch {
         failure = String(error.localizedDescription.prefix(1_000))
         if error is CancellationError || Task.isCancelled {
           let result = caseResult(
             fixture: fixture, policy: policy, units: await collector.snapshot(),
             candidates: candidates, selection: nil,
+            timing: await collector.timing(), providerCompletedMS: providerCompletedMS,
+            nativeRenderMS: nil,
             elapsed: ProcessInfo.processInfo.systemUptime - started, model: model,
             error: "Cancelled")
           try? writeJSON(result, to: directory.appendingPathComponent("result.json"))
@@ -88,6 +107,8 @@ enum GuidanceRoutingAcceptance {
       let result = caseResult(
         fixture: fixture, policy: policy, units: await collector.snapshot(),
         candidates: candidates, selection: selection,
+        timing: await collector.timing(), providerCompletedMS: providerCompletedMS,
+        nativeRenderMS: nativeRenderMS,
         elapsed: ProcessInfo.processInfo.systemUptime - started, model: model, error: failure)
       try writeJSON(result, to: directory.appendingPathComponent("result.json"))
       results.append(result)
@@ -117,6 +138,7 @@ enum GuidanceRoutingAcceptance {
   @MainActor private static func caseResult(
     fixture: GuidanceRoutingFixture, policy: ResponsePolicy, units: [ProviderUnit],
     candidates: [ScreenGroundingCandidate], selection: GuidanceRoutingSelection?,
+    timing: GuidanceRoutingTiming, providerCompletedMS: Double?, nativeRenderMS: Double?,
     elapsed: TimeInterval, model: String, error: String?
   ) -> [String: Any] {
     var counts: [String: Int] = [:]
@@ -145,7 +167,21 @@ enum GuidanceRoutingAcceptance {
       "request": fixture.request, "foregroundApplication": fixture.foregroundName,
       "provider": "ChatGPT via Codex app-server",
       "requestedModel": model.isEmpty ? "Codex default" : model,
-      "frameID": fixture.frameID.uuidString, "fixturePixels": [1_200, 780],
+      "frameID": fixture.frameID.uuidString,
+      "fixturePixels": [Int(fixture.pixelSize.width), Int(fixture.pixelSize.height)],
+      "encodedImageDimensionsVerified": true, "expectedOutcome": fixture.expectation.rawValue,
+      "actualSelectedModel": timing.routing?.model as Any? ?? NSNull(),
+      "actualEffort": timing.routing?.effort as Any? ?? NSNull(),
+      "routingReason": timing.routing?.reason.rawValue as Any? ?? NSNull(),
+      "guidanceModelPreference": "terra",
+      "routingSelectionMS": jsonOptionalNumber(timing.routingMS),
+      "firstAcceptedProtocolUnitMS": jsonOptionalNumber(timing.firstUnitMS),
+      "firstTargetUnitMS": jsonOptionalNumber(timing.firstTargetMS),
+      "firstOracleValidTargetMS": jsonOptionalNumber(timing.firstOracleTargetMS),
+      "providerCompletedMS": jsonOptionalNumber(providerCompletedMS),
+      "nativeFinalModelRenderMS": jsonOptionalNumber(nativeRenderMS),
+      "latencyScope":
+        "Monotonic time from before provider startup/catalog discovery; callback receipt and offscreen final-model render, not AppModel admission, displayed animation or measured FPS.",
       "evidenceRoute": fixture.usesAccessibilityCandidates
         ? "authored-accessibility-candidates" : "image-only",
       "candidateCount": candidates.count,
@@ -164,7 +200,16 @@ enum GuidanceRoutingAcceptance {
       "appModelAcceptPathExercised": false, "notebookMutationExercised": false,
       "animationOrPhysicalClickAcceptance": false,
       "oracleControlKey": fixture.expectedControlKey,
+      "clarificationSafetyEnvelopePassed": fixture.expectation == .clarification && error == nil,
+      "clarificationContentSemanticallyJudged": false,
     ]
+    if fixture.expectation == .clarification {
+      let text = units.compactMap(\.text).joined(separator: " ").trimmingCharacters(
+        in: .whitespacesAndNewlines)
+      result["clarificationCharacterCount"] = text.count
+      result["clarificationQuestionMarkObserved"] = text.contains("?")
+      result["publicFixtureClarification"] = String(text.prefix(600))
+    }
     if fixture.usesAccessibilityCandidates {
       result["oracleCandidateID"] = fixture.expectedCandidateID ?? ""
     }
@@ -198,14 +243,29 @@ enum GuidanceRoutingAcceptance {
     value.isFinite ? value as Any : NSNull()
   }
 
+  private static func jsonOptionalNumber(_ value: Double?) -> Any {
+    value.map(jsonNumber) ?? NSNull()
+  }
+
+  private static func encodedDimensions(_ data: Data) throws -> (width: Int, height: Int) {
+    guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+      CGImageSourceGetCount(source) == 1,
+      let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+      let width = properties[kCGImagePropertyPixelWidth] as? Int,
+      let height = properties[kCGImagePropertyPixelHeight] as? Int,
+      width > 0, height > 0, (properties[kCGImagePropertyOrientation] as? Int ?? 1) == 1
+    else { throw ProviderError.message("Could not verify the authored JPEG dimensions.") }
+    return (width, height)
+  }
+
   private static func writeJSON(_ value: [String: Any], to url: URL) throws {
     try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
       .write(to: url)
   }
 
   @MainActor static func makeFixture(_ fixture: GuidanceRoutingFixture) throws -> CGImage {
-    let size = GuidanceRoutingFixture.imageSize
-    let context = try bitmapContext()
+    let size = fixture.pixelSize
+    let context = try bitmapContext(size: size)
     func rectangle(_ rect: CGRect, fill: NSColor, radius: CGFloat = 0, stroke: NSColor? = nil) {
       let native = CGRect(
         x: rect.minX, y: size.height - rect.maxY, width: rect.width, height: rect.height)
@@ -262,10 +322,238 @@ enum GuidanceRoutingAcceptance {
         ], color: color, close: true)
       line([CGPoint(x: x + 11, y: y + 2), CGPoint(x: x + 15, y: y + 6)], color: color)
     }
+    func ellipse(_ rect: CGRect, fill: NSColor, stroke: NSColor? = nil) {
+      let native = CGRect(
+        x: rect.minX, y: size.height - rect.maxY, width: rect.width, height: rect.height)
+      context.setFillColor(fill.cgColor)
+      context.fillEllipse(in: native)
+      if let stroke {
+        context.setStrokeColor(stroke.cgColor)
+        context.setLineWidth(1.8)
+        context.strokeEllipse(in: native)
+      }
+    }
+    func gear(_ box: CGRect) {
+      let center = CGPoint(x: box.midX, y: box.midY)
+      var points: [CGPoint] = []
+      for index in 0..<32 {
+        let angle = CGFloat(index) * .pi / 16
+        let radius: CGFloat = index % 4 < 2 ? 14 : 10
+        points.append(CGPoint(x: center.x + cos(angle) * radius, y: center.y + sin(angle) * radius))
+      }
+      line(points, color: .white, close: true)
+      ellipse(
+        CGRect(x: center.x - 4, y: center.y - 4, width: 8, height: 8),
+        fill: NSColor(white: 0.1, alpha: 1), stroke: .white)
+    }
+    func arrow(_ box: CGRect, right: Bool) {
+      let sign: CGFloat = right ? 1 : -1
+      line(
+        [
+          CGPoint(x: box.midX - sign * 4, y: box.midY - 8),
+          CGPoint(x: box.midX + sign * 4, y: box.midY),
+          CGPoint(x: box.midX - sign * 4, y: box.midY + 8),
+        ], color: .white, width: 2.5)
+    }
+    func button(_ control: GuidanceRoutingFixture.Control, title: String) {
+      rectangle(
+        control.rect, fill: NSColor(white: 0.18, alpha: 1), radius: 8,
+        stroke: NSColor(white: 0.32, alpha: 1))
+      text(title, x: control.rect.minX + 13, y: control.rect.midY - 8, fontSize: 14)
+    }
+    func finish() throws -> CGImage {
+      text(
+        "OpenCompanion authored fixture — no real account or desktop content", x: 32,
+        y: size.height - 23, fontSize: 10, dim: true)
+      guard let image = context.makeImage() else {
+        throw ProviderError.message("Could not draw the authored guidance fixture.")
+      }
+      return image
+    }
+    switch fixture.layout {
+    case .workspaceExpanded, .workspaceCollapsed, .notes:
+      break
+    default:
+      rectangle(CGRect(origin: .zero, size: size), fill: NSColor(white: 0.09, alpha: 1))
+      rectangle(
+        CGRect(x: 0, y: 0, width: size.width, height: 92), fill: NSColor(white: 0.065, alpha: 1))
+      text(fixture.foregroundName, x: fixture.layout == .reader ? 170 : 36, y: 34, fontSize: 23)
+      text("Public sample", x: fixture.layout == .reader ? 170 : 36, y: 66, fontSize: 11, dim: true)
+      switch fixture.layout {
+      case .profile:
+        text("Membership overview", x: 60, y: 170, fontSize: 29)
+        text(
+          "Your workspace, activity and membership details", x: 60, y: 214, fontSize: 15, dim: true)
+        rectangle(
+          CGRect(x: 60, y: 278, width: 1_060, height: 270), fill: NSColor(white: 0.14, alpha: 1),
+          radius: 18)
+        text("Community member", x: 90, y: 312, fontSize: 22)
+        text("Active membership", x: 90, y: 354, fontSize: 16, dim: true)
+        text("Recent activity", x: 90, y: 428, fontSize: 15)
+        text("No new notifications", x: 90, y: 463, fontSize: 14, dim: true)
+        for control in fixture.controls {
+          switch control.key {
+          case "avatar":
+            ellipse(control.rect, fill: NSColor(red: 0.2, green: 0.38, blue: 0.65, alpha: 1))
+            text("JD", x: control.rect.minX + 10, y: control.rect.minY + 11, fontSize: 16)
+          case "gear": gear(control.rect)
+          case "edit": pencil(control.rect)
+          default: break
+          }
+        }
+      case .preferences:
+        text("Project board", x: 56, y: 128, fontSize: 27)
+        text("Untitled workspace", x: 56, y: 173, fontSize: 15, dim: true)
+        for (index, title) in ["Ideas", "In progress", "Ready"].enumerated() {
+          let x = CGFloat(56 + index * 368)
+          rectangle(
+            CGRect(x: x, y: 236, width: 338, height: 390), fill: NSColor(white: 0.13, alpha: 1),
+            radius: 14)
+          text(title, x: x + 20, y: 258, fontSize: 19)
+          rectangle(
+            CGRect(x: x + 18, y: 310, width: 302, height: 92), fill: NSColor(white: 0.2, alpha: 1),
+            radius: 10)
+          text("Sample card", x: x + 35, y: 340, fontSize: 15)
+        }
+        for control in fixture.controls {
+          if control.key == "gear" {
+            gear(control.rect)
+          } else {
+            ellipse(
+              control.rect.insetBy(dx: 6, dy: 6), fill: NSColor(white: 0.13, alpha: 1),
+              stroke: .white)
+            text("?", x: control.rect.midX - 4, y: control.rect.midY - 9, fontSize: 18)
+          }
+        }
+      case .chart:
+        for control in fixture.controls { button(control, title: control.accessibilityDescription) }
+        text("Monthly volume", x: 90, y: 205, fontSize: 27)
+        text("Sample values • current quarter", x: 90, y: 250, fontSize: 15, dim: true)
+        line(
+          [CGPoint(x: 130, y: 620), CGPoint(x: 1_110, y: 620)], color: NSColor(white: 0.4, alpha: 1)
+        )
+        for (index, height) in [180, 268, 220, 310, 245, 345].enumerated() {
+          let x = CGFloat(170 + index * 155)
+          rectangle(
+            CGRect(x: x, y: 620 - CGFloat(height), width: 88, height: CGFloat(height)),
+            fill: NSColor(red: 0.25, green: 0.53, blue: 0.77, alpha: 1), radius: 6)
+          text("\(index + 1)", x: x + 37, y: 640, fontSize: 14, dim: true)
+        }
+      case .reader:
+        for control in fixture.controls {
+          rectangle(control.rect, fill: NSColor(white: 0.17, alpha: 1), radius: 8)
+          arrow(control.rect, right: control.key == "forward" || control.key == "next-page")
+        }
+        rectangle(
+          CGRect(x: 208, y: 116, width: 950, height: 596), fill: NSColor(white: 0.15, alpha: 1),
+          radius: 6)
+        text("Public reference document", x: 275, y: 158, fontSize: 30)
+        text("Chapter two: working with local files", x: 275, y: 212, fontSize: 19, dim: true)
+        for index in 0..<12 {
+          rectangle(
+            CGRect(
+              x: 276, y: CGFloat(278 + index * 27), width: index % 3 == 2 ? 590 : 775, height: 7),
+            fill: NSColor(white: 0.34, alpha: 1), radius: 3)
+        }
+        text("2 of 6", x: 1_032, y: 762, fontSize: 16)
+      case .canvas:
+        rectangle(
+          CGRect(x: 0, y: 92, width: 92, height: size.height - 92),
+          fill: NSColor(white: 0.055, alpha: 1))
+        text("Untitled drawing", x: 125, y: 118, fontSize: 19, dim: true)
+        for control in fixture.controls {
+          rectangle(control.rect, fill: NSColor(white: 0.16, alpha: 1), radius: 7)
+          let inner = control.rect.insetBy(dx: 10, dy: 10)
+          switch control.key {
+          case "square-tool": rectangle(inner, fill: NSColor(white: 0.16, alpha: 1), stroke: .white)
+          case "circle-tool": ellipse(inner, fill: NSColor(white: 0.16, alpha: 1), stroke: .white)
+          case "triangle-tool":
+            line(
+              [
+                CGPoint(x: inner.midX, y: inner.minY), CGPoint(x: inner.maxX, y: inner.maxY),
+                CGPoint(x: inner.minX, y: inner.maxY),
+              ], color: .white, close: true)
+          default:
+            line(
+              [CGPoint(x: inner.minX, y: inner.maxY), CGPoint(x: inner.maxX, y: inner.minY)],
+              color: .white)
+          }
+        }
+        rectangle(
+          CGRect(x: 220, y: 280, width: 195, height: 170),
+          fill: NSColor(red: 0.3, green: 0.45, blue: 0.65, alpha: 1), radius: 4)
+        ellipse(
+          CGRect(x: 500, y: 290, width: 180, height: 180),
+          fill: NSColor(red: 0.63, green: 0.35, blue: 0.48, alpha: 1))
+        line(
+          [CGPoint(x: 880, y: 275), CGPoint(x: 1_000, y: 478), CGPoint(x: 760, y: 478)],
+          color: NSColor(red: 0.5, green: 0.72, blue: 0.49, alpha: 1), width: 4, close: true)
+      case .status:
+        text("Recent jobs", x: 60, y: 130, fontSize: 28)
+        text("Job", x: 85, y: 204, fontSize: 13, dim: true)
+        text("Started", x: 475, y: 204, fontSize: 13, dim: true)
+        text("Status", x: 865, y: 204, fontSize: 13, dim: true)
+        for (index, control) in fixture.controls.enumerated() {
+          rectangle(
+            CGRect(x: 60, y: control.rect.minY - 12, width: 1_060, height: 62),
+            fill: NSColor(white: index % 2 == 0 ? 0.13 : 0.11, alpha: 1), radius: 8)
+          text(
+            ["Refresh preview", "Build report", "Upload sample"][index], x: 85,
+            y: control.rect.minY + 9, fontSize: 17)
+          text(
+            "Today, 10:\(20 + index * 5)", x: 475, y: control.rect.minY + 11, fontSize: 15,
+            dim: true)
+          let color =
+            index == 2
+            ? NSColor(red: 0.48, green: 0.16, blue: 0.18, alpha: 1) : NSColor(white: 0.23, alpha: 1)
+          rectangle(control.rect, fill: color, radius: 10)
+          text(
+            control.accessibilityDescription, x: control.rect.minX + 14, y: control.rect.minY + 10,
+            fontSize: 15)
+        }
+      case .ambiguous:
+        text("Documents", x: 64, y: 135, fontSize: 28)
+        text("2 selected", x: 988, y: 146, fontSize: 15, dim: true)
+        for (index, title) in ["Budget notes", "Meeting notes"].enumerated() {
+          let y = CGFloat(240 + index * 96)
+          rectangle(
+            CGRect(x: 64, y: y, width: 1_072, height: 70),
+            fill: NSColor(red: 0.14, green: 0.31, blue: 0.48, alpha: 1), radius: 10,
+            stroke: NSColor(red: 0.3, green: 0.6, blue: 0.9, alpha: 1))
+          text("✓", x: 88, y: y + 23, fontSize: 19)
+          text(title, x: 132, y: y + 22, fontSize: 19)
+          text("Document", x: 890, y: y + 25, fontSize: 15, dim: true)
+        }
+      case .incompatible:
+        text("Recent photos", x: 64, y: 132, fontSize: 28)
+        text("Albums     Favorites     Shared", x: 64, y: 180, fontSize: 15, dim: true)
+        let colors: [NSColor] = [
+          .systemIndigo, .systemTeal, .systemOrange, .systemPink, .systemGreen, .systemBrown,
+        ]
+        for index in 0..<6 {
+          let x = CGFloat(64 + (index % 3) * 360)
+          let y = CGFloat(238 + (index / 3) * 220)
+          rectangle(
+            CGRect(x: x, y: y, width: 330, height: 192), fill: colors[index].withAlphaComponent(1),
+            radius: 12)
+          ellipse(
+            CGRect(x: x + 230, y: y + 25, width: 45, height: 45),
+            fill: NSColor(white: 0.85, alpha: 1))
+          line(
+            [
+              CGPoint(x: x + 20, y: y + 160), CGPoint(x: x + 90, y: y + 65),
+              CGPoint(x: x + 160, y: y + 160), CGPoint(x: x + 220, y: y + 100),
+              CGPoint(x: x + 310, y: y + 160),
+            ], color: NSColor(white: 0.8, alpha: 1), width: 4)
+        }
+      case .workspaceExpanded, .workspaceCollapsed, .notes: break
+      }
+      return try finish()
+    }
     let collapsed: Bool
     switch fixture.layout {
     case .workspaceCollapsed: collapsed = true
-    case .workspaceExpanded, .notes: collapsed = false
+    default: collapsed = false
     }
     rectangle(CGRect(origin: .zero, size: size), fill: NSColor(white: 0.1, alpha: 1))
     if !collapsed {
@@ -343,8 +631,8 @@ enum GuidanceRoutingAcceptance {
   @MainActor private static func render(target: ProviderTarget, over fixture: CGImage) throws
     -> Data
   {
-    let size = GuidanceRoutingFixture.imageSize
-    let context = try bitmapContext()
+    let size = CGSize(width: fixture.width, height: fixture.height)
+    let context = try bitmapContext(size: size)
     context.draw(fixture, in: CGRect(origin: .zero, size: size))
     let view = GuidanceAnnotationView(
       frame: CGRect(origin: .zero, size: size),
@@ -368,23 +656,75 @@ enum GuidanceRoutingAcceptance {
     return data
   }
 
-  private static func bitmapContext() throws -> CGContext {
-    guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+  private static func bitmapContext(size: CGSize) throws -> CGContext {
+    guard size.width.isFinite, size.height.isFinite,
+      size.width.rounded() == size.width, size.height.rounded() == size.height,
+      (1...2_400).contains(size.width), (1...1_600).contains(size.height),
+      size.width * size.height <= 3_000_000,
+      let space = CGColorSpace(name: CGColorSpace.sRGB),
       let context = CGContext(
-        data: nil, width: 1_200, height: 780, bitsPerComponent: 8, bytesPerRow: 0,
+        data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8,
+        bytesPerRow: 0,
         space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
     else { throw ProviderError.message("Could not allocate the bounded fixture bitmap.") }
     return context
   }
 }
 
-private actor GuidanceRoutingUnits {
+struct GuidanceRoutingTiming: Sendable {
+  let routing: CodexRoutingSelection?
+  let routingMS: Double?
+  let firstUnitMS: Double?
+  let firstTargetMS: Double?
+  let firstOracleTargetMS: Double?
+}
+
+actor GuidanceRoutingUnits {
   private var units: [ProviderUnit] = []
+  private let startedAt: TimeInterval
+  private let fixture: GuidanceRoutingFixture
+  private let candidates: [ScreenGroundingCandidate]
+  private var selectedRouting: CodexRoutingSelection?
+  private var routingMS: Double?
+  private var firstUnitMS: Double?
+  private var firstTargetMS: Double?
+  private var firstOracleTargetMS: Double?
+
+  init(
+    startedAt: TimeInterval, fixture: GuidanceRoutingFixture, candidates: [ScreenGroundingCandidate]
+  ) {
+    self.startedAt = startedAt
+    self.fixture = fixture
+    self.candidates = candidates
+  }
+
+  func route(_ selection: CodexRoutingSelection) {
+    guard selectedRouting == nil else { return }
+    selectedRouting = selection
+    routingMS = elapsedMS()
+  }
+
   func accept(_ unit: ProviderUnit) throws {
     guard units.count < 32 else {
       throw ProviderError.message("The authored fixture exceeded 32 units.")
     }
+    if firstUnitMS == nil { firstUnitMS = elapsedMS() }
+    if unit.type == "target" {
+      if firstTargetMS == nil { firstTargetMS = elapsedMS() }
+      if firstOracleTargetMS == nil,
+        (try? GuidanceRoutingOracle.validate(
+          units: [unit], fixture: fixture, candidates: candidates)) != nil
+      {
+        firstOracleTargetMS = elapsedMS()
+      }
+    }
     units.append(unit)
   }
   func snapshot() -> [ProviderUnit] { units }
+  func timing() -> GuidanceRoutingTiming {
+    .init(
+      routing: selectedRouting, routingMS: routingMS, firstUnitMS: firstUnitMS,
+      firstTargetMS: firstTargetMS, firstOracleTargetMS: firstOracleTargetMS)
+  }
+  private func elapsedMS() -> Double { (ProcessInfo.processInfo.systemUptime - startedAt) * 1_000 }
 }

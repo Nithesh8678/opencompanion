@@ -20,6 +20,18 @@ struct ResponsePolicyTests {
     "Help me open this dropdown",
     "Show me where to click",
     "How do I create a chart in Excel?",
+    "how to check my profile, in the current screen",
+    "How do I check my profile?",
+    "How do I duplicate this?",
+    "What does this button do?",
+    "Why is this button disabled?",
+    "How does this button work?",
+    "Explain the error on this screen",
+    "How do I change the theme?",
+    "Guide me through exporting a PDF",
+    "How do I recolor this arrow?",
+    "Show me how to rename this label",
+    "Guide me through moving the selected node",
   ])
   func currentUIHelpHasPriorityOverDecorativeNotebook(_ text: String) {
     let result = policy(text, inNotebook: true, hasNotebook: true)
@@ -172,6 +184,8 @@ struct ResponsePolicyTests {
     "Rename this label",
     "Move the selected node to the left",
     "Change the title of the notebook",
+    "Change the selected label in this notebook",
+    "Please resize this rectangle",
   ])
   func retainedNotebookRequiresBothCurrentContextAndClearEditIntent(_ text: String) {
     let editing = policy(text, inNotebook: true, hasNotebook: true)
@@ -190,6 +204,18 @@ struct ResponsePolicyTests {
     let outside = policy("Recolor the selected arrow red", hasNotebook: true)
     #expect(outside.route == .conversation)
     #expect(!outside.includesExistingNotebook)
+  }
+
+  @Test(arguments: [
+    "Recolor the selected arrow red", "Rename this label", "Move the selected node to the left",
+    "Change the selected label in this notebook", "Please resize this rectangle",
+  ])
+  func directArtifactEditsOutsideANotebookDoNotBecomeScreenCaptureRequests(_ text: String) {
+    for retained in [false, true] {
+      let result = policy(text, hasNotebook: retained)
+      #expect(result.route == .conversation)
+      #expect(!result.includesExistingNotebook)
+    }
   }
 
   @Test func inputBudgetRejectsTheWholeRequestInsteadOfClassifyingItsPrefix() {

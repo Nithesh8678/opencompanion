@@ -349,10 +349,25 @@ import SwiftUI
             TextField("Path to Codex", text: $model.codexPath)
               .accessibilityIdentifier("companion.settings.codexPath")
           }
-          settingsField("Model") {
+          settingsField("Conversation model") {
             TextField("Use Codex default", text: $model.codexModel)
               .accessibilityIdentifier("companion.settings.codexModel")
           }
+          settingsField("Screen guidance") {
+            Picker("Screen guidance model", selection: $model.guidanceModelPreference) {
+              Text("Terra").tag(GuidanceModelPreference.terra)
+              Text("Conversation model").tag(GuidanceModelPreference.conversation)
+            }
+            .pickerStyle(.menu)
+            .accessibilityIdentifier("companion.settings.guidanceModel")
+          }
+          detail(
+            "Terra handles screen analysis and highlighting. Other tasks use your conversation model."
+          )
+          Text(model.guidanceProviderStatus)
+            .font(.system(size: 12, design: .rounded))
+            .foregroundStyle(SettingsColors.secondary)
+            .accessibilityIdentifier("companion.settings.guidanceModelStatus")
           detail(
             "Uses your installed Codex CLI and its ChatGPT sign-in. Run codex login in Terminal to sign in. OpenCompanion does not read or copy login tokens."
           )

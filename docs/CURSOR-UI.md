@@ -20,8 +20,13 @@ their separate capabilities.
 The model receives the current screenshot, its dimensions, the question and
 bounded current-frame AX/OCR evidence. It infers the next visible destination or
 parent navigation control from the whole page, rather than requiring a literal
-label match. Native code validates frame ownership and coordinates before
-drawing. User clicks trigger fresh perception before the next step. A genuinely
+label match. Pixel fallback targets now use `pixelBounds` in encoded-image pixels;
+native code verifies the actual JPEG header and stored dimensions, then normalizes
+the bounds once before mapping to the capture's screen rectangle. This removes
+model-side division with no extra model request. Mixed coordinate formats,
+out-of-image bounds and stale IDs fail closed. Legacy normalized geometry remains
+supported. A late response resolves against its immutable original image before
+any verified fresh-frame admission. User clicks trigger fresh perception before the next step. A genuinely
 ambiguous or incompatible page calls for a specific clarification; invented
 coordinates do not improve guidance.
 
@@ -32,7 +37,7 @@ pointing animation and reading hold; frame/foreground changes, Stop and a new
 generation clear queued and visible explanations. Text and target narration
 share a bounded per-turn speech deduplicator.
 
-The implementation checkpoint passed 323 Swift tests (283 app, 15 store,
+The implementation checkpoint passed 333 Swift tests (293 app, 15 store,
 25 core), 29 installer/signing tests, a certificate-signed app build and installed
 native cursor acceptance, including source invalidation during flight and the
 stopped reading hold. Expanded live-provider authored-screen acceptance and a

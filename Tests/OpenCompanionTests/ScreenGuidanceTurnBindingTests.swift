@@ -8,6 +8,30 @@ import Testing
 /// Public bitmap fixtures and ownership closures only. No AppModel, windows,
 /// real capture, focus changes, provider request, or user library is involved.
 @Suite @MainActor struct ScreenGuidanceTurnBindingTests {
+  @Test(arguments: [0.0, 30.0])
+  func pixelGeometryUsesTheImmutableInputImageBeforeAnyRefresh(_ age: Double) async throws {
+    let source = try frame(age: age)
+    let fresh = try frame(age: 0, revision: 2, image: source.image)
+    let binding = ScreenGuidanceTurnBinding(source: source)
+    let pixelTarget = ProviderTarget(
+      x: 0, y: 0, width: 0, height: 0, instruction: "Choose this control.",
+      label: "Continue", shape: "ellipse", advanceOn: "click",
+      pixelBounds: .init(x: 40, y: 50, width: 80, height: 40))
+    var captures = 0
+    let result = try await binding.prepare(
+      pixelTarget,
+      refresh: {
+        captures += 1
+        return fresh
+      }, stillOwned: { true })
+    #expect(result.pixelBounds == nil && result.candidateID == nil)
+    #expect(result.x == 0.125 && result.y == 0.25)
+    #expect(result.width == 0.25 && result.height == 0.2)
+    #expect(captures == (age == 0 ? 0 : 1))
+    let rect = try #require(ScreenGuidancePolicy.targetRect(result, in: source.screenRect))
+    #expect(rect == CGRect(x: -280, y: 210, width: 80, height: 40))
+  }
+
   @Test func freshSourceNeedsNoCaptureAndPreservesOriginalCandidateIdentity() async throws {
     let source = try frame(age: 0)
     let binding = ScreenGuidanceTurnBinding(source: source)

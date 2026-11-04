@@ -19,8 +19,7 @@ import Foundation
     stillOwned: @MainActor () -> Bool
   ) async throws -> ProviderTarget {
     try checkOwnership(stillOwned)
-    let resolved = try ScreenGrounding.resolve(
-      payload, candidates: source.groundingCandidates, frameID: source.frameID)
+    let resolved = try source.resolvingTarget(payload)
     try validate(resolved)
     let age = ProcessInfo.processInfo.systemUptime - current.capturedAt
     guard age.isFinite, age >= 0 else { throw failure() }

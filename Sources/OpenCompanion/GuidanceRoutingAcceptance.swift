@@ -154,11 +154,21 @@ enum GuidanceRoutingAcceptance {
       entry["hasTargetPayload"] = true
       do {
         let resolved = try ScreenGrounding.resolve(
-          target, candidates: candidates, frameID: fixture.frameID)
+          target, candidates: candidates, frameID: fixture.frameID,
+          imagePixelSize: fixture.pixelSize)
         entry["resolved"] = targetDiagnostic(resolved)
-        entry["nativeShape"] = GuidanceTargetPresentation.styled(resolved).shape ?? ""
+        entry["nativeShape"] =
+          GuidanceTargetPresentation.styled(resolved).shape ?? "roundedRectangle"
+        if target.pixelBounds != nil {
+          entry["pixelCoordinateConversionApplied"] = true
+          entry["pixelCoordinateOwner"] = "verified public-fixture.jpg encoded image header"
+          entry["trustedImagePixels"] = [
+            Int(fixture.pixelSize.width), Int(fixture.pixelSize.height),
+          ]
+        }
       } catch {
         entry["resolutionError"] = String(error.localizedDescription.prefix(400))
+        if target.pixelBounds != nil { entry["pixelCoordinateConversionApplied"] = false }
       }
       diagnostics.append(entry)
     }
@@ -224,6 +234,7 @@ enum GuidanceRoutingAcceptance {
       result["selectedRawTarget"] = targetDiagnostic(selection.raw)
       result["selectedResolvedTarget"] = targetDiagnostic(selection.resolved)
       result["selectedNativeTarget"] = targetDiagnostic(selection.presentation)
+      result["selectedPixelCoordinateConversionApplied"] = selection.raw.pixelBounds != nil
       result["selectedInstructionNonempty"] = !selection.presentation.instruction
         .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -232,7 +243,7 @@ enum GuidanceRoutingAcceptance {
   }
 
   private static func targetDiagnostic(_ target: ProviderTarget) -> [String: Any] {
-    [
+    var diagnostic: [String: Any] = [
       "x": jsonNumber(target.x), "y": jsonNumber(target.y),
       "width": jsonNumber(target.width), "height": jsonNumber(target.height),
       "shape": String((target.shape ?? "").prefix(64)),
@@ -240,6 +251,13 @@ enum GuidanceRoutingAcceptance {
       "advanceOn": String((target.advanceOn ?? "manual").prefix(64)),
       "candidateID": String((target.candidateID ?? "").prefix(100)),
     ]
+    if let pixels = target.pixelBounds {
+      diagnostic["pixelBounds"] = [
+        "x": jsonNumber(Double(pixels.x)), "y": jsonNumber(Double(pixels.y)),
+        "width": jsonNumber(Double(pixels.width)), "height": jsonNumber(Double(pixels.height)),
+      ]
+    }
+    return diagnostic
   }
 
   private static func jsonNumber(_ value: Double) -> Any {
@@ -637,12 +655,16 @@ enum GuidanceRoutingAcceptance {
     let size = CGSize(width: fixture.width, height: fixture.height)
     let context = try bitmapContext(size: size)
     context.draw(fixture, in: CGRect(origin: .zero, size: size))
+    guard let shape = GuidanceAnnotationView.Shape(rawValue: target.shape ?? "roundedRectangle")
+    else {
+      throw ProviderError.message("The native fixture annotation shape is unsupported.")
+    }
     let view = GuidanceAnnotationView(
       frame: CGRect(origin: .zero, size: size),
       target: CGRect(
         x: target.x * size.width, y: target.y * size.height,
         width: target.width * size.width, height: target.height * size.height),
-      shape: .ellipse, text: GuidanceAnnotationLayout.labelText(target: target), reduceMotion: true)
+      shape: shape, text: GuidanceAnnotationLayout.labelText(target: target), reduceMotion: true)
     view.layoutSubtreeIfNeeded()
     guard let layer = view.layer else {
       throw ProviderError.message("The native annotation has no layer.")

@@ -134,8 +134,33 @@ enum ScreenGrounding {
   /// Candidate selection grants no action capability. Native geometry replaces
   /// the model's guessed box; rendering and freshness guards still apply later.
   static func resolve(
-    _ payload: ProviderTarget, candidates: [ScreenGroundingCandidate], frameID: UUID
+    _ payload: ProviderTarget, candidates: [ScreenGroundingCandidate], frameID: UUID,
+    imagePixelSize: CGSize? = nil
   ) throws -> ProviderTarget {
+    if let pixels = payload.pixelBounds {
+      guard payload.candidateID == nil,
+        payload.x == 0, payload.y == 0, payload.width == 0, payload.height == 0,
+        let size = imagePixelSize,
+        size.width.isFinite, size.height.isFinite,
+        size.width > 0, size.height > 0,
+        size.width <= ScreenImageGeometry.maximumDimension,
+        size.height <= ScreenImageGeometry.maximumDimension,
+        size.width.rounded(.towardZero) == size.width,
+        size.height.rounded(.towardZero) == size.height,
+        pixels.x.isFinite, pixels.y.isFinite, pixels.width.isFinite, pixels.height.isFinite,
+        pixels.x >= 0, pixels.y >= 0, pixels.width > 0, pixels.height > 0,
+        pixels.x + pixels.width <= size.width, pixels.y + pixels.height <= size.height
+      else {
+        throw ProviderError.message("Pixel target bounds do not match the trusted captured image.")
+      }
+      var resolved = payload
+      resolved.x = pixels.x / size.width
+      resolved.y = pixels.y / size.height
+      resolved.width = pixels.width / size.width
+      resolved.height = pixels.height / size.height
+      resolved.pixelBounds = nil
+      return resolved
+    }
     guard let id = payload.candidateID else { return payload }
     guard validID(id, frameID: frameID), candidates.count <= maximumCandidates else {
       throw ProviderError.message("Screen target refers to invalid or stale grounding evidence.")
@@ -149,7 +174,8 @@ enum ScreenGrounding {
     switch payload.advanceOn {
     case nil, "click":
       guard candidate.enabled, candidate.source == .accessibility, candidate.actionable else {
-        throw ProviderError.message("Click guidance requires an enabled actionable accessibility control.")
+        throw ProviderError.message(
+          "Click guidance requires an enabled actionable accessibility control.")
       }
     case "manual":
       break

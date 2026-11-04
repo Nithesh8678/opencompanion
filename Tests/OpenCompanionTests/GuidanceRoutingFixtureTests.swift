@@ -258,6 +258,36 @@ struct GuidanceRoutingFixtureTests {
     }
   }
 
+  @Test func manualBadgeAcceptsProductionShapesAndRejectsUnknownShapeWithoutWideningBounds() throws
+  {
+    let fixture = try #require(
+      GuidanceRoutingFixture.scenarios().first { $0.expectation == .manual })
+    var mark = try target(for: fixture)
+    // A subpixel estimate from a real model must retain the same strict badge oracle.
+    mark.x = 849.6 / fixture.pixelSize.width
+    mark.y = 400.14 / fixture.pixelSize.height
+    mark.width = 180 / fixture.pixelSize.width
+    mark.height = 38.22 / fixture.pixelSize.height
+    for shape in [String?.none, "ellipse", "roundedRectangle"] {
+      mark.shape = shape
+      let selection = try GuidanceRoutingOracle.validate(
+        units: [unit(mark)], fixture: fixture, candidates: [])
+      #expect(selection.presentation.shape == shape)
+    }
+    mark.shape = "triangle"
+    #expect(throws: (any Error).self) {
+      try GuidanceRoutingOracle.validate(units: [unit(mark)], fixture: fixture, candidates: [])
+    }
+    mark.shape = "roundedRectangle"
+    mark.x = 0.05
+    mark.y = 0.498
+    mark.width = 0.884
+    mark.height = 0.079
+    #expect(throws: (any Error).self) {
+      try GuidanceRoutingOracle.validate(units: [unit(mark)], fixture: fixture, candidates: [])
+    }
+  }
+
   @Test func readerUsesItsOwnImageDimensionsAndRejectsOldSizeCoordinates() throws {
     let fixture = try #require(GuidanceRoutingFixture.scenarios().first { $0.layout == .reader })
     #expect(fixture.pixelSize == CGSize(width: 1_360, height: 840))
@@ -270,6 +300,38 @@ struct GuidanceRoutingFixtureTests {
     wrongSize.y = 752.0 / 780
     #expect(throws: (any Error).self) {
       try GuidanceRoutingOracle.validate(units: [unit(wrongSize)], fixture: fixture, candidates: [])
+    }
+  }
+
+  @Test func pixelTargetsUseVerifiedFixtureDimensionsAndKeepStrictControlOracles() throws {
+    let fixtures = GuidanceRoutingFixture.scenarios().filter {
+      [.profile, .chart, .status, .reader].contains($0.layout)
+    }
+    #expect(fixtures.count == 4)
+    for fixture in fixtures {
+      let control = try #require(fixture.expectedControl)
+      let normalized = try target(for: fixture)
+      var pixels = ProviderTarget(
+        x: 0, y: 0, width: 0, height: 0, instruction: normalized.instruction,
+        label: normalized.label,
+        shape: fixture.expectation == .manual ? "roundedRectangle" : "ellipse",
+        advanceOn: normalized.advanceOn,
+        pixelBounds: ProviderPixelBounds(
+          x: control.rect.minX, y: control.rect.minY,
+          width: control.rect.width, height: control.rect.height))
+      let selection = try GuidanceRoutingOracle.validate(
+        units: [unit(pixels)], fixture: fixture, candidates: [])
+      #expect(selection.raw.pixelBounds != nil)
+      #expect(selection.resolved.pixelBounds == nil)
+      #expect(selection.resolved.x == normalized.x)
+      #expect(selection.resolved.y == normalized.y)
+      #expect(selection.resolved.width == normalized.width)
+      #expect(selection.resolved.height == normalized.height)
+      #expect(selection.presentation.shape == pixels.shape)
+      pixels.pixelBounds = ProviderPixelBounds(x: 0, y: 0, width: 30, height: 30)
+      #expect(throws: (any Error).self) {
+        try GuidanceRoutingOracle.validate(units: [unit(pixels)], fixture: fixture, candidates: [])
+      }
     }
   }
 

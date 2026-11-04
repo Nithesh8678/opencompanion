@@ -829,8 +829,7 @@ struct ResponseInputPlan: Sendable {
         throw ProviderError.message(
           "The selected screen evidence changed. Capture again before requesting guidance.")
       }
-      let resolved = try ScreenGrounding.resolve(
-        payload, candidates: evidence.groundingCandidates, frameID: evidence.frameID)
+      let resolved = try evidence.resolvingTarget(payload)
       let target = GuidanceTargetPresentation.styled(resolved)
       let cursorPreferences = CursorCompanionPreferences.load()
       if let request = activeGuidanceRequest {

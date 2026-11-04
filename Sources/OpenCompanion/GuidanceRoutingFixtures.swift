@@ -277,7 +277,9 @@ enum GuidanceRoutingOracle {
     // acceptance boundary would reject. Validate every emitted mark first.
     for target in targets {
       let mark = GuidanceTargetPresentation.styled(
-        try ScreenGrounding.resolve(target, candidates: candidates, frameID: fixture.frameID))
+        try ScreenGrounding.resolve(
+          target, candidates: candidates, frameID: fixture.frameID,
+          imagePixelSize: fixture.pixelSize))
       guard mark.instruction.utf8.count <= 32_000,
         (mark.label?.prefix(81).count ?? 0) <= 80,
         [nil, "ellipse", "roundedRectangle"].contains(mark.shape),
@@ -297,7 +299,7 @@ enum GuidanceRoutingOracle {
       throw ProviderError.message("The image-only fixture invented a grounding candidate ID.")
     }
     let resolved = try ScreenGrounding.resolve(
-      raw, candidates: candidates, frameID: fixture.frameID)
+      raw, candidates: candidates, frameID: fixture.frameID, imagePixelSize: fixture.pixelSize)
     let presented = GuidanceTargetPresentation.styled(resolved)
     let permitted = expected.rect.insetBy(
       dx: -max(12, expected.rect.width * 0.5), dy: -max(12, expected.rect.height * 0.5))
@@ -305,7 +307,11 @@ enum GuidanceRoutingOracle {
       x: presented.x * fixture.pixelSize.width, y: presented.y * fixture.pixelSize.height,
       width: presented.width * fixture.pixelSize.width,
       height: presented.height * fixture.pixelSize.height)
-    guard presented.shape == "ellipse", presented.instruction.utf8.count <= 32_000,
+    let supportedShape =
+      fixture.expectation == .click
+      ? presented.shape == "ellipse"
+      : [nil, "ellipse", "roundedRectangle"].contains(presented.shape)
+    guard supportedShape, presented.instruction.utf8.count <= 32_000,
       fixture.expectation != .manual
         || !presented.instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       let label = presented.label?.trimmingCharacters(in: .whitespacesAndNewlines),

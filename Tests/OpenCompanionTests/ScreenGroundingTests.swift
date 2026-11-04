@@ -1,11 +1,178 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import Testing
 
 @testable import OpenCompanion
 
 struct ScreenGroundingTests {
   private let frameID = UUID(uuidString: "A94CA449-D258-46E6-8B09-C232903061A4")!
+
+  @Test func pixelProtocolDecodesWithoutNormalizedCoordinatesAndNativeCodeDividesOnce() throws {
+    let data = Data(
+      #"{"pixelBounds":{"x":120,"y":80,"width":48,"height":40},"instruction":"Choose the control.","label":"Next","shape":"ellipse","advanceOn":"click"}"#
+        .utf8)
+    let raw = try JSONDecoder().decode(ProviderTarget.self, from: data)
+    #expect(raw.x == 0 && raw.y == 0 && raw.width == 0 && raw.height == 0)
+    #expect(raw.pixelBounds == ProviderPixelBounds(x: 120, y: 80, width: 48, height: 40))
+    let resolved = try ScreenGrounding.resolve(
+      raw, candidates: [], frameID: frameID, imagePixelSize: CGSize(width: 1_200, height: 780))
+    #expect(abs(resolved.x - 120.0 / 1_200) < 0.000_000_001)
+    #expect(abs(resolved.y - 80.0 / 780) < 0.000_000_001)
+    #expect(abs(resolved.width - 48.0 / 1_200) < 0.000_000_001)
+    #expect(abs(resolved.height - 40.0 / 780) < 0.000_000_001)
+    #expect(resolved.pixelBounds == nil && resolved.candidateID == nil)
+    #expect(resolved.instruction == raw.instruction && resolved.label == raw.label)
+    #expect(resolved.shape == raw.shape && resolved.advanceOn == raw.advanceOn)
+  }
+
+  @Test func ambiguousPixelCoordinateRepresentationsRejectDuringDecoding() {
+    let pixels = #""pixelBounds":{"x":120,"y":80,"width":48,"height":40}"#
+    for extra in [
+      #""candidateID":"another-authority""#, #""candidateID":null"#,
+      #""x":0"#, #""y":0"#, #""width":0"#, #""height":null"#,
+    ] {
+      let json = "{" + pixels + "," + extra + #", "instruction":"Choose the control."}"#
+      #expect(throws: (any Error).self) {
+        try JSONDecoder().decode(ProviderTarget.self, from: Data(json.utf8))
+      }
+    }
+    #expect(throws: (any Error).self) {
+      try JSONDecoder().decode(
+        ProviderTarget.self,
+        from: Data(#"{"pixelBounds":{"x":1,"y":2,"width":3},"instruction":"Missing height"}"#.utf8))
+    }
+  }
+
+  @Test func pixelsNeedTrustedBoundedImageDimensionsAndUnmixedCandidateAuthority() {
+    let raw = pixelTarget()
+    let invalidSizes: [CGSize?] = [
+      nil, .zero, CGSize(width: -1, height: 780), CGSize(width: CGFloat.nan, height: 780),
+      CGSize(width: 1_200, height: CGFloat.infinity), CGSize(width: 16_385, height: 780),
+      CGSize(width: 1_200.5, height: 780),
+    ]
+    for size in invalidSizes {
+      #expect(throws: ProviderError.self) {
+        try ScreenGrounding.resolve(raw, candidates: [], frameID: frameID, imagePixelSize: size)
+      }
+    }
+    var mixed = raw
+    mixed.candidateID = candidate().id
+    #expect(throws: ProviderError.self) {
+      try ScreenGrounding.resolve(
+        mixed, candidates: [candidate()], frameID: frameID,
+        imagePixelSize: CGSize(width: 1_200, height: 780))
+    }
+    for field in 0..<4 {
+      var normalizedAndPixels = raw
+      switch field {
+      case 0: normalizedAndPixels.x = 0.1
+      case 1: normalizedAndPixels.y = 0.1
+      case 2: normalizedAndPixels.width = 0.1
+      default: normalizedAndPixels.height = 0.1
+      }
+      #expect(throws: ProviderError.self) {
+        try ScreenGrounding.resolve(
+          normalizedAndPixels, candidates: [], frameID: frameID,
+          imagePixelSize: CGSize(width: 1_200, height: 780))
+      }
+    }
+  }
+
+  @Test func negativeNonfiniteAndOutOfImagePixelBoxesReject() {
+    for bounds in [
+      ProviderPixelBounds(x: -1, y: 80, width: 48, height: 40),
+      ProviderPixelBounds(x: 120, y: -1, width: 48, height: 40),
+      ProviderPixelBounds(x: 120, y: 80, width: 0, height: 40),
+      ProviderPixelBounds(x: 120, y: 80, width: 48, height: -40),
+      ProviderPixelBounds(x: 1_180, y: 80, width: 48, height: 40),
+      ProviderPixelBounds(x: 120, y: 770, width: 48, height: 40),
+      ProviderPixelBounds(x: .nan, y: 80, width: 48, height: 40),
+      ProviderPixelBounds(x: 120, y: 80, width: .infinity, height: 40),
+    ] {
+      var raw = pixelTarget()
+      raw.pixelBounds = bounds
+      #expect(throws: ProviderError.self) {
+        try ScreenGrounding.resolve(
+          raw, candidates: [], frameID: frameID, imagePixelSize: CGSize(width: 1_200, height: 780))
+      }
+    }
+  }
+
+  @Test func actualJpegHeaderOwnsPixelDimensionsAndStoredMetadataMustAgree() throws {
+    let jpeg = try encodedImage(width: 1_200, height: 780)
+    #expect(
+      try ScreenImageGeometry.trustedEncodedPixelSize(jpeg) == CGSize(width: 1_200, height: 780))
+    var evidence = imageEvidence(jpeg)
+    let resolved = try evidence.resolvingTarget(pixelTarget())
+    #expect(abs(resolved.height - 40.0 / 780) < 0.000_000_001)
+    evidence.imageWidth = 1_200
+    evidence.imageHeight = 780
+    #expect(try evidence.resolvingTarget(pixelTarget()).pixelBounds == nil)
+    evidence.imageWidth = 1_440
+    #expect(throws: ProviderError.self) { try evidence.resolvingTarget(pixelTarget()) }
+    evidence.imageWidth = 1_200
+    evidence.imageHeight = -1
+    #expect(throws: ProviderError.self) { try evidence.resolvingTarget(pixelTarget()) }
+  }
+
+  @Test func badUnsupportedOversizeAndRotatedEncodedImagesRejectBeforePixelResolution() throws {
+    let invalid = [
+      Data(), Data("not an image".utf8), Data(repeating: 0, count: 12_000_001),
+      try encodedImage(width: 64, height: 40, type: "public.png"),
+      try encodedImage(width: 16_385, height: 1),
+      try encodedImage(width: 64, height: 40, orientation: 6),
+    ]
+    for data in invalid {
+      #expect(throws: ProviderError.self) {
+        try ScreenImageGeometry.trustedEncodedPixelSize(data)
+      }
+      #expect(throws: ProviderError.self) { try imageEvidence(data).resolvingTarget(pixelTarget()) }
+    }
+  }
+
+  @Test func existingNormalizedAndCandidateTargetsNeverReadImageHeaders() throws {
+    var evidence = imageEvidence(Data("Intentionally not an image".utf8))
+    let normalized = target(id: nil)
+    #expect(try evidence.resolvingTarget(normalized).x == normalized.x)
+    evidence.groundingCandidates = [candidate()]
+    #expect(try evidence.resolvingTarget(target(id: candidate().id)).x == candidate().x)
+  }
+
+  private func pixelTarget() -> ProviderTarget {
+    ProviderTarget(
+      x: 0, y: 0, width: 0, height: 0, instruction: "Choose the control.",
+      label: "Next", shape: "ellipse", advanceOn: "click",
+      pixelBounds: ProviderPixelBounds(x: 120, y: 80, width: 48, height: 40))
+  }
+
+  private func imageEvidence(_ data: Data) -> ScreenEvidence {
+    ScreenEvidence(
+      frameID: frameID, revision: 1, capturedAt: 10, displayID: 7,
+      foregroundPID: 123, foregroundName: "Authored fixture",
+      screenRect: CGRect(x: -600, y: 80, width: 1_200, height: 780),
+      image: data, semanticText: "Authored public fixture only")
+  }
+
+  private func encodedImage(
+    width: Int, height: Int, type: String = "public.jpeg", orientation: Int = 1
+  ) throws -> Data {
+    let space = try #require(CGColorSpace(name: CGColorSpace.sRGB))
+    let context = try #require(
+      CGContext(
+        data: nil, width: width, height: height,
+        bitsPerComponent: 8, bytesPerRow: width * 4, space: space,
+        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue))
+    context.setFillColor(CGColor(gray: 0.2, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    let image = try #require(context.makeImage())
+    let data = NSMutableData()
+    let destination = try #require(CGImageDestinationCreateWithData(data, type as CFString, 1, nil))
+    CGImageDestinationAddImage(
+      destination, image, [kCGImagePropertyOrientation: orientation] as CFDictionary)
+    try #require(CGImageDestinationFinalize(destination))
+    return data as Data
+  }
 
   @Test func emptyTitleFallsThroughToTrimmedDescriptionThenHelp() {
     #expect(

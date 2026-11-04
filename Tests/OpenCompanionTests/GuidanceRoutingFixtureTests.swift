@@ -238,6 +238,10 @@ struct GuidanceRoutingFixtureTests {
   @Test func manualScreenQuestionNeverPassesAsAClick() throws {
     let fixture = try #require(
       GuidanceRoutingFixture.scenarios().first { $0.expectation == .manual })
+    #expect(fixture.request.lowercased().contains("explain"))
+    #expect(fixture.request.lowercased().contains("status badge"))
+    #expect(fixture.request.lowercased().contains("point out that badge"))
+    #expect(fixture.expectedControl?.rect == CGRect(x: 850, y: 400, width: 180, height: 38))
     let valid = try target(for: fixture)
     #expect(valid.advanceOn == "manual")
     _ = try GuidanceRoutingOracle.validate(units: [unit(valid)], fixture: fixture, candidates: [])
@@ -245,6 +249,12 @@ struct GuidanceRoutingFixtureTests {
     clicking.advanceOn = "click"
     #expect(throws: (any Error).self) {
       try GuidanceRoutingOracle.validate(units: [unit(clicking)], fixture: fixture, candidates: [])
+    }
+    var emptyInstruction = valid
+    emptyInstruction.instruction = "  \n "
+    #expect(throws: (any Error).self) {
+      try GuidanceRoutingOracle.validate(
+        units: [unit(emptyInstruction)], fixture: fixture, candidates: [])
     }
   }
 

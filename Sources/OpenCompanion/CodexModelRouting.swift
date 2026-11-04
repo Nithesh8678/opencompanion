@@ -60,6 +60,11 @@ enum CodexModelRouting {
       selected = configured
     }
     let matches = catalog.filter { $0.matches(selected) }
+    if isGuidance, matches.count == 1, matches[0].supportsImages == false {
+      throw ProviderError.message(
+        "The selected guidance model \(selected.prefix(120)) does not accept images. Choose an image-capable conversation model in Settings, or select Terra when available for screen guidance."
+      )
+    }
     let effort =
       isGuidance && matches.count == 1
       ? matches.first.flatMap { preferredEffort($0.supportedEfforts) } : nil

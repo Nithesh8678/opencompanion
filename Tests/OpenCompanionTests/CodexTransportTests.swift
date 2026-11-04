@@ -204,6 +204,86 @@ struct CodexTransportTests {
       expected: .init(model: "gpt-5.6-terra", effort: "low", reason: .terraGuidance))
   }
 
+  @Test(arguments: [GuidanceModelPreference.terra, .conversation])
+  func knownTextOnlyGuidanceSelectionFailsBeforeStartingAProviderThread(
+    _ preference: GuidanceModelPreference
+  ) async throws {
+    for configured in ["gpt-5.6-sol", ""] {
+      let fixture = try makeFixture(
+        completeTurn: true, selectedModel: "gpt-5.6-sol",
+        modelCatalog: [catalogModel("gpt-5.6-sol", isDefault: true, modalities: ["text"])])
+      defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+      let provider = CodexProvider()
+      let timeout = Task {
+        try await Task.sleep(for: .seconds(3))
+        await provider.stop()
+      }
+      defer { timeout.cancel() }
+      let routing = TransportRoutingReceiver()
+      let receiver = TransportUnitReceiver()
+      do {
+        try await provider.stream(
+          executable: fixture.path, model: configured,
+          messages: [.init(role: "user", text: "Show me where to click")], context: "",
+          image: nil, scene: nil, guidanceModel: preference,
+          onRouting: { await routing.append($0) },
+          onUnit: { await receiver.append($0.text ?? "") },
+          responsePolicy: ResponsePolicy.resolve(
+            text: "Show me where to click", screenGuidanceEnabled: true))
+        Issue.record("An explicitly text-only model was used for screen guidance.")
+      } catch let error as ProviderError {
+        #expect(error.localizedDescription.contains("does not accept images"))
+        #expect(error.localizedDescription.contains("Settings"))
+      }
+      #expect(await routing.selections.isEmpty)
+      #expect(await receiver.text.isEmpty)
+      let requests = try String(
+        contentsOf: URL(fileURLWithPath: fixture.path + ".requests"), encoding: .utf8
+      ).split(separator: "\n").map { line in
+        try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+      }
+      #expect(requests.contains { $0["method"] as? String == "model/list" })
+      #expect(!requests.contains { $0["method"] as? String == "thread/start" })
+      #expect(!requests.contains { $0["method"] as? String == "turn/start" })
+    }
+  }
+
+  @Test func configuredGuidanceKeepsLegacyCatalogImageCompatibility() async throws {
+    try await assertRouting(
+      models: [catalogModel("gpt-5.6-sol", isDefault: true, modalities: nil)],
+      preference: .conversation,
+      expected: .init(model: "gpt-5.6-sol", effort: "low", reason: .configuredGuidance))
+  }
+
+  @Test func unknownConfiguredAliasesRemainAvailableWithoutInventingCapabilityMetadata() throws {
+    let selected = try CodexModelRouting.select(
+      configuredModel: "configured-unknown-alias",
+      policy: ResponsePolicy.resolve(text: "Show me where to click", screenGuidanceEnabled: true),
+      preference: .conversation, catalog: [])
+    #expect(selected.model == "configured-unknown-alias")
+    #expect(selected.reason == .configuredGuidance && selected.effort == nil)
+  }
+
+  @Test func knownTextOnlyAliasRejectsGuidanceButRemainsValidForConversation() throws {
+    let catalog = [
+      CodexRoutingModel(
+        model: "public-text-only-model", alias: "configured-alias", isDefault: true,
+        supportsImages: false, supportedEfforts: ["low"])
+    ]
+    #expect(throws: ProviderError.self) {
+      try CodexModelRouting.select(
+        configuredModel: "configured-alias",
+        policy: ResponsePolicy.resolve(text: "Show me where to click", screenGuidanceEnabled: true),
+        preference: .conversation, catalog: catalog)
+    }
+    let conversation = try CodexModelRouting.select(
+      configuredModel: "configured-alias",
+      policy: ResponsePolicy.resolve(text: "Hello", screenGuidanceEnabled: true),
+      preference: .terra, catalog: catalog)
+    #expect(conversation.model == "configured-alias")
+    #expect(conversation.reason == .conversation && conversation.effort == nil)
+  }
+
   @Test func ambiguousTerraEntriesAndEntriesBeyondTheRequestedCatalogBoundAreExcluded() async throws
   {
     var models = [

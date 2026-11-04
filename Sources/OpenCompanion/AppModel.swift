@@ -377,6 +377,9 @@ struct ResponseInputPlan: Sendable {
     let config = configuration
     let key = apiKey
     let guidanceModel = guidanceModelPreference
+    let turnProviderMode = providerMode
+    let turnCodexPath = codexPath
+    let turnCodexModel = codexModel
     turn = Task { [weak self] in
       guard let self else { return }
       do {
@@ -420,11 +423,11 @@ struct ResponseInputPlan: Sendable {
           try await self?.acceptTextPreview(value, generation: current)
         }
         self.setGuidanceStage(.provider, generation: current)
-        if self.providerMode == "ChatGPT via Codex" {
+        if turnProviderMode == "ChatGPT via Codex" {
           let adapter = CodexProvider()
           self.codex = adapter
           try await adapter.stream(
-            executable: self.codexPath, model: self.codexModel, messages: history,
+            executable: turnCodexPath, model: turnCodexModel, messages: history,
             context: turnContext,
             image: turnImage, scene: activeScene, guidanceModel: guidanceModel,
             onRouting: { [weak self] selection in

@@ -202,6 +202,7 @@ enum GuidanceRoutingAcceptance {
       "oracleControlKey": fixture.expectedControlKey,
       "clarificationSafetyEnvelopePassed": fixture.expectation == .clarification && error == nil,
       "clarificationContentSemanticallyJudged": false,
+      "instructionContentSemanticallyJudged": false,
     ]
     if fixture.expectation == .clarification {
       let text = units.compactMap(\.text).joined(separator: " ").trimmingCharacters(
@@ -223,6 +224,8 @@ enum GuidanceRoutingAcceptance {
       result["selectedRawTarget"] = targetDiagnostic(selection.raw)
       result["selectedResolvedTarget"] = targetDiagnostic(selection.resolved)
       result["selectedNativeTarget"] = targetDiagnostic(selection.presentation)
+      result["selectedInstructionNonempty"] = !selection.presentation.instruction
+        .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
     if let error { result["error"] = error }
     return result

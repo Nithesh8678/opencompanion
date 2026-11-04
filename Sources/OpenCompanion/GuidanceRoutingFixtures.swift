@@ -183,7 +183,9 @@ struct GuidanceRoutingFixture: Sendable {
       ], usesAccessibilityCandidates: false)
     let status = Self(
       id: "11-heldout-screen-question", foregroundName: "Metrics Console",
-      request: "Point out the failed job on this screen.", frameID: UUID(), layout: .status,
+      request:
+        "Explain what the failed job's status badge means on this screen, and point out that badge.",
+      frameID: UUID(), layout: .status,
       expectedControlKey: "failed-status",
       controls: [
         control(
@@ -304,6 +306,8 @@ enum GuidanceRoutingOracle {
       width: presented.width * fixture.pixelSize.width,
       height: presented.height * fixture.pixelSize.height)
     guard presented.shape == "ellipse", presented.instruction.utf8.count <= 32_000,
+      fixture.expectation != .manual
+        || !presented.instruction.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       let label = presented.label?.trimmingCharacters(in: .whitespacesAndNewlines),
       !label.isEmpty, label.prefix(81).count <= 80,
       let rect = ScreenGuidancePolicy.targetRect(

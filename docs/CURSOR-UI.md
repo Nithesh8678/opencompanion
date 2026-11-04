@@ -32,7 +32,7 @@ pointing animation and reading hold; frame/foreground changes, Stop and a new
 generation clear queued and visible explanations. Text and target narration
 share a bounded per-turn speech deduplicator.
 
-The implementation checkpoint passed 319 Swift tests (279 app, 15 store,
+The implementation checkpoint passed 323 Swift tests (283 app, 15 store,
 25 core), 29 installer/signing tests, a certificate-signed app build and installed
 native cursor acceptance, including source invalidation during flight and the
 stopped reading hold. Expanded live-provider authored-screen acceptance and a

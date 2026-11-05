@@ -1,6 +1,6 @@
 # Explanation overlay: recording evidence and acceptance criteria
 
-**Evidence reviewed and implementation checked: 5 November 2026.** The typed native renderer and passive explanation overlay are implemented. The final full suite passes 440 Swift tests (378 app, 21 store, 41 core), including the label-measurement regression, and a certificate-signed build passed. Corrected real-provider lessons, final native-helper reruns and visual inspection passed the bounded checks below. Clean feature revision `5df4323` is installed and passed a further native-overlay smoke check. This is not full reference parity. Notebook remains the explicit editing path.
+**Evidence reviewed and implementation checked: 5 November 2026.** The typed native renderer and passive explanation overlay are implemented. The final full suite passes 440 Swift tests (378 app, 21 store, 41 core), including the label-measurement regression, and a certificate-signed build passed. Corrected real-provider lessons, final native-helper reruns and visual inspection passed the bounded checks below. Clean feature revision `cb2536d` is installed and passed a further native-overlay smoke check. This is not full reference parity. Notebook remains the explicit editing path.
 
 ## Evidence boundary
 

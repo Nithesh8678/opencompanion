@@ -248,10 +248,10 @@ struct CursorCaptionWord: Equatable, Sendable {
     layer.isGeometryFlipped = true
     layer.masksToBounds = true
     bodyLayer.name = "cursor.body"
-    bodyLayer.bounds = CGRect(x: 0, y: 0, width: 18, height: 22)
+    bodyLayer.bounds = CGRect(origin: .zero, size: CursorCompanionGlyph.size)
     let triangle = CGMutablePath()
     triangle.move(to: CGPoint(x: 1.5, y: 1.5))
-    triangle.addLine(to: CGPoint(x: 16.5, y: 11))
+    triangle.addLine(to: CursorCompanionGlyph.tip)
     triangle.addLine(to: CGPoint(x: 1.5, y: 20.5))
     triangle.closeSubpath()
     bodyLayer.path = triangle

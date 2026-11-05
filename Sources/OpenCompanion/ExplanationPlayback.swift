@@ -6,6 +6,7 @@ struct ExplanationPresentation: Equatable, Sendable {
   let beatID: UUID
   let generation: UInt64
   let document: SceneDocument
+  var focusID: String? = nil
 }
 
 enum ExplanationPlaybackError: Error, Equatable, LocalizedError {
@@ -44,6 +45,7 @@ enum ExplanationPlaybackError: Error, Equatable, LocalizedError {
     let document: SceneDocument?
     let narration: String?
     let context: VoiceNarrationContext?
+    let focusID: String?
   }
   private enum Phase { case queued, awaitingRender, readyForNarration, awaitingNarration }
 
@@ -90,13 +92,16 @@ enum ExplanationPlaybackError: Error, Equatable, LocalizedError {
 
   /// Side-effect-free preflight. The caller must recheck ownership after any await.
   /// `enqueue` repeats this check; there is no reservation across suspension.
-  func checkCapacity(document: SceneDocument?, narration: String?) throws {
+  func checkCapacity(document: SceneDocument?, narration: String?, focusID: String? = nil) throws {
     guard owner != nil else { throw ExplanationPlaybackError.inactive }
     let text = try checkedNarration(narration)
     if let document {
       guard !document.id.isEmpty, document.id.utf8.count <= 256, document.revision >= 0 else {
         throw ExplanationPlaybackError.invalidDocument
       }
+      _ = try SceneFocus.validate(focusID, in: document)
+    } else if focusID != nil {
+      throw ExplanationPlaybackError.invalidDocument
     }
     guard document != nil || text != nil else { return }
     guard beats.count < Self.maximumPendingBeats else {
@@ -112,8 +117,8 @@ enum ExplanationPlaybackError: Error, Equatable, LocalizedError {
     }
   }
 
-  func enqueue(document: SceneDocument?, narration: String?) throws {
-    try checkCapacity(document: document, narration: narration)
+  func enqueue(document: SceneDocument?, narration: String?, focusID: String? = nil) throws {
+    try checkCapacity(document: document, narration: narration, focusID: focusID)
     guard let owner else { throw ExplanationPlaybackError.inactive }
     let text = try checkedNarration(narration)
     guard document != nil || text != nil else { return }
@@ -123,7 +128,7 @@ enum ExplanationPlaybackError: Error, Equatable, LocalizedError {
         id: id, document: document, narration: text,
         context: text.map { _ in
           VoiceNarrationContext(generation: owner.generation, narrationID: id)
-        }))
+        }, focusID: focusID))
     notifyActivity()
     drain()
   }
@@ -203,7 +208,8 @@ enum ExplanationPlaybackError: Error, Equatable, LocalizedError {
       case .queued:
         if let document = beat.document {
           let presentation = ExplanationPresentation(
-            beatID: beat.id, generation: owner.generation, document: document)
+            beatID: beat.id, generation: owner.generation, document: document, focusID: beat.focusID
+          )
           currentPresentation = presentation
           phase = Self.hasRenderableContent(document) ? .awaitingRender : .readyForNarration
           onPresent?(presentation)

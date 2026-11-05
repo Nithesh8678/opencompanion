@@ -99,10 +99,12 @@ struct SpatialSceneLiveDiagnosticsTests {
     let collector = SpatialSceneAcceptanceCollector(started: ProcessInfo.processInfo.systemUptime)
     let unit = ProviderUnit(
       type: "scene", nodes: [.init(id: "part", kind: .rectangle, width: 20, height: 20)],
-      narration: "Public scene narration.")
+      narration: "Public scene narration.", focusID: "part")
     try await collector.receive(unit)
     let accepted = await collector.snapshot()
     #expect(accepted.attachedNarrationUnits == 1 && accepted.textUnits == 1)
+    #expect(accepted.focusedSceneUnits == 1)
+    #expect(accepted.focusTargets == ["part"])
     #expect(accepted.narrationPreview == ["Public scene narration."])
     var invalid = unit
     invalid.narration = String(repeating: "a", count: 32_001)
@@ -112,6 +114,8 @@ struct SpatialSceneLiveDiagnosticsTests {
     } catch {}
     let after = await collector.snapshot()
     #expect(after.document == accepted.document && after.attachedNarrationUnits == 1)
+    #expect(after.focusedSceneUnits == 1)
+    #expect(after.focusTargets == accepted.focusTargets)
     #expect(after.narrationPreview == accepted.narrationPreview && after.sceneUnits == 1)
   }
 

@@ -251,6 +251,15 @@ import SwiftUI
       cursor?.onNarrationCaptionCompleted = { [weak self] context in
         self?.model.completeExplanationCaption(context: context)
       }
+      cursor?.sceneNodeVisitBounds = { [weak self] authority in
+        self?.explanationOverlay?.sceneNodeVisitBounds(authority: authority)
+      }
+      model.onExplanationFocusStarted = { [weak self] context, presentation in
+        self?.explanationOverlay?.beginSceneFocus(context: context, presentation: presentation)
+      }
+      model.onExplanationFocusEnded = { [weak self] context in
+        self?.explanationOverlay?.endSceneFocus(context: context)
+      }
     }
     if !acceptanceMode || liveGuidanceAcceptance {
       screenGuidance = ScreenGuidanceCoordinator(model: model)
@@ -630,6 +639,12 @@ import SwiftUI
     guard let screen else { return }
     if explanationOverlay == nil {
       explanationOverlay = ExplanationOverlay(model: model) { [weak self] in self?.model.stop() }
+      explanationOverlay?.onSceneFocusPoint = { [weak self] authority, point in
+        _ = self?.cursor?.visitSceneNode(authority: authority, point: point)
+      }
+      explanationOverlay?.onSceneFocusEnded = { [weak self] authority in
+        self?.cursor?.cancelSceneNodeVisit(authority: authority)
+      }
     }
     explanationOverlay?.show(document: document, on: screen)
   }

@@ -1,6 +1,7 @@
 import AppKit
 import CompanionCore
 import Foundation
+import SceneKit
 
 /// Opt-in real synthesis and own-view presentation check. It plays two authored
 /// public paragraphs; it neither captures a microphone/desktop nor calls a provider.
@@ -9,6 +10,7 @@ enum ExplanationNarrationAcceptance {
     guard let screen = NSScreen.main ?? NSScreen.screens.first,
       let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier
     else { throw ProviderError.message("A display and foreground baseline are required.") }
+    let physicalPointer = NSEvent.mouseLocation
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
     let observation = Observation()
     let originalSpeech = model.configuration.speechEnabled
@@ -19,9 +21,14 @@ enum ExplanationNarrationAcceptance {
     let oldCaptionUpdate = model.onNarrationCaptionUpdate
     let oldCaptionFinish = model.onNarrationCaptionFinished
     let oldCancelled = model.onCursorCancelled
+    let oldFocusStart = model.onExplanationFocusStarted
+    let oldFocusEnd = model.onExplanationFocusEnded
     let cursor = CursorCompanionCoordinator(
       model: model, observePointer: false, preferences: CursorCompanionPreferences())
     let overlay = ExplanationOverlay(model: model, observeOrbitInput: false) { model.stop() }
+    let oldVisitBounds = cursor.sceneNodeVisitBounds
+    let oldFocusPoint = overlay.onSceneFocusPoint
+    let oldOverlayFocusEnd = overlay.onSceneFocusEnded
     defer {
       for task in observation.snapshotTasks { task.cancel() }
       model.stop()
@@ -35,6 +42,11 @@ enum ExplanationNarrationAcceptance {
       model.onNarrationCaptionUpdate = oldCaptionUpdate
       model.onNarrationCaptionFinished = oldCaptionFinish
       model.onCursorCancelled = oldCancelled
+      model.onExplanationFocusStarted = oldFocusStart
+      model.onExplanationFocusEnded = oldFocusEnd
+      cursor.sceneNodeVisitBounds = oldVisitBounds
+      overlay.onSceneFocusPoint = oldFocusPoint
+      overlay.onSceneFocusEnded = oldOverlayFocusEnd
     }
 
     model.stop()
@@ -61,6 +73,31 @@ enum ExplanationNarrationAcceptance {
     model.onNarrationCaptionUpdate = { cursor.updateNarration($0) }
     model.onNarrationCaptionFinished = { cursor.finishNarration(context: $0) }
     model.onCursorCancelled = { cursor.cancel(generation: $0) }
+    cursor.sceneNodeVisitBounds = { [weak overlay] authority in
+      overlay?.sceneNodeVisitBounds(authority: authority)
+    }
+    model.onExplanationFocusStarted = { context, presentation in
+      overlay.beginSceneFocus(context: context, presentation: presentation)
+    }
+    model.onExplanationFocusEnded = { overlay.endSceneFocus(context: $0) }
+    overlay.onSceneFocusPoint = { [weak cursor] authority, point in
+      guard let stage = observation.stage(for: authority.beatID),
+        authority.focusID == expectedFocusID(stage: stage)
+      else {
+        observation.fail("A native focus callback has no matching authored stage.")
+        return
+      }
+      observation.focusAuthorities[stage] = authority
+      observation.focusPoints[stage] = point
+      observation.focusPointCounts[stage] = min(
+        1_000_000, (observation.focusPointCounts[stage] ?? 0) + 1)
+      if cursor?.visitSceneNode(authority: authority, point: point) == true {
+        observation.focusVisitStages.insert(stage)
+      }
+    }
+    overlay.onSceneFocusEnded = { [weak cursor] authority in
+      cursor?.cancelSceneNodeVisit(authority: authority)
+    }
     cursor.onNarrationCaptionCompleted = { model.completeExplanationCaption(context: $0) }
     model.onExplanationPresentationChanged = { presentation in
       observation.presentations.append(presentation)
@@ -103,6 +140,7 @@ enum ExplanationNarrationAcceptance {
       // Run after AppModel delivers this real range to the cursor. Snapshot work
       // is outside the synthesis delegate callback and never blocks an audio tap.
       if update.kind == .range, observation.requestedSnapshots.insert(stage).inserted {
+        observation.snapshotDeadlines[stage] = ProcessInfo.processInfo.systemUptime + 8
         let task = Task { @MainActor in
           do {
             await Task.yield()
@@ -113,12 +151,56 @@ enum ExplanationNarrationAcceptance {
             else {
               throw ProviderError.message("The spoken scene changed before its own-view snapshot.")
             }
-            let canvas = try ownCanvas(
-              overlay: overlay, documentID: model.explanationDisplayDocument?.id)
-            guard canvas.renderedDocumentRevision == stage else {
-              throw ProviderError.message(
-                "The native snapshot revision does not match its narration.")
+            let arrivalDeadline = ProcessInfo.processInfo.systemUptime + 3
+            var arrival: (SceneFocusAuthority, SceneFocusProjection, RetainedCanvasView, Double)?
+            while arrival == nil {
+              try Task.checkCancellation()
+              guard model.taskGeneration == generation,
+                model.explanationPresentation?.beatID == update.context.narrationID,
+                model.explanationDisplayDocument?.revision == stage,
+                !observation.finishedStages.contains(stage),
+                NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground,
+                pointerUnchanged(physicalPointer)
+              else {
+                throw ProviderError.message(
+                  "Scene focus lost active stage, foreground or physical pointer ownership.")
+              }
+              let canvas = try ownCanvas(
+                overlay: overlay, documentID: model.explanationDisplayDocument?.id)
+              if let authority = observation.focusAuthorities[stage],
+                let projection = canvas.currentSceneFocusProjection,
+                cursor.sceneNodeVisitAuthority == authority,
+                projection.targetID == expectedFocusID(stage: stage),
+                projection.documentID == authority.documentID,
+                projection.documentRevision == stage, projection.generation == generation,
+                projection.renderSerial > 0,
+                authority.presentationLease == overlay.presentationLease,
+                authority.beatID == update.context.narrationID,
+                overlay.sceneNodeVisitBounds(authority: authority) != nil,
+                let target = cursor.sceneNodeVisitTargetPoint,
+                distance(target, projection.globalPoint) <= 0.01
+              {
+                let snapshot = cursor.snapshot
+                let tip = CGPoint(x: snapshot.bodyCenter.x + 7.5, y: snapshot.bodyCenter.y)
+                let error = distance(tip, projection.globalPoint)
+                if snapshot.visible, snapshot.ignoresMouseEvents, !snapshot.canBecomeKey, error <= 1
+                {
+                  _ = try verifyNativeSurface(
+                    authority: authority, projection: projection, canvas: canvas)
+                  arrival = (authority, projection, canvas, error)
+                }
+              }
+              if arrival == nil {
+                guard ProcessInfo.processInfo.systemUptime < arrivalDeadline else {
+                  throw ProviderError.message(
+                    "The cursor did not reach the current native focus surface within three seconds."
+                  )
+                }
+                try await Task.sleep(for: .milliseconds(20))
+              }
             }
+            let (authority, projection, canvas, error) = try require(arrival)
+            try verifyCursorStacking(canvas: canvas)
             let caption = cursor.snapshot
             let text = stage == 1 ? firstNarration : secondNarration
             guard !caption.text.isEmpty, text.hasPrefix(caption.text), caption.ignoresMouseEvents,
@@ -133,7 +215,59 @@ enum ExplanationNarrationAcceptance {
             }
             try data.write(
               to: output.appendingPathComponent("stage-\(stage).png"), options: .atomic)
+            try await cursor.exportSnapshot(
+              to: output.appendingPathComponent("stage-\(stage)-cursor.png"))
+            observation.ownCursorCaptureStages.insert(stage)
+            guard model.taskGeneration == generation,
+              model.explanationPresentation?.beatID == authority.beatID,
+              model.explanationDisplayDocument?.revision == stage,
+              !observation.finishedStages.contains(stage),
+              cursor.sceneNodeVisitAuthority == authority,
+              NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground,
+              pointerUnchanged(physicalPointer),
+              let currentProjection = canvas.currentSceneFocusProjection,
+              currentProjection.targetID == projection.targetID,
+              currentProjection.documentID == authority.documentID,
+              currentProjection.documentRevision == authority.documentRevision,
+              currentProjection.generation == authority.generation,
+              overlay.presentationLease == authority.presentationLease,
+              overlay.sceneNodeVisitBounds(authority: authority) != nil,
+              let currentTarget = cursor.sceneNodeVisitTargetPoint,
+              distance(currentTarget, currentProjection.globalPoint) <= 0.01
+            else {
+              throw ProviderError.message(
+                "The native scene focus changed during its own-window capture.")
+            }
+            try verifyCursorStacking(canvas: canvas)
+            let afterCapture = cursor.snapshot
+            let currentTip = CGPoint(
+              x: afterCapture.bodyCenter.x + 7.5, y: afterCapture.bodyCenter.y)
+            let finalError = distance(currentTip, currentProjection.globalPoint)
+            guard afterCapture.visible, afterCapture.ignoresMouseEvents, !afterCapture.canBecomeKey,
+              finalError <= 1
+            else {
+              throw ProviderError.message(
+                "The cursor no longer points to the captured native focus surface.")
+            }
+            let surfaceID = try verifyNativeSurface(
+              authority: authority, projection: currentProjection, canvas: canvas)
+            observation.focusArrivalStages.insert(stage)
+            observation.focusSurfaceIDs[stage] = surfaceID
+            observation.focusArrivalReceipts[stage] = [
+              "focusID": authority.focusID, "surfaceNodeID": surfaceID,
+              "presentationLease": authority.presentationLease.uuidString,
+              "generation": authority.generation, "beatID": authority.beatID.uuidString,
+              "documentID": authority.documentID, "documentRevision": authority.documentRevision,
+              "renderSerial": currentProjection.renderSerial,
+              "tipErrorLogicalPoints": error,
+              "afterCaptureTipErrorLogicalPoints": finalError,
+              "nativePoint": [
+                "x": currentProjection.globalPoint.x, "y": currentProjection.globalPoint.y,
+              ],
+            ]
             observation.snapshots.insert(stage)
+            observation.cursorAboveExplanationStages.insert(stage)
+            observation.snapshotDeadlines.removeValue(forKey: stage)
             observation.captionUTF16Lengths[stage] = caption.text.utf16.count
           } catch { observation.fail(error.localizedDescription) }
         }
@@ -160,6 +294,14 @@ enum ExplanationNarrationAcceptance {
         try Task.checkCancellation()
         if let failure = observation.failure { throw ProviderError.message(failure) }
         if let error = model.error { throw ProviderError.message(error) }
+        guard
+          !observation.snapshotDeadlines.values.contains(where: {
+            ProcessInfo.processInfo.systemUptime >= $0
+          })
+        else {
+          throw ProviderError.message(
+            "An authored own-window snapshot did not finish within eight seconds.")
+        }
         guard ProcessInfo.processInfo.systemUptime < deadline else {
           throw ProviderError.message(
             "Real narration did not finish both stages within 80 seconds.")
@@ -167,40 +309,54 @@ enum ExplanationNarrationAcceptance {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground else {
           throw ProviderError.message("The explanation changed the foreground baseline.")
         }
+        guard pointerUnchanged(physicalPointer) else {
+          throw ProviderError.message(
+            "The physical pointer baseline changed during authored acceptance.")
+        }
         try await Task.sleep(for: .milliseconds(20))
       }
       try observation.validateOrdering()
       guard observation.renderMatchedBeforeEnqueue == [1, 2], observation.snapshots == [1, 2],
+        observation.focusVisitStages == [1, 2], observation.focusArrivalStages == [1, 2],
+        observation.ownCursorCaptureStages == [1, 2],
+        observation.cursorAboveExplanationStages == [1, 2],
+        observation.focusSurfaceIDs[1] == "blue-sphere",
+        observation.focusSurfaceIDs[2] == "amber-box",
         model.scene == canonical, model.explanationDisplayDocument?.revision == 2,
         !model.voice.hasPendingSpeech,
-        NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground,
+        pointerUnchanged(physicalPointer)
       else {
         throw ProviderError.message(
           "Final narration, native presentation or canonical state differs.")
       }
       let oldPresentation = try require(model.explanationPresentation)
       let oldContext = try require(observation.updates.last?.context)
+      let oldAuthority = try require(observation.focusAuthorities[2])
+      let oldPoint = try require(observation.focusPoints[2])
       let releases = observation.presentations.count
       model.stop()
       model.completeExplanationCaption(context: oldContext)
       model.acknowledgeExplanationRenderSubmitted(oldPresentation)
+      let lateFocusAccepted = cursor.visitSceneNode(authority: oldAuthority, point: oldPoint)
       await Task.yield()
       guard !model.presentingExplanation, model.explanationPresentation == oldPresentation,
         model.scene == canonical, observation.presentations.count == releases,
-        !model.voice.hasPendingSpeech
+        !model.voice.hasPendingSpeech, !lateFocusAccepted, cursor.sceneNodeVisitAuthority == nil
       else {
         throw ProviderError.message(
           "A late completion or render acknowledgment revived stopped playback.")
       }
+      observation.staleFocusAfterStopRejected = true
       try writeResult(
         observation, output: output, passed: true, failure: nil,
         foregroundPreserved: NSWorkspace.shared.frontmostApplication?.processIdentifier
-          == foreground)
+          == foreground, physicalPointerUnchanged: pointerUnchanged(physicalPointer))
     } catch {
       try? writeResult(
         observation, output: output, passed: false, failure: error.localizedDescription,
         foregroundPreserved: NSWorkspace.shared.frontmostApplication?.processIdentifier
-          == foreground)
+          == foreground, physicalPointerUnchanged: pointerUnchanged(physicalPointer))
       throw error
     }
   }
@@ -226,7 +382,7 @@ enum ExplanationNarrationAcceptance {
             fontSize: 18,
             spatial3D: .init(
               labelAnchor: .init(targetID: "blue-sphere", point: .init(x: 0, y: 0.5, z: 0)))),
-        ], narration: firstNarration),
+        ], narration: firstNarration, focusID: "blue-sphere"),
       ProviderUnit(
         type: "scene",
         nodes: [
@@ -240,7 +396,7 @@ enum ExplanationNarrationAcceptance {
             fontSize: 18,
             spatial3D: .init(
               labelAnchor: .init(targetID: "amber-box", point: .init(x: 0, y: 0.45, z: 0)))),
-        ], narration: secondNarration),
+        ], narration: secondNarration, focusID: "amber-box"),
     ]
   }
 
@@ -267,9 +423,70 @@ enum ExplanationNarrationAcceptance {
     return value
   }
 
+  private static func expectedFocusID(stage: Int) -> String {
+    stage == 1 ? "blue-sphere" : "amber-box"
+  }
+
+  private static func pointerUnchanged(_ baseline: CGPoint) -> Bool {
+    distance(NSEvent.mouseLocation, baseline) <= 0.01
+  }
+
+  private static func distance(_ a: CGPoint, _ b: CGPoint) -> Double {
+    hypot(a.x - b.x, a.y - b.y)
+  }
+
+  @MainActor private static func verifyNativeSurface(
+    authority: SceneFocusAuthority, projection: SceneFocusProjection, canvas: RetainedCanvasView
+  ) throws -> String {
+    guard let window = canvas.window, let stage = canvas.spatialStage,
+      canvas.renderedDocumentID == authority.documentID,
+      canvas.renderedDocumentRevision == authority.documentRevision,
+      projection.targetID == authority.focusID, projection.surfaceNodeID == authority.focusID
+    else { throw ProviderError.message("The authored focus has no exact current native mesh.") }
+    let point = canvas.convert(window.convertPoint(fromScreen: projection.globalPoint), from: nil)
+    guard canvas.bounds.contains(point),
+      canvas.visibleSpatialMesh(atCanvasPoint: point) == authority.focusID
+    else {
+      throw ProviderError.message("The projected focus is not on the intended visible native mesh.")
+    }
+    // Independent closest-triangle query over the entire own scene: never
+    // filter the ray to the requested target or use a bounding-box hit.
+    let local = stage.convert(point, from: canvas)
+    guard
+      let hit = stage.hitTest(
+        local,
+        options: [
+          .searchMode: SCNHitTestSearchMode.closest.rawValue, .boundingBoxOnly: false,
+          .clipToZRange: true, .backFaceCulling: true, .ignoreHiddenNodes: true,
+          .categoryBitMask: 1,
+        ]
+      ).first,
+      let target = canvas.spatialNode(id: authority.focusID), hit.node === target,
+      hit.node.geometry != nil, hit.faceIndex >= 0,
+      hit.worldCoordinates.x.isFinite, hit.worldCoordinates.y.isFinite,
+      hit.worldCoordinates.z.isFinite
+    else {
+      throw ProviderError.message(
+        "The whole-scene closest triangle does not belong to the authored focus.")
+    }
+    return authority.focusID
+  }
+
+  @MainActor private static func verifyCursorStacking(canvas: RetainedCanvasView) throws {
+    guard let visual = canvas.window,
+      let cursor = NSApp.windows.first(where: {
+        $0.isVisible && $0.identifier?.rawValue == "org.opencompanion.cursor"
+      }),
+      cursor.level.rawValue > visual.level.rawValue,
+      cursor.ignoresMouseEvents, !cursor.canBecomeKey
+    else {
+      throw ProviderError.message("The passive cursor window is not stacked above its explanation.")
+    }
+  }
+
   @MainActor private static func writeResult(
     _ observation: Observation, output: URL, passed: Bool, failure: String?,
-    foregroundPreserved: Bool
+    foregroundPreserved: Bool, physicalPointerUnchanged: Bool
   ) throws {
     let result: [String: Any] = [
       "result": passed ? "passed" : "failed", "failure": String((failure ?? "").prefix(2_048)),
@@ -277,6 +494,18 @@ enum ExplanationNarrationAcceptance {
       "providerCalled": false, "desktopCaptured": false, "microphoneCaptured": false,
       "audioRecorded": false, "acousticOutputVerified": false, "physicalInputUsed": false,
       "frameRateVerified": false, "foregroundPreserved": foregroundPreserved,
+      "physicalPointerUnchanged": physicalPointerUnchanged, "pointerAutomationUsed": false,
+      "ownWindowCaptured": !observation.ownCursorCaptureStages.isEmpty,
+      "desktopCompositeVerified": false,
+      "ownWindowCaptureStages": observation.ownCursorCaptureStages.sorted(),
+      "cursorAboveExplanationStages": observation.cursorAboveExplanationStages.sorted(),
+      "focusVisitStages": observation.focusVisitStages.sorted(),
+      "focusArrivalStages": observation.focusArrivalStages.sorted(),
+      "focusPointCounts": observation.focusPointCounts.mapKeysToStrings(),
+      "focusArrivals": observation.focusArrivalReceipts.keys.sorted().compactMap {
+        observation.focusArrivalReceipts[$0]
+      },
+      "staleFocusAfterStopRejected": observation.staleFocusAfterStopRejected,
       "canonicalTipAheadOfPresentation": observation.canonicalTipAhead,
       "renderSubmittedBeforeSpeechEnqueue": observation.renderMatchedBeforeEnqueue.sorted(),
       "nativeStageSnapshots": observation.snapshots.sorted(),
@@ -302,9 +531,20 @@ enum ExplanationNarrationAcceptance {
     var snapshots = Set<Int>()
     var captionUTF16Lengths: [Int: Int] = [:]
     var renderMatchedBeforeEnqueue = Set<Int>()
+    var focusAuthorities: [Int: SceneFocusAuthority] = [:]
+    var focusPoints: [Int: CGPoint] = [:]
+    var focusPointCounts: [Int: Int] = [:]
+    var focusSurfaceIDs: [Int: String] = [:]
+    var focusVisitStages = Set<Int>()
+    var focusArrivalStages = Set<Int>()
+    var ownCursorCaptureStages = Set<Int>()
+    var cursorAboveExplanationStages = Set<Int>()
+    var focusArrivalReceipts: [Int: [String: Any]] = [:]
+    var staleFocusAfterStopRejected = false
     var canonicalTipAhead = false
     var failure: String?
     var snapshotTasks: [Task<Void, Never>] = []
+    var snapshotDeadlines: [Int: TimeInterval] = [:]
 
     var finishedStages: Set<Int> { Set(stages(for: .finished)) }
 

@@ -92,10 +92,12 @@ enum ProviderSceneBoundary {
     }
     var candidate = document
     if let title = unit.title { candidate.title = String(title.prefix(200)) }
-    return try candidate.applying(
+    let accepted = try candidate.applying(
       SceneTransaction(
         baseDocumentRevision: baseRevision, operations: operations, surfaceID: document.id),
       limits: limits)
+    _ = try SceneFocus.validate(unit.focusID, in: accepted, limits: limits)
+    return accepted
   }
 
   private static func replacementFields(_ node: SceneNode) -> ScenePatch {

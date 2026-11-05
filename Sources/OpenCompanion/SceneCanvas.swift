@@ -142,6 +142,16 @@ struct SceneCanvas: NSViewRepresentable {
   private var materialKeys: [String: String] = [:]
   private var spatialPoses: [String: ScenePose3D] = [:]
   private let attachmentResolver = SpatialLabelAttachmentResolver()
+  private let focusResolver = SpatialLabelAttachmentResolver()
+  private var sceneFocusTargetID: String?
+  private var sceneFocusAttachment: SpatialLabelAttachment?
+  private var sceneFocusCanvasPoint: CGPoint?
+  private var sceneFocusCameraStamp: [Double]?
+  private var lastSceneFocusProjection: SceneFocusProjection?
+  private var focusAwaitingVisibleFade = false
+  private var focusAppearanceRetryUntil: TimeInterval?
+  private(set) var renderSubmissionSerial: UInt64 = 0
+  var onSceneFocusProjectionChanged: ((SceneFocusProjection?) -> Void)?
   private var attachmentWorkEnabled = true
   private(set) var projectedLabelAttachments: [String: SpatialLabelAttachment] = [:]
   var labelAttachmentDiagnostics: SpatialLabelAttachmentDiagnostics {
@@ -199,6 +209,7 @@ struct SceneCanvas: NSViewRepresentable {
   var onBeginEdit: (() -> Void)?
   var drawing = false {
     didSet {
+      if drawing { clearSceneFocus() }
       stage?.isHidden = drawing
       if !drawing {
         activeStroke.removeAll()
@@ -209,6 +220,7 @@ struct SceneCanvas: NSViewRepresentable {
   var presentation: CanvasPresentation = .editor {
     didSet {
       guard presentation != oldValue else { return }
+      clearSceneFocus()
       cancelOverlayCameraInteraction()
       overlayCameraArmed = false
       overlayCameraAdjusted = false
@@ -328,6 +340,7 @@ struct SceneCanvas: NSViewRepresentable {
   private func visibilityChanged() {
     if window?.isVisible != true || isHiddenOrHasHiddenAncestor {
       cancelOverlayCameraInteraction()
+      clearSceneFocus()
     }
     try? clock?.setPlaying(
       nativePlaying && window?.isVisible == true && !isHiddenOrHasHiddenAncestor
@@ -375,9 +388,11 @@ struct SceneCanvas: NSViewRepresentable {
     if reduceMotion, labelReveal.hasRevealableText {
       advanceSpatialLabels(by: 0, reduceMotion: true)
     }
-    guard nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork,
+    guard
+      nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork
+        || focusAwaitingVisibleFade,
       let window, window.isVisible, !isHiddenOrHasHiddenAncestor,
-      !reduceMotion || attachmentResolver.hasPendingWork
+      !reduceMotion || attachmentResolver.hasPendingWork || focusAwaitingVisibleFade
     else {
       nativeDisplayLink?.isPaused = true
       lastDisplayTime = nil
@@ -399,6 +414,7 @@ struct SceneCanvas: NSViewRepresentable {
     nativeDisplayLink?.isPaused = false
   }
   func stopDisplayLink() {
+    clearSceneFocus()
     overlayCameraArmed = false
     cancelOverlayCameraInteraction()
     nativeDisplayLink?.invalidate()
@@ -417,9 +433,11 @@ struct SceneCanvas: NSViewRepresentable {
     displayCallbackCount = min(1_000_000, displayCallbackCount + 1)
     lastObservedDisplayCallback = now
     guard sender === nativeDisplayLink else { return }
-    guard nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork,
+    guard
+      nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork
+        || focusAwaitingVisibleFade,
       !isHiddenOrHasHiddenAncestor, window?.isVisible == true,
-      !shouldReduceMotion || attachmentResolver.hasPendingWork
+      !shouldReduceMotion || attachmentResolver.hasPendingWork || focusAwaitingVisibleFade
     else {
       sender.isPaused = true
       lastDisplayTime = nil
@@ -434,7 +452,7 @@ struct SceneCanvas: NSViewRepresentable {
     if nativePlaying, !shouldReduceMotion, let time = try? clock?.value(at: now) {
       currentTime = time
       render(document, time: time, selectedID: selection)
-    } else if labelChanged || attachmentResolver.hasPendingWork {
+    } else if labelChanged || attachmentResolver.hasPendingWork || focusAwaitingVisibleFade {
       updateProjectedLabels()
     }
     updateDisplayLink()
@@ -472,10 +490,14 @@ struct SceneCanvas: NSViewRepresentable {
     // can validate at time zero yet exceed world bounds later during playback.
     guard let poses = try? document.worldPoses(at: time),
       let typedPoses = try? document.spatialWorldPoses(at: time)
-    else { return false }
+    else {
+      clearSceneFocus()
+      return false
+    }
     if self.document.id != document.id
       || presentationGeneration.map({ $0 != labelGeneration }) == true
     {
+      clearSceneFocus()
       cancelOverlayCameraInteraction()
       overlayCameraArmed = false
       overlayCameraAdjusted = false
@@ -483,6 +505,7 @@ struct SceneCanvas: NSViewRepresentable {
     }
     attachmentWorkEnabled = true
     displayRenderCount = min(1_000_000, displayRenderCount + 1)
+    renderSubmissionSerial &+= 1
     let documentChanged = self.document != document
     self.document = document
     selection = selectedID
@@ -978,6 +1001,7 @@ struct SceneCanvas: NSViewRepresentable {
     guard let stage else {
       attachmentResolver.reset()
       projectedLabelAttachments.removeAll(keepingCapacity: true)
+      updateSceneFocusProjection()
       return
     }
     var opacity = Dictionary(uniqueKeysWithValues: poses.map { ($0.node.id, $0.effectiveOpacity) })
@@ -986,9 +1010,40 @@ struct SceneCanvas: NSViewRepresentable {
       guard let anchor = pose.node.spatial3D?.labelAnchor else { return nil }
       return .init(labelID: pose.node.id, anchor: anchor)
     }
+    var focusRays = 0
+    if let targetID = sceneFocusTargetID {
+      let current = attachmentResolver.isCurrentContext(
+        documentID: document.id, generation: labelGeneration, stage: stage,
+        nodes: meshNodes, effectiveOpacities: opacity)
+      let reusable = current ? verifiedLabelFocus(targetID: targetID) : nil
+      if let reusable {
+        sceneFocusAttachment = reusable
+      } else {
+        if !focusResolver.isCurrentContext(
+          documentID: document.id, generation: labelGeneration, stage: stage,
+          nodes: meshNodes, effectiveOpacities: opacity)
+        {
+          // A single fresh search has one requested ray plus at most32 surface
+          // rays. It must not add a previous-context revalidation ray to that cap.
+          focusResolver.reset()
+        }
+        let hint = requests.first(where: { $0.anchor.targetID == targetID })?.anchor.point ?? .zero
+        let result = focusResolver.resolve(
+          [.init(labelID: "focus", anchor: .init(targetID: targetID, point: hint))],
+          documentID: document.id, generation: labelGeneration, stage: stage,
+          nodes: meshNodes, geometries: spatialGeometryKeys, effectiveOpacities: opacity,
+          rayLimit: 33)
+        sceneFocusAttachment = result["focus"]
+        focusRays = focusResolver.diagnostics.rayTestsThisLayout
+      }
+    }
     projectedLabelAttachments = attachmentResolver.resolve(
       requests, documentID: document.id, generation: labelGeneration, stage: stage,
-      nodes: meshNodes, geometries: spatialGeometryKeys, effectiveOpacities: opacity)
+      nodes: meshNodes, geometries: spatialGeometryKeys, effectiveOpacities: opacity,
+      rayLimit: SpatialLabelAttachmentResolver.maximumRayTestsPerLayout - focusRays)
+    if let targetID = sceneFocusTargetID, let attachment = verifiedLabelFocus(targetID: targetID) {
+      sceneFocusAttachment = attachment
+    }
     var visible: [(SceneNode, LabelAnchor3D, CATextLayer, CGPoint)] = []
     var items: [SpatialLabelLayout.Item] = []
     CATransaction.begin()
@@ -1085,6 +1140,7 @@ struct SceneCanvas: NSViewRepresentable {
       leader.path = path
     }
     CATransaction.commit()
+    updateSceneFocusProjection()
   }
 
   private func projectedGeometryBounds() -> CGRect? {
@@ -1138,6 +1194,195 @@ struct SceneCanvas: NSViewRepresentable {
   var spatialStage: SCNView? { stage }
   var renderedDocumentID: String { document.id }
   var renderedDocumentRevision: Int { document.revision }
+
+  /// Register one host-selected semantic node. Repeated reads of the same target
+  /// perform no triangle queries; renderer/camera changes refresh the cache.
+  func focusPoint(for nodeID: String) -> SceneFocusProjection? {
+    guard nodeID.utf8.count <= 256, !nodeID.isEmpty, focusSurfaceMounted,
+      let source = document.nodes.first(where: { $0.id == nodeID }),
+      (source.kind == .mesh && source.spatial3D?.geometry != nil)
+        || (source.kind == .group && source.spatial3D != nil)
+        || (source.spatial3D == nil && [.rectangle, .ellipse].contains(source.kind))
+    else {
+      clearSceneFocus()
+      return nil
+    }
+    if sceneFocusTargetID != nodeID {
+      clearSceneFocus()
+      sceneFocusTargetID = nodeID
+      updateProjectedLabels()
+      updateDisplayLink()
+    }
+    return currentSceneFocusProjection
+  }
+
+  /// Pure position/visibility read. The point is regenerated through native
+  /// view/window transforms, so window movement does not reuse old screen coords.
+  var currentSceneFocusProjection: SceneFocusProjection? {
+    guard focusSurfaceMounted, let targetID = sceneFocusTargetID,
+      sceneFocusCameraStamp == currentFocusCameraStamp()
+    else { return nil }
+    let point: CGPoint
+    let surfaceID: String
+    if let attachment = sceneFocusAttachment, attachment.targetID == targetID,
+      let world = attachment.resolvedWorld, let id = attachment.surfaceNodeID,
+      let node = meshNodes[id], Self.visibleForCameraInteraction(node),
+      let stage, !stage.isHidden, let camera = stage.pointOfView
+    {
+      let nativeWorld = SCNVector3(Float(world.x), Float(world.y), Float(world.z))
+      let eye = camera.convertPosition(nativeWorld, from: nil)
+      // SceneKit camera space looks down -Z. Projection alone must not admit
+      // mirrored/behind-camera points even if native hit testing returns one.
+      guard eye.x.isFinite, eye.y.isFinite, eye.z.isFinite, eye.z < 0 else { return nil }
+      let projected = stage.projectPoint(nativeWorld)
+      guard projected.x.isFinite, projected.y.isFinite, projected.z.isFinite,
+        projected.z >= 0, projected.z <= 1,
+        stage.bounds.contains(CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y)))
+      else { return nil }
+      point = stage.convert(CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y)), to: self)
+      surfaceID = id
+    } else if stage == nil, let retained = sceneFocusCanvasPoint,
+      let target = nodeLayers[targetID], Self.visibleFocusLayer(target)
+    {
+      point = retained
+      surfaceID = targetID
+    } else {
+      return nil
+    }
+    guard let window else { return nil }
+    let zero = convert(CGPoint.zero, to: nil)
+    let axisX = convert(CGPoint(x: 1, y: 0), to: nil)
+    let axisY = convert(CGPoint(x: 0, y: 1), to: nil)
+    let transform = CGAffineTransform(
+      a: axisX.x - zero.x, b: axisX.y - zero.y,
+      c: axisY.x - zero.x, d: axisY.y - zero.y, tx: zero.x, ty: zero.y)
+    guard
+      let global = SceneFocusCoordinates.globalPoint(
+        canvasPoint: point, canvasBounds: bounds, canvasToWindow: transform,
+        windowScreenOrigin: window.convertPoint(toScreen: .zero),
+        screenFrames: NSScreen.screens.map(\.frame))
+    else { return nil }
+    return .init(
+      targetID: targetID, surfaceNodeID: surfaceID, documentID: document.id,
+      documentRevision: document.revision, generation: labelGeneration,
+      renderSerial: renderSubmissionSerial, globalPoint: global)
+  }
+
+  func clearSceneFocus() {
+    sceneFocusTargetID = nil
+    sceneFocusAttachment = nil
+    sceneFocusCanvasPoint = nil
+    sceneFocusCameraStamp = nil
+    focusAwaitingVisibleFade = false
+    focusAppearanceRetryUntil = nil
+    focusResolver.reset()
+    publishSceneFocusProjection(nil)
+  }
+
+  /// Counts only native focus rays; label diagnostics remain independently
+  /// available. Both callers share the same 512-ray layout allowance.
+  var sceneFocusRayTests: Int { focusResolver.diagnostics.totalRayTests }
+
+  private var focusSurfaceMounted: Bool {
+    attachmentWorkEnabled && renderSubmissionSerial > 0 && window?.isVisible == true
+      && window?.screen != nil && !isHiddenOrHasHiddenAncestor && !drawing
+  }
+
+  private func verifiedLabelFocus(targetID: String) -> SpatialLabelAttachment? {
+    for id in projectedLabelAttachments.keys.sorted() {
+      if let attachment = projectedLabelAttachments[id], attachment.targetID == targetID,
+        attachment.isResolved
+      {
+        return attachment
+      }
+    }
+    return nil
+  }
+
+  private func updateSceneFocusProjection() {
+    guard let targetID = sceneFocusTargetID else { return }
+    sceneFocusCanvasPoint = stage == nil ? visibleFilledShapePoint(id: targetID) : nil
+    sceneFocusCameraStamp = currentFocusCameraStamp()
+    focusAwaitingVisibleFade = false
+    if let id = sceneFocusAttachment?.surfaceNodeID, let node = meshNodes[id],
+      !Self.visibleForCameraInteraction(node), node.animationKeys.contains("partAppear")
+    {
+      // A newly mounted native part may still have zero presentation opacity.
+      // Retry only its cached projection while this finite appear animation runs.
+      let now = ProcessInfo.processInfo.systemUptime
+      if focusAppearanceRetryUntil == nil { focusAppearanceRetryUntil = now + 0.35 }
+      focusAwaitingVisibleFade = now < (focusAppearanceRetryUntil ?? now)
+    }
+    publishSceneFocusProjection(currentSceneFocusProjection)
+  }
+
+  private func publishSceneFocusProjection(_ projection: SceneFocusProjection?) {
+    guard lastSceneFocusProjection != projection else { return }
+    lastSceneFocusProjection = projection
+    onSceneFocusProjectionChanged?(projection)
+  }
+
+  private func currentFocusCameraStamp() -> [Double]? {
+    guard let stage, let node = stage.pointOfView, let camera = node.camera else { return nil }
+    let matrix = node.simdWorldTransform
+    let projection = camera.projectionTransform
+    return [
+      Double(matrix.columns.0.x), Double(matrix.columns.0.y), Double(matrix.columns.0.z),
+      Double(matrix.columns.0.w), Double(matrix.columns.1.x), Double(matrix.columns.1.y),
+      Double(matrix.columns.1.z), Double(matrix.columns.1.w), Double(matrix.columns.2.x),
+      Double(matrix.columns.2.y), Double(matrix.columns.2.z), Double(matrix.columns.2.w),
+      Double(matrix.columns.3.x), Double(matrix.columns.3.y), Double(matrix.columns.3.z),
+      Double(matrix.columns.3.w), Double(camera.fieldOfView), camera.zNear, camera.zFar,
+      camera.orthographicScale, camera.usesOrthographicProjection ? 1 : 0,
+      Double(projection.m11), Double(projection.m12), Double(projection.m13),
+      Double(projection.m14),
+      Double(projection.m21), Double(projection.m22), Double(projection.m23),
+      Double(projection.m24),
+      Double(projection.m31), Double(projection.m32), Double(projection.m33),
+      Double(projection.m34),
+      Double(projection.m41), Double(projection.m42), Double(projection.m43),
+      Double(projection.m44),
+      Double(stage.bounds.minX), Double(stage.bounds.minY), Double(stage.bounds.width),
+      Double(stage.bounds.height),
+    ]
+  }
+
+  /// Admit real filled ink only. Text/open paths have no native glyph/stroke
+  /// ownership query here, and mixed SceneKit/layer overlap is left unsupported.
+  private func visibleFilledShapePoint(id: String) -> CGPoint? {
+    guard stage == nil, let root = layer, let target = nodeLayers[id] as? CAShapeLayer,
+      let kind = layerKinds[id], [.rectangle, .ellipse].contains(kind),
+      Self.visibleFocusLayer(target),
+      let fill = target.fillColor, fill.alpha > 0, let path = target.path
+    else { return nil }
+    let box = path.boundingBoxOfPath
+    let local = CGPoint(x: box.midX, y: box.midY)
+    guard path.contains(local), target.bounds.contains(local) else { return nil }
+    let native = target.convert(local, to: root)
+    guard bounds.contains(native) else { return nil }
+    // Conservative overlap rejection avoids inventing a pixel owner from the
+    // bounds of text, a hollow stroke, or a differently nested layer hierarchy.
+    for (otherID, other) in nodeLayers where otherID != id && layerKinds[otherID] != .group {
+      guard Self.visibleFocusLayer(other) else { continue }
+      let localOther = other.convert(native, from: root)
+      if other.bounds.contains(localOther) { return nil }
+    }
+    return native
+  }
+
+  private static func visibleFocusLayer(_ layer: CALayer) -> Bool {
+    var current: CALayer? = layer
+    for _ in 0..<128 {
+      guard let value = current else { return true }
+      let presentation = value.presentation() ?? value
+      guard !value.isHidden, !presentation.isHidden,
+        value.opacity.isFinite, value.opacity > 0,
+        presentation.opacity.isFinite, presentation.opacity > 0
+      else { return false }
+      current = value.superlayer
+    }
+    return false
+  }
 
   /// Canvas-local flipped coordinates. This is a native triangle query, not a
   /// claim about cross-application routing through transparent window pixels.
@@ -1322,6 +1567,7 @@ struct SceneCanvas: NSViewRepresentable {
   var hasPendingSpatialLabels: Bool { labelReveal.hasRevealableText }
   var needsDisplayClock: Bool {
     nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork
+      || focusAwaitingVisibleFade
   }
   var hasPendingLabelAttachments: Bool { attachmentResolver.hasPendingWork }
   func resolvePendingLabelAttachments() {

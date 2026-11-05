@@ -158,6 +158,29 @@ import Testing
     #expect(playback.currentPresentation == nil && activity == [true, false])
   }
 
+  @Test func focusFollowsItsImmutableBeatInsteadOfTheFutureCanonicalTarget() throws {
+    let playback = ExplanationPlayback()
+    var presentations: [ExplanationPresentation] = []
+    var contexts: [VoiceNarrationContext] = []
+    playback.onPresent = { presentations.append($0) }
+    playback.onNarration = { context, _ in contexts.append(context) }
+    playback.begin(generation: 5)
+    let first = document()
+    let target = try #require(first.nodes.first { $0.kind != .group })
+    var second = first
+    second.revision += 1
+    var added = target
+    added.id = "different-part"
+    second.nodes.append(added)
+    try playback.enqueue(document: first, narration: "First.", focusID: target.id)
+    try playback.enqueue(document: second, narration: "Second.", focusID: added.id)
+    #expect(presentations.count == 1 && presentations[0].focusID == target.id)
+    #expect(ack(presentations[0], playback))
+    #expect(playback.completeNarration(context: try #require(contexts.first)))
+    #expect(presentations.count == 2 && presentations[1].focusID == added.id)
+    #expect(presentations[0].document == first && presentations[1].document == second)
+  }
+
   @Test func activityCallbackCanInvalidateBeforePresentation() throws {
     let playback = ExplanationPlayback()
     var presentations = 0

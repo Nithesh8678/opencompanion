@@ -65,6 +65,13 @@ enum ExplanationOverlayLayout {
   private var displayID: CGDirectDisplayID?
   private(set) var documentID: String?
   private(set) var presentationLease: UUID?
+  private struct NarratedFocus {
+    let context: VoiceNarrationContext
+    let authority: SceneFocusAuthority
+  }
+  private var narratedFocus: NarratedFocus?
+  var onSceneFocusPoint: ((SceneFocusAuthority, CGPoint) -> Void)?
+  var onSceneFocusEnded: ((SceneFocusAuthority) -> Void)?
 
   init(
     model: AppModel, observeOrbitInput: Bool = true,
@@ -147,6 +154,9 @@ enum ExplanationOverlayLayout {
     canvas = view
     visualPanel = visual
     clearPanel = clear
+    view.onSceneFocusProjectionChanged = { [weak self] projection in
+      self?.publishSceneFocus(projection)
+    }
     let hint = NSTextField(labelWithString: "⌥ Drag to rotate")
     hint.font = .systemFont(ofSize: 11, weight: .medium)
     hint.textColor = .white
@@ -178,6 +188,7 @@ enum ExplanationOverlayLayout {
       },
       onPhaseChange: { [weak self] phase in
         guard let self, let hint = self.orbitHint else { return }
+        if phase != .passive { self.endSceneFocus() }
         hint.stringValue = phase == .dragging ? "Rotating · release ⌥" : "⌥ Drag to rotate"
         hint.isHidden = phase == .passive
         if phase != .passive { self.canvas?.addSubview(hint, positioned: .above, relativeTo: nil) }
@@ -190,6 +201,7 @@ enum ExplanationOverlayLayout {
   }
 
   func dismiss() {
+    endSceneFocus()
     orbitController?.shutdown()
     orbitController = nil
     orbitHint = nil
@@ -197,6 +209,7 @@ enum ExplanationOverlayLayout {
     presentationLease = nil
     displayID = nil
     canvas?.onTimeChange = nil
+    canvas?.onSceneFocusProjectionChanged = nil
     canvas?.stopDisplayLink()
     canvas = nil
     for panel in [visualPanel, clearPanel].compactMap({ $0 }) {
@@ -222,6 +235,67 @@ enum ExplanationOverlayLayout {
     guard presentationLease == lease, self.documentID == documentID else { return }
     dismiss()
     onClear()
+  }
+
+  /// Generated-scene ownership is independent of screen-guidance evidence.
+  /// The model selects a part ID; only this mounted native view supplies points.
+  func beginSceneFocus(context: VoiceNarrationContext, presentation: ExplanationPresentation) {
+    guard context.narrationID == presentation.beatID,
+      context.generation == presentation.generation,
+      let focusID = presentation.focusID, let lease = presentationLease,
+      let model, let canvas, visualPanel?.isVisible == true,
+      canvas.renderedDocumentID == presentation.document.id,
+      canvas.renderedDocumentRevision == presentation.document.revision,
+      let authority = try? SceneFocusAuthority.make(
+        presentationLease: lease, generation: context.generation, beatID: presentation.beatID,
+        document: presentation.document, focusID: focusID),
+      model.explanationFocusIsCurrent(authority), orbitController?.diagnostics.phase == "passive"
+    else { return }
+    if narratedFocus?.authority != authority {
+      endSceneFocus()
+      narratedFocus = .init(context: context, authority: authority)
+    }
+    let projection = canvas.focusPoint(for: focusID)
+    publishSceneFocus(projection)
+  }
+
+  func endSceneFocus(context: VoiceNarrationContext? = nil) {
+    guard let owned = narratedFocus, context == nil || owned.context == context else { return }
+    // Revoke before callbacks or resolver cleanup, both of which may reenter.
+    narratedFocus = nil
+    canvas?.clearSceneFocus()
+    onSceneFocusEnded?(owned.authority)
+  }
+
+  /// A cheap authority/bounds read for the cursor clock. It never captures or
+  /// ray-tests; projection changes arrive from the native scene/camera clock.
+  func sceneNodeVisitBounds(authority: SceneFocusAuthority) -> CGRect? {
+    guard narratedFocus?.authority == authority, presentationLease == authority.presentationLease,
+      availability.canPresent, let model, model.explanationFocusIsCurrent(authority),
+      let visualPanel, visualPanel.isVisible, let canvas,
+      let projection = canvas.currentSceneFocusProjection,
+      projection.targetID == authority.focusID,
+      projection.documentID == authority.documentID,
+      projection.documentRevision == authority.documentRevision,
+      projection.generation == authority.generation,
+      orbitController?.diagnostics.phase == "passive"
+    else { return nil }
+    return visualPanel.frame
+  }
+
+  private func publishSceneFocus(_ projection: SceneFocusProjection?) {
+    guard let owned = narratedFocus else { return }
+    guard let projection,
+      sceneNodeVisitBounds(authority: owned.authority) != nil,
+      projection.targetID == owned.authority.focusID,
+      projection.documentID == owned.authority.documentID,
+      projection.documentRevision == owned.authority.documentRevision,
+      projection.generation == owned.authority.generation
+    else {
+      onSceneFocusEnded?(owned.authority)
+      return
+    }
+    onSceneFocusPoint?(owned.authority, projection.globalPoint)
   }
 
   static func makeVisualPanel(frame: CGRect, canvas: RetainedCanvasView) -> AnnotationPanel {
@@ -276,6 +350,9 @@ enum ExplanationOverlayLayout {
     guard document.id == documentID else {
       dismiss()
       return
+    }
+    if let owned = narratedFocus, !model.explanationFocusIsCurrent(owned.authority) {
+      endSceneFocus()
     }
     guard let canvas else {
       if Self.hasRenderableContent(document),

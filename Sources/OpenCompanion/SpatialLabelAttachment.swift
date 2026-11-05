@@ -80,6 +80,7 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
   private var contextToken = UUID()
   private var contextChanges = 0
   private var rays = 0
+  private var rayLimit = maximumRayTestsPerLayout
   private var candidates = 0
   private var totalRays = 0
   private var totalCacheHits = 0
@@ -109,8 +110,9 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
   func resolve(
     _ requests: [Request], documentID: String, generation: UInt64, stage: SCNView,
     nodes: [String: SCNNode], geometries: [String: Geometry3D],
-    effectiveOpacities: [String: Double]
+    effectiveOpacities: [String: Double], rayLimit: Int = maximumRayTestsPerLayout
   ) -> [String: SpatialLabelAttachment] {
+    self.rayLimit = min(Self.maximumRayTestsPerLayout, max(0, rayLimit))
     rays = 0
     candidates = 0
     if let context, context.documentID == documentID, generation < context.generation {
@@ -198,6 +200,18 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
     return result
   }
 
+  /// Cached attachments may be borrowed only under the exact native context
+  /// which verified them. This performs no triangle queries or cache mutation.
+  func isCurrentContext(
+    documentID: String, generation: UInt64, stage: SCNView,
+    nodes: [String: SCNNode], effectiveOpacities: [String: Double]
+  ) -> Bool {
+    context
+      == makeContext(
+        documentID: documentID, generation: generation, stage: stage,
+        nodes: nodes, effectiveOpacities: effectiveOpacities)
+  }
+
   private func resolveOne(
     _ request: Request, target: SCNNode?, stage: SCNView, nodes: [String: SCNNode],
     geometries: [String: Geometry3D], nativeIDs: [ObjectIdentifier: String],
@@ -260,8 +274,12 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
     let preferred = projected(requested, in: stage)
     var best: Hit?
     var bestDistance = Double.infinity
+    var exhaustedBudget = false
     for (node, sample) in samples {
-      guard rays < Self.maximumRayTestsPerLayout else { break }
+      guard rays < rayLimit else {
+        exhaustedBudget = true
+        break
+      }
       candidates += 1
       let sampleWorld = node.convertPosition(native(sample), to: nil)
       guard
@@ -294,7 +312,7 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
     }
     return unresolved(
       request, world: world,
-      status: rays >= Self.maximumRayTestsPerLayout
+      status: exhaustedBudget
         ? .budgetExhausted : (blocked ? .occluded : .unresolved))
   }
 
@@ -302,7 +320,7 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
     world: SCNVector3, stage: SCNView, nativeIDs: [ObjectIdentifier: String],
     effectiveOpacities: [String: Double]
   ) -> Hit? {
-    guard rays < Self.maximumRayTestsPerLayout, let point = projected(world, in: stage) else {
+    guard rays < rayLimit, let point = projected(world, in: stage) else {
       return nil
     }
     rays += 1

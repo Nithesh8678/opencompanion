@@ -1,6 +1,13 @@
 import CoreGraphics
 import Foundation
 
+/// One geometry definition for rendering and landing the assistant's pointer.
+enum CursorCompanionGlyph {
+  static let size = CGSize(width: 18, height: 22)
+  static let tip = CGPoint(x: 16.5, y: 11)
+  static let tipOffset = CGPoint(x: tip.x - size.width / 2, y: tip.y - size.height / 2)
+}
+
 /// A bounded presentation queue, independent of canonical chat history. Units
 /// have increasing IDs and cumulative UTF-8 prefixes; old or rewritten content
 /// cannot replace text which a different unit already owns.
@@ -296,7 +303,7 @@ struct CursorCompanionPlacement: Sendable, Equatable {
 
 struct CursorCompanionLayout: Sendable {
   static let maximumCaptionWidth: CGFloat = 320
-  static let bodySize = CGSize(width: 18, height: 22)
+  static let bodySize = CursorCompanionGlyph.size
 
   /// `anchor` is the global center of the cursor body. It stays exact when the
   /// body/glow fits; near unsafe display edges it is clamped into the safe area.

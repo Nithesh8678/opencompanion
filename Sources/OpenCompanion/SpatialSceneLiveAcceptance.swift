@@ -105,6 +105,8 @@ enum SpatialSceneLiveAcceptance {
         "routingReason": snapshot.routing?.reason.rawValue ?? "unreported",
         "sceneUnits": snapshot.sceneUnits, "textUnits": snapshot.textUnits,
         "attachedNarrationUnits": snapshot.attachedNarrationUnits,
+        "focusedSceneUnits": snapshot.focusedSceneUnits,
+        "focusTargets": snapshot.focusTargets,
         "connectorUnits": snapshot.connectorUnits,
         "compiledConnectorCount": snapshot.compiledConnectorCount,
         "rejectedPublicUnitRecorded": snapshot.rejectedLine != nil,
@@ -544,6 +546,8 @@ struct SpatialSceneAcceptanceSnapshot: Sendable {
   let document: SceneDocument
   let textUnits: Int
   let attachedNarrationUnits: Int
+  let focusedSceneUnits: Int
+  let focusTargets: [String]
   let narrationPreview: [String]
   let narrationPreviewUTF8Bytes: Int
   let narrationPreviewTruncated: Bool
@@ -611,6 +615,8 @@ actor SpatialSceneAcceptanceCollector {
   private var document = SceneDocument(title: "Public generated 3D lesson", width: 900, height: 560)
   private var textUnits = 0
   private var attachedNarrationUnits = 0
+  private var focusedSceneUnits = 0
+  private var focusTargets: [String] = []
   private var narrationPreview: [String] = []
   private var narrationPreviewUTF8Bytes = 0
   private var narrationPreviewTruncated = false
@@ -666,6 +672,12 @@ actor SpatialSceneAcceptanceCollector {
         attachedNarrationUnits += 1
       }
       document = accepted
+      if let focusID = unit.focusID {
+        focusedSceneUnits += 1
+        // Public fixed-prompt acceptance only. The 96-scene and 256-byte ID
+        // limits bound this evidence without retaining another response body.
+        focusTargets.append(focusID)
+      }
       // Count construction only after the whole native transaction succeeds.
       let connectorCount = unit.connectors?.count ?? 0
       if connectorCount > 0 { connectorUnits += 1 }
@@ -692,6 +704,8 @@ actor SpatialSceneAcceptanceCollector {
   func snapshot() -> SpatialSceneAcceptanceSnapshot {
     .init(
       document: document, textUnits: textUnits, attachedNarrationUnits: attachedNarrationUnits,
+      focusedSceneUnits: focusedSceneUnits,
+      focusTargets: focusTargets,
       narrationPreview: narrationPreview, narrationPreviewUTF8Bytes: narrationPreviewUTF8Bytes,
       narrationPreviewTruncated: narrationPreviewTruncated,
       lastRejectedScene: lastRejectedScene,

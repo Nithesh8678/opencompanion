@@ -12,6 +12,8 @@ struct ProviderInstructionSelectionTests {
       #expect(prompt.contains("spatial3D.geometry"))
       #expect(prompt.contains("baseDocumentRevision"))
       #expect(prompt.contains("atomic valid transaction"))
+      #expect(prompt.contains("focusID"))
+      #expect(prompt.contains("exact stable node ID"))
       #expect(prompt.hasSuffix("\n" + policy.instructions))
       #expect(!prompt.contains(#"{"type":"target"#))
       #expect(!prompt.contains("candidateID"))

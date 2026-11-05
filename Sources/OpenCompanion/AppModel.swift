@@ -164,6 +164,8 @@ struct ResponseInputPlan: Sendable {
   var onNarrationCaptionFinished: ((VoiceNarrationContext) -> Void)?
   var onExplanationNarrationEvent: ((VoiceUtteranceUpdate) -> Void)?
   var onExplanationPresentationChanged: ((ExplanationPresentation) -> Void)?
+  var onExplanationFocusStarted: ((VoiceNarrationContext, ExplanationPresentation) -> Void)?
+  var onExplanationFocusEnded: ((VoiceNarrationContext) -> Void)?
   var onManualGuidanceVoiceStart: (() -> ManualGuidanceStep?)?
   var onPrepareScreenGuidance: ((UInt64, pid_t) async throws -> Void)?
   private(set) var responsePolicy = ResponsePolicy.resolve(text: "", screenGuidanceEnabled: false)
@@ -932,7 +934,8 @@ struct ResponseInputPlan: Sendable {
         throw ProviderError.message("Oversized scene narration.")
       }
       if explanationPlaybackEnabled {
-        try explanationPlayback.checkCapacity(document: document, narration: unit.narration)
+        try explanationPlayback.checkCapacity(
+          document: document, narration: unit.narration, focusID: unit.focusID)
       }
       snapshotUndo()
       committingExplanationScene = true
@@ -946,7 +949,8 @@ struct ResponseInputPlan: Sendable {
       if explanationPlaybackEnabled {
         // Saving and revision checks always use the canonical document. Only
         // the native floating surface consumes these ordered snapshots.
-        try explanationPlayback.enqueue(document: document, narration: unit.narration)
+        try explanationPlayback.enqueue(
+          document: document, narration: unit.narration, focusID: unit.focusID)
       } else {
         explanationPresentation = nil
         if !scenePresentedForTurn {
@@ -1033,6 +1037,10 @@ struct ResponseInputPlan: Sendable {
     guard explanationPlaybackEnabled, context.generation == generation,
       currentExplanationNarration?.context == context
     else { return }
+    if useSpeech { beginExplanationFocus(context: context) }
+    guard explanationPlaybackEnabled, context.generation == generation,
+      currentExplanationNarration?.context == context
+    else { return }
     if useSpeech, voice.speak(text, context: context) {
       guard explanationPlaybackEnabled, context.generation == generation,
         currentExplanationNarration?.context == context
@@ -1051,9 +1059,29 @@ struct ResponseInputPlan: Sendable {
       explanationPlaybackEnabled
     else { return }
     record("explanation.narration.textFallback")
-    if onNarrationCaptionStarted?(text, context, false) != true {
+    let captionAvailable = onNarrationCaptionStarted?(text, context, false) == true
+    beginExplanationFocus(context: context)
+    if !captionAvailable {
       completeExplanationCaption(context: context)
     }
+  }
+
+  private func beginExplanationFocus(context: VoiceNarrationContext) {
+    guard explanationPlaybackEnabled, currentExplanationNarration?.context == context,
+      let presentation = explanationPresentation, presentation.beatID == context.narrationID,
+      presentation.generation == context.generation, presentation.focusID != nil
+    else { return }
+    onExplanationFocusStarted?(context, presentation)
+  }
+
+  func explanationFocusIsCurrent(_ authority: SceneFocusAuthority) -> Bool {
+    guard explanationPlaybackEnabled, generation == authority.generation,
+      currentExplanationNarration?.context.narrationID == authority.beatID,
+      explanationPresentation?.beatID == authority.beatID,
+      explanationPresentation?.focusID == authority.focusID,
+      let document = explanationDisplayDocument
+    else { return false }
+    return authority.matches(document: document)
   }
 
   private func acceptNarrationUpdate(_ update: VoiceUtteranceUpdate) {
@@ -1085,6 +1113,10 @@ struct ResponseInputPlan: Sendable {
     guard explanationPlaybackEnabled, context.generation == generation,
       currentExplanationNarration?.context == context, scene == explanationCanonicalTip
     else { return }
+    onExplanationFocusEnded?(context)
+    guard explanationPlaybackEnabled, context.generation == generation,
+      currentExplanationNarration?.context == context
+    else { return }
     currentExplanationNarration = nil
     _ = explanationPlayback.completeNarration(context: context)
   }
@@ -1106,6 +1138,7 @@ struct ResponseInputPlan: Sendable {
 
   private func cancelExplanationPlayback(stopSpeech: Bool) {
     let owned = explanationPlaybackEnabled
+    let endedFocus = currentExplanationNarration?.context
     explanationPlaybackEnabled = false
     currentExplanationNarration = nil
     explanationRenderWait?.cancel()
@@ -1119,6 +1152,7 @@ struct ResponseInputPlan: Sendable {
         voice.stop()
       }
     }
+    if let endedFocus { onExplanationFocusEnded?(endedFocus) }
   }
 
   func stop() {

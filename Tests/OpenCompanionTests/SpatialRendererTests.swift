@@ -6,6 +6,28 @@ import Testing
 @testable import OpenCompanion
 
 @Suite @MainActor struct SpatialRendererTests {
+  @Test func failedRuntimePoseCannotClaimSuccessfulRenderOrReplaceRetainedNativeIdentity() throws {
+    let view = RetainedCanvasView(frame: CGRect(x: 0, y: 0, width: 620, height: 420))
+    let original = try fixture().validated()
+    #expect(view.render(original, time: 0, selectedID: nil))
+    var body = SceneNode(
+      id: "large-body", kind: .mesh,
+      spatial3D: .init(geometry: .box(width: 1_000, height: 1, depth: 1)))
+    body.parentID = "large-group"
+    body.bindings["spatial3D.transform.scale.x"] = .operation(
+      .add, [.number(1), .operation(.mul, [.number(99), .operation(.sin, [.reference("time")])])])
+    let group = SceneNode(
+      id: "large-group", kind: .group,
+      spatial3D: .init(transform: .init(scale: .init(x: 10, y: 1, z: 1))))
+    let proposal = try SceneDocument(nodes: [body, group]).validated()
+    #expect(!view.render(proposal, time: .pi / 2, selectedID: nil, presentationGeneration: 8))
+    #expect(
+      view.renderedDocumentID == original.id && view.renderedDocumentRevision == original.revision)
+    #expect(view.spatialNode(id: "rotor") != nil && view.spatialNode(id: "large-body") == nil)
+    #expect(view.render(proposal, time: 0, selectedID: nil, presentationGeneration: 8))
+    #expect(view.renderedDocumentID == proposal.id)
+  }
+
   @Test func nativeHierarchyUsesLocalTransformsAndOneParentOpacity() throws {
     let document = try fixture().validated()
     let view = RetainedCanvasView(frame: CGRect(x: 0, y: 0, width: 620, height: 420))

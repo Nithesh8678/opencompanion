@@ -104,6 +104,7 @@ enum SpatialSceneLiveAcceptance {
         "effort": snapshot.routing?.effort ?? "provider-default",
         "routingReason": snapshot.routing?.reason.rawValue ?? "unreported",
         "sceneUnits": snapshot.sceneUnits, "textUnits": snapshot.textUnits,
+        "attachedNarrationUnits": snapshot.attachedNarrationUnits,
         "connectorUnits": snapshot.connectorUnits,
         "compiledConnectorCount": snapshot.compiledConnectorCount,
         "rejectedPublicUnitRecorded": snapshot.rejectedLine != nil,
@@ -542,6 +543,7 @@ enum SpatialSceneContentOracle {
 struct SpatialSceneAcceptanceSnapshot: Sendable {
   let document: SceneDocument
   let textUnits: Int
+  let attachedNarrationUnits: Int
   let narrationPreview: [String]
   let narrationPreviewUTF8Bytes: Int
   let narrationPreviewTruncated: Bool
@@ -608,6 +610,7 @@ struct SpatialRejectedSceneSummary: Codable, Sendable, Equatable {
 actor SpatialSceneAcceptanceCollector {
   private var document = SceneDocument(title: "Public generated 3D lesson", width: 900, height: 560)
   private var textUnits = 0
+  private var attachedNarrationUnits = 0
   private var narrationPreview: [String] = []
   private var narrationPreviewUTF8Bytes = 0
   private var narrationPreviewTruncated = false
@@ -644,21 +647,10 @@ actor SpatialSceneAcceptanceCollector {
     try Task.checkCancellation()
     switch unit.type {
     case "text":
-      guard let text = unit.text, !text.isEmpty, text.utf8.count <= 32_000, textUnits < 64 else {
-        throw ProviderError.message("Invalid or excessive public narration units.")
+      guard let text = unit.text else {
+        throw ProviderError.message("Missing public narration.")
       }
-      textUnits += 1
-      let remaining = 16_384 - narrationPreviewUTF8Bytes
-      if !narrationPreviewTruncated, narrationPreview.count < 64, remaining > 0 {
-        let preview = Self.unicodePrefix(text, maximumUTF8Bytes: remaining)
-        if !preview.isEmpty {
-          narrationPreview.append(preview)
-          narrationPreviewUTF8Bytes += preview.utf8.count
-        }
-        if preview.utf8.count < text.utf8.count { narrationPreviewTruncated = true }
-      } else {
-        narrationPreviewTruncated = true
-      }
+      try receiveNarration(text)
     case "scene":
       guard sceneUnits < 96 else { throw ProviderError.message("Excessive public scene units.") }
       let accepted: SceneDocument
@@ -668,6 +660,10 @@ actor SpatialSceneAcceptanceCollector {
       } catch {
         lastRejectedScene = .init(unit: unit, error: error.localizedDescription)
         throw error
+      }
+      if let narration = unit.narration {
+        try receiveNarration(narration)
+        attachedNarrationUnits += 1
       }
       document = accepted
       // Count construction only after the whole native transaction succeeds.
@@ -695,7 +691,7 @@ actor SpatialSceneAcceptanceCollector {
   }
   func snapshot() -> SpatialSceneAcceptanceSnapshot {
     .init(
-      document: document, textUnits: textUnits,
+      document: document, textUnits: textUnits, attachedNarrationUnits: attachedNarrationUnits,
       narrationPreview: narrationPreview, narrationPreviewUTF8Bytes: narrationPreviewUTF8Bytes,
       narrationPreviewTruncated: narrationPreviewTruncated,
       lastRejectedScene: lastRejectedScene,
@@ -705,6 +701,24 @@ actor SpatialSceneAcceptanceCollector {
       rejectedLine: rejectedLine,
       progressiveGeometryUnits: progressiveGeometryUnits,
       firstSceneMS: firstSceneMS, firstTypedMS: firstTypedMS, routing: routing, timings: timings)
+  }
+
+  private func receiveNarration(_ text: String) throws {
+    guard !text.isEmpty, text.utf8.count <= 32_000, textUnits < 64 else {
+      throw ProviderError.message("Invalid or excessive public narration units.")
+    }
+    textUnits += 1
+    let remaining = 16_384 - narrationPreviewUTF8Bytes
+    if !narrationPreviewTruncated, narrationPreview.count < 64, remaining > 0 {
+      let preview = Self.unicodePrefix(text, maximumUTF8Bytes: remaining)
+      if !preview.isEmpty {
+        narrationPreview.append(preview)
+        narrationPreviewUTF8Bytes += preview.utf8.count
+      }
+      if preview.utf8.count < text.utf8.count { narrationPreviewTruncated = true }
+    } else {
+      narrationPreviewTruncated = true
+    }
   }
 
   private static func unicodePrefix(_ text: String, maximumUTF8Bytes: Int) -> String {

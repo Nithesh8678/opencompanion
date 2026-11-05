@@ -464,10 +464,15 @@ struct SceneCanvas: NSViewRepresentable {
     updateProjectedLabels()
     updateDisplayLink()
   }
-  func render(
+  @discardableResult func render(
     _ document: SceneDocument, time: Double, selectedID: String?,
     presentationGeneration: UInt64? = nil
-  ) {
+  ) -> Bool {
+    // Resolve both graphs before changing the retained native identity. A scene
+    // can validate at time zero yet exceed world bounds later during playback.
+    guard let poses = try? document.worldPoses(at: time),
+      let typedPoses = try? document.spatialWorldPoses(at: time)
+    else { return false }
     if self.document.id != document.id
       || presentationGeneration.map({ $0 != labelGeneration }) == true
     {
@@ -481,9 +486,7 @@ struct SceneCanvas: NSViewRepresentable {
     let documentChanged = self.document != document
     self.document = document
     selection = selectedID
-    guard let poses = try? document.worldPoses(at: time) else { return }
     self.poses = poses
-    guard let typedPoses = try? document.spatialWorldPoses(at: time) else { return }
     spatialPoses = Dictionary(uniqueKeysWithValues: typedPoses.map { ($0.node.id, $0) })
     if let presentationGeneration { labelGeneration = presentationGeneration }
     reconcileLabelReveal()
@@ -589,6 +592,7 @@ struct SceneCanvas: NSViewRepresentable {
         document.title + ". "
           + document.nodes.filter { !$0.text.isEmpty }.map(\.text).joined(separator: ". "))
     }
+    return true
   }
   private struct PathKey: Equatable {
     var kind: SceneNode.Kind
@@ -1133,6 +1137,7 @@ struct SceneCanvas: NSViewRepresentable {
 
   var spatialStage: SCNView? { stage }
   var renderedDocumentID: String { document.id }
+  var renderedDocumentRevision: Int { document.revision }
 
   /// Canvas-local flipped coordinates. This is a native triangle query, not a
   /// claim about cross-application routing through transparent window pixels.

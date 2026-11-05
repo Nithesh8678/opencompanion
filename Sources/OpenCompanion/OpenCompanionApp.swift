@@ -50,6 +50,7 @@ import SwiftUI
       "--guidance-manual-live-acceptance",
       "--spatial-scene-live-acceptance", "--explanation-overlay-acceptance",
       "--explanation-orbit-live-acceptance",
+      "--explanation-narration-acceptance",
     ].contains(where: CommandLine.arguments.contains)
     model = AppModel(acceptanceMode: acceptanceMode)
     model.onOpen = { [weak self] in self?.openRequestedSurface() }
@@ -155,6 +156,23 @@ import SwiftUI
       }
       return
     }
+    if let index = CommandLine.arguments.firstIndex(of: "--explanation-narration-acceptance") {
+      Task {
+        do {
+          guard CommandLine.arguments.count > index + 1 else {
+            throw ProviderError.message("Provide an output directory for narration acceptance.")
+          }
+          try await ExplanationNarrationAcceptance.run(
+            model: model, output: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+          print("EXPLANATION_NARRATION_ACCEPTANCE_PASSED")
+          NSApp.terminate(nil)
+        } catch {
+          print("EXPLANATION_NARRATION_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+      }
+      return
+    }
     if let index = CommandLine.arguments.firstIndex(of: "--explanation-overlay-acceptance") {
       Task { @MainActor in
         do {
@@ -220,6 +238,18 @@ import SwiftUI
       model.onCursorCancelled = { [weak self] generation in
         self?.cursor?.cancel(generation: generation)
         self?.screenGuidance?.cancel()
+      }
+      model.onNarrationCaptionStarted = { [weak self] text, context, nativeSpeech in
+        self?.cursor?.beginNarration(text: text, context: context, nativeSpeech: nativeSpeech)
+          ?? false
+      }
+      model.onNarrationCaptionUpdate = { [weak self] update in self?.cursor?.updateNarration(update)
+      }
+      model.onNarrationCaptionFinished = { [weak self] context in
+        self?.cursor?.finishNarration(context: context)
+      }
+      cursor?.onNarrationCaptionCompleted = { [weak self] context in
+        self?.model.completeExplanationCaption(context: context)
       }
     }
     if !acceptanceMode || liveGuidanceAcceptance {
@@ -379,12 +409,14 @@ import SwiftUI
       .sink { [weak self] _ in
         MainActor.assumeIsolated { self?.registerGlobalShortcuts() }
       }
-      stateSubscription = model.$busy.combineLatest(model.$listening, model.$state).sink {
-        [weak self] busy, listening, state in
+      stateSubscription = model.$busy.combineLatest(
+        model.$listening, model.$state, model.$presentingExplanation
+      ).sink {
+        [weak self] busy, listening, state, presenting in
         MainActor.assumeIsolated {
           guard let self else { return }
           let active =
-            busy || listening || state == "Speaking" || state == "Observing"
+            busy || listening || presenting || state == "Speaking" || state == "Observing"
             || self.model.voice.hasPendingSpeech
           guard active != self.stopKeyRegistered else { return }
           self.stopKeyRegistered = active
@@ -409,7 +441,8 @@ import SwiftUI
           guard let self else { return false }
           let companionFocused = event.window?.identifier?.rawValue == "org.opencompanion.resident"
           let active =
-            self.model.busy || self.model.listening || self.model.state == "Speaking"
+            self.model.busy || self.model.listening || self.model.presentingExplanation
+            || self.model.state == "Speaking"
             || self.model.state == "Observing" || self.model.voice.hasPendingSpeech
           if event.keyCode == 53 && (companionFocused || active) {
             self.voiceShortcut.cancelActive(reason: .manualStop)
@@ -557,7 +590,12 @@ import SwiftUI
   }
 
   private func openRequestedSurface() {
-    if model.section == "Notebook" { showExplanation(focus: true) } else { showWorkspace() }
+    if model.section == "Notebook" {
+      model.endExplanationPlaybackForEditing()
+      showExplanation(focus: true)
+    } else {
+      showWorkspace()
+    }
   }
 
   private func rememberExplanationDisplay(generation: UInt64) {
@@ -575,7 +613,7 @@ import SwiftUI
   }
 
   private func showGeneratedExplanation() {
-    guard let document = model.scene else { return }
+    guard let document = model.explanationDisplayDocument else { return }
     // An explicitly opened editor keeps its editing surface during same-doc
     // revisions. A newly generated document uses the passive presentation.
     if notebookEditorCanvas()?.renderedDocumentID == document.id { return }
@@ -617,6 +655,7 @@ import SwiftUI
   }
 
   private func showExplanation(focus: Bool) {
+    model.endExplanationPlaybackForEditing()
     explanationOverlay?.dismiss()
     if explanationPanel == nil {
       let display = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1280, height: 800)

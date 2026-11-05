@@ -1,0 +1,366 @@
+import AppKit
+import CompanionCore
+import Foundation
+
+/// Opt-in real synthesis and own-view presentation check. It plays two authored
+/// public paragraphs; it neither captures a microphone/desktop nor calls a provider.
+enum ExplanationNarrationAcceptance {
+  @MainActor static func run(model: AppModel, output: URL) async throws {
+    guard let screen = NSScreen.main ?? NSScreen.screens.first,
+      let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    else { throw ProviderError.message("A display and foreground baseline are required.") }
+    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+    let observation = Observation()
+    let originalSpeech = model.configuration.speechEnabled
+    let oldSceneReady = model.onSceneReady
+    let oldPresent = model.onExplanationPresentationChanged
+    let oldSpeech = model.onExplanationNarrationEvent
+    let oldCaptionStart = model.onNarrationCaptionStarted
+    let oldCaptionUpdate = model.onNarrationCaptionUpdate
+    let oldCaptionFinish = model.onNarrationCaptionFinished
+    let oldCancelled = model.onCursorCancelled
+    let cursor = CursorCompanionCoordinator(
+      model: model, observePointer: false, preferences: CursorCompanionPreferences())
+    let overlay = ExplanationOverlay(model: model, observeOrbitInput: false) { model.stop() }
+    defer {
+      for task in observation.snapshotTasks { task.cancel() }
+      model.stop()
+      overlay.shutdown()
+      cursor.shutdown()
+      model.configuration.speechEnabled = originalSpeech
+      model.onSceneReady = oldSceneReady
+      model.onExplanationPresentationChanged = oldPresent
+      model.onExplanationNarrationEvent = oldSpeech
+      model.onNarrationCaptionStarted = oldCaptionStart
+      model.onNarrationCaptionUpdate = oldCaptionUpdate
+      model.onNarrationCaptionFinished = oldCaptionFinish
+      model.onCursorCancelled = oldCancelled
+    }
+
+    model.stop()
+    model.scene = nil
+    model.configuration.speechEnabled = true
+    model.playing = false
+    let generation = model.taskGeneration
+    let policy = ResponsePolicy.resolve(
+      text: "Create a small 3D explanation of two simple parts.", screenGuidanceEnabled: false)
+    guard policy.allowsNotebook, !policy.includesExistingNotebook else {
+      throw ProviderError.message(
+        "The authored request did not acquire new-explanation capability.")
+    }
+    model.configureResponseOutput(policy)
+    cursor.beginResponse(generation: generation)
+    cursor.pointerMoved(to: CGPoint(x: screen.visibleFrame.midX, y: screen.visibleFrame.midY))
+    model.onSceneReady = {
+      guard let document = model.explanationDisplayDocument else { return }
+      overlay.show(document: document, on: screen)
+    }
+    model.onNarrationCaptionStarted = { text, context, native in
+      cursor.beginNarration(text: text, context: context, nativeSpeech: native)
+    }
+    model.onNarrationCaptionUpdate = { cursor.updateNarration($0) }
+    model.onNarrationCaptionFinished = { cursor.finishNarration(context: $0) }
+    model.onCursorCancelled = { cursor.cancel(generation: $0) }
+    cursor.onNarrationCaptionCompleted = { model.completeExplanationCaption(context: $0) }
+    model.onExplanationPresentationChanged = { presentation in
+      observation.presentations.append(presentation)
+      observation.record(
+        kind: "presentation", stage: observation.presentations.count,
+        beatID: presentation.beatID, revision: presentation.document.revision)
+      if observation.presentations.count > 2 {
+        observation.fail("More than two explanation snapshots were released.")
+      }
+    }
+    model.onExplanationNarrationEvent = { update in
+      guard observation.updates.count < 256 else {
+        observation.fail("The native utterance callback trace exceeded its bound.")
+        return
+      }
+      guard let stage = observation.stage(for: update.context.narrationID) else {
+        observation.fail("An utterance has no matching presentation beat.")
+        return
+      }
+      observation.record(
+        kind: update.kind.rawValue, stage: stage, beatID: update.context.narrationID,
+        revision: model.explanationPresentation?.document.revision,
+        rangeEnd: update.revealedUTF16End, observedUptime: update.observedUptime)
+      observation.updates.append(update)
+      if update.kind == .cancelled {
+        observation.fail("Native synthesis cancelled instead of completing the public fixture.")
+      }
+      if update.kind == .enqueued {
+        do {
+          let canvas = try ownCanvas(
+            overlay: overlay, documentID: model.explanationDisplayDocument?.id)
+          guard canvas.renderedDocumentRevision == stage,
+            model.explanationPresentation?.document.revision == stage
+          else {
+            throw ProviderError.message("Speech was enqueued before its exact native revision.")
+          }
+          observation.renderMatchedBeforeEnqueue.insert(stage)
+        } catch { observation.fail(error.localizedDescription) }
+      }
+      // Run after AppModel delivers this real range to the cursor. Snapshot work
+      // is outside the synthesis delegate callback and never blocks an audio tap.
+      if update.kind == .range, observation.requestedSnapshots.insert(stage).inserted {
+        let task = Task { @MainActor in
+          do {
+            await Task.yield()
+            try Task.checkCancellation()
+            guard model.taskGeneration == generation,
+              model.explanationPresentation?.beatID == update.context.narrationID,
+              model.explanationDisplayDocument?.revision == stage
+            else {
+              throw ProviderError.message("The spoken scene changed before its own-view snapshot.")
+            }
+            let canvas = try ownCanvas(
+              overlay: overlay, documentID: model.explanationDisplayDocument?.id)
+            guard canvas.renderedDocumentRevision == stage else {
+              throw ProviderError.message(
+                "The native snapshot revision does not match its narration.")
+            }
+            let caption = cursor.snapshot
+            let text = stage == 1 ? firstNarration : secondNarration
+            guard !caption.text.isEmpty, text.hasPrefix(caption.text), caption.ignoresMouseEvents,
+              !caption.canBecomeKey
+            else {
+              throw ProviderError.message(
+                "Real speech ranges did not drive the owned cursor prefix.")
+            }
+            let bitmap = try canvas.explanationSnapshot()
+            guard let data = bitmap.representation(using: .png, properties: [:]) else {
+              throw ProviderError.message("Could not encode the authored explanation snapshot.")
+            }
+            try data.write(
+              to: output.appendingPathComponent("stage-\(stage).png"), options: .atomic)
+            observation.snapshots.insert(stage)
+            observation.captionUTF16Lengths[stage] = caption.text.utf16.count
+          } catch { observation.fail(error.localizedDescription) }
+        }
+        observation.snapshotTasks.append(task)
+      }
+    }
+
+    do {
+      let units = fixtureUnits()
+      try model.accept(units[0], generation: generation, expectedEvidence: nil)
+      try model.accept(units[1], generation: generation, expectedEvidence: nil)
+      guard model.scene?.revision == 2,
+        model.scene?.nodes.contains(where: { $0.id == "amber-box" }) == true,
+        model.explanationDisplayDocument?.revision == 1, model.presentingExplanation
+      else {
+        throw ProviderError.message("The canonical future revision bypassed ordered presentation.")
+      }
+      observation.canonicalTipAhead = true
+      let canonical = model.scene
+      let deadline = ProcessInfo.processInfo.systemUptime + 80
+      while observation.finishedStages.count < 2 || observation.snapshots.count < 2
+        || model.presentingExplanation
+      {
+        try Task.checkCancellation()
+        if let failure = observation.failure { throw ProviderError.message(failure) }
+        if let error = model.error { throw ProviderError.message(error) }
+        guard ProcessInfo.processInfo.systemUptime < deadline else {
+          throw ProviderError.message(
+            "Real narration did not finish both stages within 80 seconds.")
+        }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground else {
+          throw ProviderError.message("The explanation changed the foreground baseline.")
+        }
+        try await Task.sleep(for: .milliseconds(20))
+      }
+      try observation.validateOrdering()
+      guard observation.renderMatchedBeforeEnqueue == [1, 2], observation.snapshots == [1, 2],
+        model.scene == canonical, model.explanationDisplayDocument?.revision == 2,
+        !model.voice.hasPendingSpeech,
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground
+      else {
+        throw ProviderError.message(
+          "Final narration, native presentation or canonical state differs.")
+      }
+      let oldPresentation = try require(model.explanationPresentation)
+      let oldContext = try require(observation.updates.last?.context)
+      let releases = observation.presentations.count
+      model.stop()
+      model.completeExplanationCaption(context: oldContext)
+      model.acknowledgeExplanationRenderSubmitted(oldPresentation)
+      await Task.yield()
+      guard !model.presentingExplanation, model.explanationPresentation == oldPresentation,
+        model.scene == canonical, observation.presentations.count == releases,
+        !model.voice.hasPendingSpeech
+      else {
+        throw ProviderError.message(
+          "A late completion or render acknowledgment revived stopped playback.")
+      }
+      try writeResult(
+        observation, output: output, passed: true, failure: nil,
+        foregroundPreserved: NSWorkspace.shared.frontmostApplication?.processIdentifier
+          == foreground)
+    } catch {
+      try? writeResult(
+        observation, output: output, passed: false, failure: error.localizedDescription,
+        foregroundPreserved: NSWorkspace.shared.frontmostApplication?.processIdentifier
+          == foreground)
+      throw error
+    }
+  }
+
+  private static let firstNarration =
+    "The blue sphere is the first part. Keep it in view while I finish this short explanation."
+  private static let secondNarration =
+    "The amber box is the second part. The first sphere remains beside it."
+
+  private static func fixtureUnits() -> [ProviderUnit] {
+    [
+      ProviderUnit(
+        type: "scene", title: "Public narration fixture",
+        nodes: [
+          .init(
+            id: "blue-sphere", kind: .mesh, fill: "#4B92DB",
+            spatial3D: .init(
+              transform: .init(position: .init(x: -0.8, y: 0, z: 0)),
+              geometry: .sphere(radius: 0.55, segments: 24))),
+          .init(
+            id: "sphere-label", kind: .text, width: 140, height: 36, text: "Sphere",
+            color: "#FFFFFF",
+            fontSize: 18,
+            spatial3D: .init(
+              labelAnchor: .init(targetID: "blue-sphere", point: .init(x: 0, y: 0.5, z: 0)))),
+        ], narration: firstNarration),
+      ProviderUnit(
+        type: "scene",
+        nodes: [
+          .init(
+            id: "amber-box", kind: .mesh, fill: "#D5A04C",
+            spatial3D: .init(
+              transform: .init(position: .init(x: 0.8, y: 0, z: 0)),
+              geometry: .box(width: 0.9, height: 0.9, depth: 0.9, chamferRadius: 0.04))),
+          .init(
+            id: "box-label", kind: .text, width: 140, height: 36, text: "Box", color: "#FFFFFF",
+            fontSize: 18,
+            spatial3D: .init(
+              labelAnchor: .init(targetID: "amber-box", point: .init(x: 0, y: 0.45, z: 0)))),
+        ], narration: secondNarration),
+    ]
+  }
+
+  @MainActor private static func ownCanvas(
+    overlay: ExplanationOverlay, documentID: String?
+  ) throws -> RetainedCanvasView {
+    guard let documentID, overlay.isVisible(documentID: documentID),
+      let window = NSApp.windows.first(where: {
+        $0.isVisible && $0.identifier?.rawValue == "org.opencompanion.explanation.visual"
+      }), window.ignoresMouseEvents, !window.canBecomeKey, window.sharingType == .none,
+      let canvas = window.contentView as? RetainedCanvasView,
+      canvas.renderedDocumentID == documentID
+    else {
+      throw ProviderError.message(
+        "The matching nonactivating passive native canvas is unavailable.")
+    }
+    return canvas
+  }
+
+  private static func require<T>(_ value: T?) throws -> T {
+    guard let value else {
+      throw ProviderError.message("A required authored narration receipt is missing.")
+    }
+    return value
+  }
+
+  @MainActor private static func writeResult(
+    _ observation: Observation, output: URL, passed: Bool, failure: String?,
+    foregroundPreserved: Bool
+  ) throws {
+    let result: [String: Any] = [
+      "result": passed ? "passed" : "failed", "failure": String((failure ?? "").prefix(2_048)),
+      "publicAuthoredFixture": true, "actualSpeechSynthesisRequested": true,
+      "providerCalled": false, "desktopCaptured": false, "microphoneCaptured": false,
+      "audioRecorded": false, "acousticOutputVerified": false, "physicalInputUsed": false,
+      "frameRateVerified": false, "foregroundPreserved": foregroundPreserved,
+      "canonicalTipAheadOfPresentation": observation.canonicalTipAhead,
+      "renderSubmittedBeforeSpeechEnqueue": observation.renderMatchedBeforeEnqueue.sorted(),
+      "nativeStageSnapshots": observation.snapshots.sorted(),
+      "captionUTF16Lengths": observation.captionUTF16Lengths.mapKeysToStrings(),
+      "startedStages": observation.stages(for: .started),
+      "rangeStages": observation.stages(for: .range),
+      "finishedStages": observation.finishedStages.sorted(),
+      "staleCompletionAndRenderAckAfterStopRejected": passed,
+      "timeline": observation.timeline,
+    ]
+    try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+      .write(
+        to: output.appendingPathComponent("explanation-narration-acceptance.json"), options: .atomic
+      )
+  }
+
+  @MainActor private final class Observation {
+    let started = ProcessInfo.processInfo.systemUptime
+    var presentations: [ExplanationPresentation] = []
+    var updates: [VoiceUtteranceUpdate] = []
+    var timeline: [[String: Any]] = []
+    var requestedSnapshots = Set<Int>()
+    var snapshots = Set<Int>()
+    var captionUTF16Lengths: [Int: Int] = [:]
+    var renderMatchedBeforeEnqueue = Set<Int>()
+    var canonicalTipAhead = false
+    var failure: String?
+    var snapshotTasks: [Task<Void, Never>] = []
+
+    var finishedStages: Set<Int> { Set(stages(for: .finished)) }
+
+    func stage(for id: UUID) -> Int? {
+      presentations.firstIndex(where: { $0.beatID == id }).map { $0 + 1 }
+    }
+    func stages(for kind: VoiceUtteranceUpdate.Kind) -> [Int] {
+      Set(updates.filter { $0.kind == kind }.compactMap { stage(for: $0.context.narrationID) })
+        .sorted()
+    }
+    func fail(_ message: String) { if failure == nil { failure = String(message.prefix(2_048)) } }
+    func record(
+      kind: String, stage: Int, beatID: UUID, revision: Int?, rangeEnd: Int? = nil,
+      observedUptime: Double? = nil
+    ) {
+      guard timeline.count < 256 else {
+        fail("The public callback trace exceeded its bound.")
+        return
+      }
+      var event: [String: Any] = [
+        "kind": kind, "stage": stage, "beatID": beatID.uuidString,
+        "elapsedMS": (ProcessInfo.processInfo.systemUptime - started) * 1_000,
+      ]
+      if let revision { event["revision"] = revision }
+      if let rangeEnd { event["revealedUTF16End"] = rangeEnd }
+      if let observedUptime { event["engineObservedMS"] = (observedUptime - started) * 1_000 }
+      timeline.append(event)
+    }
+    func validateOrdering() throws {
+      for stage in [1, 2] {
+        let events = updates.filter { self.stage(for: $0.context.narrationID) == stage }
+        guard events.filter({ $0.kind == .enqueued }).count == 1,
+          events.filter({ $0.kind == .started }).count == 1,
+          events.contains(where: { $0.kind == .range && $0.revealedUTF16End > 0 }),
+          events.filter({ $0.kind == .finished }).count == 1,
+          !events.contains(where: { $0.kind == .cancelled })
+        else {
+          throw ProviderError.message("Actual native speech events are incomplete or duplicated.")
+        }
+      }
+      func index(_ kind: String, _ stage: Int) -> Int? {
+        timeline.firstIndex { $0["kind"] as? String == kind && $0["stage"] as? Int == stage }
+      }
+      guard let finishOne = index("finished", 1), let presentTwo = index("presentation", 2),
+        let enqueueTwo = index("enqueued", 2), let startTwo = index("started", 2),
+        finishOne < presentTwo, presentTwo < enqueueTwo, enqueueTwo < startTwo,
+        presentations.map(\.document.revision) == [1, 2]
+      else {
+        throw ProviderError.message("The second scene/narration bypassed the first native finish.")
+      }
+    }
+  }
+}
+
+extension Dictionary where Key == Int, Value == Int {
+  fileprivate func mapKeysToStrings() -> [String: Int] {
+    [String: Int](uniqueKeysWithValues: map { (String($0.key), $0.value) })
+  }
+}

@@ -8,7 +8,79 @@ struct VoiceRecognitionUpdate: Sendable {
   let errorMessage: String?
 }
 
-enum VoiceSpeechEvent: Sendable { case started, finished, cancelled }
+enum VoiceSpeechEvent: Sendable, Equatable {
+  case started, finished, cancelled
+  case range(location: Int, length: Int)
+}
+
+struct VoiceNarrationContext: Codable, Hashable, Sendable {
+  let generation: UInt64
+  let narrationID: UUID
+}
+
+/// Native synthesis notifications support presentation coordination. Their
+/// observation times do not establish when sound reaches an output device.
+struct VoiceUtteranceUpdate: Codable, Equatable, Sendable {
+  enum Kind: String, Codable, Sendable { case enqueued, started, range, finished, cancelled }
+  enum CancellationReason: String, Codable, Sendable { case delegate, stop }
+  let token: UUID
+  let context: VoiceNarrationContext
+  let kind: Kind
+  let observedUptime: Double
+  let revealedUTF16End: Int
+  var cancellationReason: CancellationReason? = nil
+}
+
+/// Build once per bounded narration. Delegate ranges are UTF-16 offsets; only
+/// complete Character prefixes may be exposed to the presentation layer.
+struct VoiceNarrationText: Sendable {
+  let text: String
+  let utf16Count: Int
+  private let characterEnds: [Int]
+
+  init?(_ text: String) {
+    guard text.utf8.prefix(32_001).count <= 32_000 else { return nil }
+    self.text = text
+    var count = 0
+    var ends = [0]
+    for character in text {
+      count += String(character).utf16.count
+      ends.append(count)
+    }
+    utf16Count = count
+    characterEnds = ends
+  }
+
+  func revealedEnd(for range: NSRange) -> Int? {
+    guard range.location >= 0, range.location <= utf16Count, range.length > 0,
+      range.length <= utf16Count - range.location
+    else { return nil }
+    return safeEnd(range.location + range.length)
+  }
+
+  func prefix(throughUTF16End end: Int) -> String {
+    let index = String.Index(utf16Offset: safeEnd(end), in: text)
+    return String(text[..<index])
+  }
+
+  private func safeEnd(_ end: Int) -> Int {
+    let bounded = min(utf16Count, max(0, end))
+    var low = 0
+    var high = characterEnds.count
+    while low < high {
+      let middle = low + (high - low) / 2
+      if characterEnds[middle] <= bounded { low = middle + 1 } else { high = middle }
+    }
+    return characterEnds[max(0, low - 1)]
+  }
+}
+
+/// Tests can observe native requests without starting audio or changing privacy
+/// permissions. Production always uses its retained AVSpeechSynthesizer.
+@MainActor struct VoiceSpeechDriver {
+  let speak: (AVSpeechUtterance) -> Void
+  let stop: () -> Void
+}
 
 /// A bounded estimate for activity presentation, not a calibrated sound meter.
 /// At most two channels and 2,048 samples are read from any input buffer.
@@ -145,6 +217,7 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
 
 @MainActor final class VoiceService: NSObject, AVSpeechSynthesizerDelegate {
   private let synthesizer = AVSpeechSynthesizer()
+  private let speechDriver: VoiceSpeechDriver?
   private var engine: AVAudioEngine?
   private var tapInstalled = false
   private var recognition: SFSpeechRecognitionTask?
@@ -153,7 +226,17 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
   private var input = VoiceInputStateMachine()
   private var tailTask: Task<Void, Never>?
   private var microphoneLevelSession: VoiceMicrophoneLevelSession?
-  private var utterances = Set<ObjectIdentifier>()
+  private struct UtteranceRecord {
+    let utterance: AVSpeechUtterance
+    let token: UUID
+    let context: VoiceNarrationContext?
+    let text: VoiceNarrationText
+    var started = false
+    var revealedUTF16End = 0
+    var pendingUTF16End = 0
+    var pendingObservedUptime = 0.0
+  }
+  private var utterances: [ObjectIdentifier: UtteranceRecord] = [:]
   var hasPendingSpeech: Bool { !utterances.isEmpty }
   private nonisolated let utteranceTokens = VoiceUtteranceTokens()
   var onInputState: ((VoiceInputSnapshot) -> Void)?
@@ -164,28 +247,61 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
   var onInputLevel: ((UUID, Double) -> Void)?
   var onState: ((String) -> Void)?
   var onSpeechEvent: ((String) -> Void)?
+  var onUtteranceUpdate: ((VoiceUtteranceUpdate) -> Void)?
 
   override init() {
+    speechDriver = nil
     super.init()
     synthesizer.delegate = self
   }
 
-  func speak(_ text: String) {
-    guard !text.isEmpty, utterances.count < 24 else { return }
+  init(speechDriver: VoiceSpeechDriver) {
+    self.speechDriver = speechDriver
+    super.init()
+    synthesizer.delegate = self
+  }
+
+  convenience init(
+    nativeSpeak: @escaping (AVSpeechUtterance) -> Void, nativeStop: @escaping () -> Void
+  ) {
+    self.init(speechDriver: .init(speak: nativeSpeak, stop: nativeStop))
+  }
+
+  @discardableResult func speak(_ text: String) -> Bool {
+    enqueue(text, context: nil)
+  }
+
+  @discardableResult func speak(_ text: String, context: VoiceNarrationContext) -> Bool {
+    enqueue(text, context: context)
+  }
+
+  private func enqueue(_ text: String, context: VoiceNarrationContext?) -> Bool {
+    guard !text.isEmpty, utterances.count < 24, let boundedText = VoiceNarrationText(text) else {
+      return false
+    }
     let utterance = AVSpeechUtterance(string: text)
     utterance.rate = AVSpeechUtteranceDefaultSpeechRate
     let id = ObjectIdentifier(utterance)
-    guard utteranceTokens.insert(id) != nil else { return }
-    utterances.insert(id)
-    synthesizer.speak(utterance)
+    guard let token = utteranceTokens.insert(id) else { return false }
+    let record = UtteranceRecord(
+      utterance: utterance, token: token, context: context, text: boundedText)
+    utterances[id] = record
+    if let speechDriver { speechDriver.speak(utterance) } else { synthesizer.speak(utterance) }
+    emit(.enqueued, record: record, observedUptime: ProcessInfo.processInfo.systemUptime)
+    return true
   }
 
   func stop() {
+    let cancelled = Array(utterances.values)
     utteranceTokens.removeAll()
     utterances.removeAll()
-    synthesizer.stopSpeaking(at: .immediate)
+    if let speechDriver { speechDriver.stop() } else { synthesizer.stopSpeaking(at: .immediate) }
     cancelInput()
     onState?("Ready")
+    let observed = ProcessInfo.processInfo.systemUptime
+    for record in cancelled {
+      emit(.cancelled, record: record, observedUptime: observed, cancellationReason: .stop)
+    }
   }
 
   nonisolated func speechSynthesizer(
@@ -206,33 +322,90 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
     forwardSpeechEvent(.cancelled, utteranceID: ObjectIdentifier(utterance))
   }
 
-  private nonisolated func forwardSpeechEvent(
+  nonisolated func speechSynthesizer(
+    _ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange,
+    utterance: AVSpeechUtterance
+  ) {
+    forwardSpeechEvent(
+      .range(location: characterRange.location, length: characterRange.length),
+      utteranceID: ObjectIdentifier(utterance))
+  }
+
+  /// Only immutable callback values enter this bridge. Keeping it internal also
+  /// permits background delivery regression tests without posting native input.
+  nonisolated func forwardSpeechEvent(
     _ event: VoiceSpeechEvent, utteranceID: ObjectIdentifier
   ) {
     // Resolve while the delegate's utterance argument is still alive. A queued
     // event cannot match a later object which happens to reuse that address.
     guard let token = utteranceTokens.token(for: utteranceID) else { return }
+    let observed = ProcessInfo.processInfo.systemUptime
     Self.deliverSpeechEvent(event, utteranceID: utteranceID) { [weak self] id, event in
-      self?.acceptSpeechEvent(event, utteranceID: id, token: token)
+      self?.acceptSpeechEvent(event, utteranceID: id, token: token, observedUptime: observed)
     }
   }
 
-  private func acceptSpeechEvent(
-    _ event: VoiceSpeechEvent, utteranceID: ObjectIdentifier, token: UUID
+  /// Value-only admission shared by the native bridge and deterministic tests.
+  func acceptSpeechEvent(
+    _ event: VoiceSpeechEvent, utteranceID: ObjectIdentifier, token: UUID,
+    observedUptime: Double
   ) {
+    guard utteranceTokens.matches(utteranceID, token: token),
+      var record = utterances[utteranceID], record.token == token
+    else { return }
     switch event {
     case .started:
-      guard utteranceTokens.matches(utteranceID, token: token), utterances.contains(utteranceID)
-      else { return }
+      guard !record.started else { return }
+      record.started = true
+      utterances[utteranceID] = record
       onState?("Speaking")
+      guard utteranceTokens.matches(utteranceID, token: token) else { return }
       onSpeechEvent?("audio.synthesizerDidStart")
-    case .finished, .cancelled:
-      guard utteranceTokens.remove(utteranceID, token: token), utterances.remove(utteranceID) != nil
+      guard utteranceTokens.matches(utteranceID, token: token) else { return }
+      emit(.started, record: record, observedUptime: observedUptime)
+      if var latest = utterances[utteranceID], latest.token == token,
+        latest.pendingUTF16End > latest.revealedUTF16End
+      {
+        latest.revealedUTF16End = latest.pendingUTF16End
+        utterances[utteranceID] = latest
+        emit(.range, record: latest, observedUptime: latest.pendingObservedUptime)
+      }
+    case .range(let location, let length):
+      guard let end = record.text.revealedEnd(for: NSRange(location: location, length: length)),
+        end > max(record.revealedUTF16End, record.pendingUTF16End)
       else { return }
+      if !record.started {
+        record.pendingUTF16End = end
+        record.pendingObservedUptime = observedUptime
+        utterances[utteranceID] = record
+        return
+      }
+      record.revealedUTF16End = end
+      utterances[utteranceID] = record
+      emit(.range, record: record, observedUptime: observedUptime)
+    case .finished, .cancelled:
+      guard utteranceTokens.remove(utteranceID, token: token),
+        utterances.removeValue(forKey: utteranceID) != nil
+      else { return }
+      if event == .finished { record.revealedUTF16End = record.text.utf16Count }
       onSpeechEvent?(
         event == .finished ? "audio.synthesizerDidFinish" : "audio.synthesizerDidCancel")
+      emit(
+        event == .finished ? .finished : .cancelled, record: record,
+        observedUptime: observedUptime, cancellationReason: event == .cancelled ? .delegate : nil)
       if utterances.isEmpty && !input.snapshot.phase.isActive { onState?("Ready") }
     }
+  }
+
+  private func emit(
+    _ kind: VoiceUtteranceUpdate.Kind, record: UtteranceRecord, observedUptime: Double,
+    cancellationReason: VoiceUtteranceUpdate.CancellationReason? = nil
+  ) {
+    guard let context = record.context else { return }
+    onUtteranceUpdate?(
+      .init(
+        token: record.token, context: context, kind: kind, observedUptime: observedUptime,
+        revealedUTF16End: record.revealedUTF16End, cancellationReason: cancellationReason))
   }
 
   /// SDK completion blocks are not actor-isolated, even when requested by UI.

@@ -112,7 +112,8 @@ struct WorkspaceView: View {
           .accessibilityLabel("New chat").accessibilityIdentifier("workspace.newChat")
           .help("Start a new conversation")
       }
-      if model.busy || model.listening || model.state == "Speaking" || model.state == "Observing"
+      if model.busy || model.presentingExplanation || model.listening || model.state == "Speaking"
+        || model.state == "Observing"
         || model.voice.hasPendingSpeech
       {
         Text(model.state).font(.system(size: 11)).foregroundStyle(WorkspacePalette.secondary)

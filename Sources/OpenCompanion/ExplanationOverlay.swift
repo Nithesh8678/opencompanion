@@ -77,7 +77,12 @@ enum ExplanationOverlayLayout {
       MainActor.assumeIsolated { self?.scheduleRefresh() }
     }.store(in: &subscriptions)
     NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
-      .sink { [weak self] _ in MainActor.assumeIsolated { self?.dismiss() } }
+      .sink { [weak self] _ in
+        MainActor.assumeIsolated {
+          self?.revokeUnavailableSurface()
+          self?.dismiss()
+        }
+      }
       .store(in: &subscriptions)
     let center = NSWorkspace.shared.notificationCenter
     for event in [
@@ -91,6 +96,7 @@ enum ExplanationOverlayLayout {
           } else {
             self.availability.sessionActive = false
           }
+          self.revokeUnavailableSurface()
           self.dismiss()
         }
       }.store(in: &subscriptions)
@@ -202,6 +208,11 @@ enum ExplanationOverlayLayout {
     clearPanel = nil
   }
 
+  private func revokeUnavailableSurface() {
+    guard let documentID else { return }
+    model?.explanationSurfaceBecameUnavailable(documentID: documentID)
+  }
+
   func shutdown() {
     subscriptions.removeAll()
     dismiss()
@@ -261,7 +272,7 @@ enum ExplanationOverlayLayout {
   }
 
   private func refresh() {
-    guard let documentID, let model, let document = model.scene else { return }
+    guard let documentID, let model, let document = model.explanationDisplayDocument else { return }
     guard document.id == documentID else {
       dismiss()
       return
@@ -282,16 +293,25 @@ enum ExplanationOverlayLayout {
       documentID: document.id, time: model.playTime,
       playing: model.playing && !document.animations.isEmpty,
       speed: model.speed, seekRevision: model.seekRevision)
-    canvas.render(
+    let submitted = canvas.render(
       document, time: canvas.currentTime, selectedID: nil,
       presentationGeneration: model.taskGeneration)
     orbitController?.refresh()
+    // This acknowledges native render submission on a mounted visible surface,
+    // not GPU completion or acoustic playback. Do not acknowledge pre-mount.
+    if submitted, visualPanel?.isVisible == true, let presentation = model.explanationPresentation,
+      presentation.document == document
+    {
+      model.acknowledgeExplanationRenderSubmitted(presentation)
+    }
   }
 
   private func orbitAuthority() -> ExplanationOrbitState.Authority? {
     guard let lease = presentationLease, let documentID, let displayID, let model,
-      model.scene?.id == documentID,
-      model.scene?.nodes.contains(where: { $0.kind == .mesh && $0.spatial3D?.geometry != nil })
+      model.explanationDisplayDocument?.id == documentID,
+      model.explanationDisplayDocument?.nodes.contains(where: {
+        $0.kind == .mesh && $0.spatial3D?.geometry != nil
+      })
         == true,
       NSScreen.screens.contains(where: {
         ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value

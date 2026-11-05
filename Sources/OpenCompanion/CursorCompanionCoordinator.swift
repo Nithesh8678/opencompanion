@@ -66,6 +66,8 @@ struct CursorCompanionSnapshot: Codable {
   private var guidanceExplanationEvidence: ScreenEvidenceIdentity?
   private var phase = NotchActivityPhase.idle
   private var reveal = CursorTextReveal()
+  private var narration: CursorNarrationCaption?
+  var onNarrationCaptionCompleted: ((VoiceNarrationContext) -> Void)?
   private var highestAcceptedPreviewID: Int?
   private var guidance: Guidance?
   private var lastPlacement: CursorCompanionPlacement?
@@ -112,6 +114,9 @@ struct CursorCompanionSnapshot: Codable {
       MainActor.assumeIsolated {
         guard let self else { return }
         self.preferences = .load()
+        if !self.preferences.enabled || !self.preferences.showReplies {
+          self.abandonNarration()
+        }
         if !self.preferences.showReplies {
           self.clearGuidanceExplanation()
         }
@@ -220,7 +225,8 @@ struct CursorCompanionSnapshot: Codable {
   }
 
   @discardableResult func accept(_ preview: ProviderTextPreview, generation: UInt64) -> Bool {
-    guard self.generation == generation, stage == .response, !isGuidance, preferences.enabled,
+    guard narration == nil, self.generation == generation, stage == .response, !isGuidance,
+      preferences.enabled,
       preferences.showReplies
     else { return true }
     let accepted = reveal.append(
@@ -245,6 +251,110 @@ struct CursorCompanionSnapshot: Codable {
     view.cancelCaptionDismissal()
     wake()
     return true
+  }
+
+  /// The caller starts this lease before enqueuing native speech. An empty
+  /// native caption remains owned until a real range or explicit finish arrives.
+  @discardableResult func beginNarration(
+    text: String, context: VoiceNarrationContext, nativeSpeech: Bool
+  ) -> Bool {
+    guard preferences.enabled, preferences.showReplies, !suspended,
+      generation == context.generation, model?.taskGeneration == context.generation,
+      stage == .response, !isGuidance,
+      let next = CursorNarrationCaption(text: text, context: context, nativeSpeech: nativeSpeech)
+    else { return false }
+    if let narration, narration.context == context, narration.text == text,
+      narration.nativeSpeech == nativeSpeech
+    {
+      return true
+    }
+    abandonNarration()
+    narration = next
+    reveal.reset()
+    highestAcceptedPreviewID = nil
+    word = nil
+    visibleText = ""
+    cancelDismissal()
+    view.reset()
+    phase = .thinking
+    renderNow()
+    wake()
+    return true
+  }
+
+  func updateNarration(_ update: VoiceUtteranceUpdate) {
+    guard generation == update.context.generation,
+      model?.taskGeneration == update.context.generation,
+      var owned = narration, owned.context == update.context, owned.nativeSpeech
+    else { return }
+    let previous = owned.visibleText
+    let changed = owned.receive(update)
+    narration = owned
+    if owned.cancelled {
+      // The owner may now explicitly restart the same text in local mode.
+      abandonNarration()
+      renderNow()
+      wake()
+      return
+    }
+    guard changed else { return }
+    word = nextWord(previous: previous, current: owned.visibleText)
+    phase = .speaking
+    cancelDismissal()
+    view.cancelCaptionDismissal()
+    renderNow()
+    wake()
+  }
+
+  func finishNarration(context: VoiceNarrationContext) {
+    guard generation == context.generation, model?.taskGeneration == context.generation,
+      let owned = narration, owned.context == context, owned.nativeSpeech
+    else { return }
+    if owned.visibleText != owned.text {
+      word = nextWord(previous: owned.visibleText, current: owned.text)
+    }
+    narration = nil
+    settleNarrationText(owned.text)
+    renderNow()
+    finishIfReady()
+    wake()
+  }
+
+  private func settleNarrationText(_ text: String) {
+    reveal.reset()
+    _ = reveal.append(unitID: 0, text: text, isComplete: true)
+    _ = reveal.fastForward()
+    highestAcceptedPreviewID = 0
+  }
+
+  private func dispatchNarrationCompletion(_ context: VoiceNarrationContext) {
+    // The callback may synchronously begin another stage. Deliver only after
+    // the current state transition/render submission has completely returned.
+    Task { @MainActor [weak self] in self?.onNarrationCaptionCompleted?(context) }
+  }
+
+  private func abandonNarration() {
+    guard var owned = narration else { return }
+    narration = nil
+    reveal.reset()
+    highestAcceptedPreviewID = nil
+    word = nil
+    visibleText = ""
+    view.reset()
+    if let context = owned.takeLocalCompletion(at: 0, force: true) {
+      dispatchNarrationCompletion(context)
+    }
+  }
+
+  private func completeLocalNarrationAfterSubmission(at uptime: TimeInterval) {
+    guard var owned = narration else { return }
+    owned.didSubmitCaption(at: uptime, reduceMotion: reduceMotion)
+    let context = owned.takeLocalCompletion(at: uptime)
+    narration = owned
+    guard let context else { return }
+    narration = nil
+    settleNarrationText(owned.text)
+    dispatchNarrationCompletion(context)
   }
 
   /// Called only after OverlayHost accepted the target against the selected
@@ -362,7 +472,9 @@ struct CursorCompanionSnapshot: Codable {
     case .response:
       phase =
         model.state == "Speaking" && model.voice.hasPendingSpeech
-        ? .speaking : (model.busy || model.voice.hasPendingSpeech ? .thinking : .idle)
+        ? .speaking
+        : (model.busy || model.voice.hasPendingSpeech || model.presentingExplanation
+          ? .thinking : .idle)
       finishIfReady()
     case nil: break
     }
@@ -372,6 +484,7 @@ struct CursorCompanionSnapshot: Codable {
 
   private func finishIfReady() {
     guard stage == .response, let model, !model.busy, !model.voice.hasPendingSpeech,
+      !model.presentingExplanation, narration == nil,
       !reveal.hasPending, guidance == nil, dismissal == nil
     else { return }
     phase = .idle
@@ -398,6 +511,7 @@ struct CursorCompanionSnapshot: Codable {
   }
 
   private func clearPresentation() {
+    abandonNarration()
     if guidance != nil {
       x = NotchSpring(lastBodyCenter.x, frequency: 38)
       y = NotchSpring(lastBodyCenter.y, frequency: 38)
@@ -466,15 +580,27 @@ struct CursorCompanionSnapshot: Codable {
       }
     }
     if guidance == nil {
-      let previous = reveal.visibleText
-      let previousID = reveal.currentUnitID
-      if reveal.advance(by: min(elapsed, 0.1), reduceMotion: reduceMotion) {
-        word = nextWord(previous: previous, previousID: previousID, reveal: reveal)
+      if var owned = narration {
+        let previous = owned.visibleText
+        if owned.advance(by: min(elapsed, 0.1), reduceMotion: reduceMotion) {
+          word = nextWord(previous: previous, current: owned.visibleText)
+        }
+        narration = owned
+      } else {
+        let previous = reveal.visibleText
+        let previousID = reveal.currentUnitID
+        if reveal.advance(by: min(elapsed, 0.1), reduceMotion: reduceMotion) {
+          word = nextWord(previous: previous, previousID: previousID, reveal: reveal)
+        }
       }
     }
     finishIfReady()
     renderNow()
-    if guidance == nil && x.isSettled && y.isSettled && !reveal.hasRevealableText {
+    completeLocalNarrationAfterSubmission(at: ProcessInfo.processInfo.systemUptime)
+    if guidance == nil && x.isSettled && y.isSettled
+      && !(narration?.hasRevealableText ?? reveal.hasRevealableText)
+      && narration?.needsLocalCompletionTick != true
+    {
       stopClock()
     }
   }
@@ -484,6 +610,9 @@ struct CursorCompanionSnapshot: Codable {
     guard preferences.enabled, !suspended,
       !exclusionFrames().contains(where: { $0.contains(pointer) })
     else {
+      // A hidden view has no display-link callbacks to finish local pacing.
+      // Release its gate rather than requiring the user to move the pointer.
+      abandonNarration()
       panel.orderOut(nil)
       return
     }
@@ -492,7 +621,7 @@ struct CursorCompanionSnapshot: Codable {
     var rotation: CGFloat = 0
     var text =
       preferences.showReplies && (!isGuidance || showingGuidanceExplanation)
-      ? reveal.visibleText : ""
+      ? (narration?.visibleText ?? reveal.visibleText) : ""
     if let guidance {
       let progress = reduceMotion ? 1 : min(1, (now - guidance.began) / guidance.flight.duration)
       center = guidance.flight.point(at: progress)
@@ -604,6 +733,12 @@ struct CursorCompanionSnapshot: Codable {
     let appended =
       previousID == reveal.currentUnitID && reveal.visibleText.hasPrefix(previous)
       ? String(reveal.visibleText.dropFirst(previous.count)) : reveal.visibleText
+    return CursorCaptionWord(serial: wordSerial, suffix: appended)
+  }
+
+  private func nextWord(previous: String, current: String) -> CursorCaptionWord {
+    wordSerial &+= 1
+    let appended = current.hasPrefix(previous) ? String(current.dropFirst(previous.count)) : current
     return CursorCaptionWord(serial: wordSerial, suffix: appended)
   }
 

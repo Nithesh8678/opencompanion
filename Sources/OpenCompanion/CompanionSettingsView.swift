@@ -204,7 +204,9 @@ import SwiftUI
           }
           Spacer()
           Button("Stop response", action: model.stop)
-            .disabled(!model.busy && !model.listening && model.state != "Speaking")
+            .disabled(
+              !model.busy && !model.listening && !model.presentingExplanation
+                && model.state != "Speaking")
         }
       }
       settingsGroup("Speech recognition") {

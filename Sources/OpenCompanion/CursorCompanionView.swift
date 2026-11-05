@@ -4,6 +4,7 @@ import CoreText
 import QuartzCore
 
 struct CursorCaptionWord: Equatable, Sendable {
+  static let fadeDuration: TimeInterval = 0.14
   let serial: UInt64
   let suffix: String
 }
@@ -160,7 +161,7 @@ struct CursorCaptionWord: Equatable, Sendable {
         let fade = CABasicAnimation(keyPath: "opacity")
         fade.fromValue = 0
         fade.toValue = 1
-        fade.duration = 0.14
+        fade.duration = CursorCaptionWord.fadeDuration
         fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
         wordView.layer?.add(fade, forKey: "cursor.wordReveal")
       }

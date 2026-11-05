@@ -8,6 +8,9 @@ enum ProviderSceneBoundary {
     _ unit: ProviderUnit, to document: SceneDocument, baseRevision: Int,
     limits: SceneLimits = .init()
   ) throws -> SceneDocument {
+    if let narration = unit.narration, narration.utf8.count > 32_000 {
+      throw ProviderError.message("Oversized scene narration.")
+    }
     if let proposed = unit.baseDocumentRevision, proposed != baseRevision {
       throw CoreError.revisionConflict(expected: baseRevision, received: proposed)
     }

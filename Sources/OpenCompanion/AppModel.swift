@@ -74,6 +74,8 @@ struct ResponseInputPlan: Sendable {
   @Published var error: String?
   @Published var notice: String?
   @Published var busy = false
+  @Published private(set) var presentingExplanation = false
+  @Published private(set) var explanationPresentation: ExplanationPresentation?
   @Published var listening = false
   @Published var pushToTalkActive = false
   @Published var voiceInputState = "Ready"
@@ -95,7 +97,17 @@ struct ResponseInputPlan: Sendable {
     ?? .terra
   @Published private(set) var guidanceProviderStatus = "Terra for screen guidance"
   @Published var apiKey = ""
-  @Published var scene: SceneDocument?
+  @Published var scene: SceneDocument? {
+    didSet {
+      // Host edits and replacements revoke queued snapshots, including edits
+      // that accidentally reuse the current revision. Provider commits below
+      // advance the canonical tip explicitly without exposing future geometry.
+      if !committingExplanationScene, scene != explanationCanonicalTip {
+        if explanationPlaybackEnabled { stop() }
+        explanationPresentation = nil
+      }
+    }
+  }
   @Published var selectedNodeID: String?
   @Published var playing = true
   @Published var playTime = 0.0
@@ -121,7 +133,7 @@ struct ResponseInputPlan: Sendable {
   let spatialSelector = SpatialContextSelector()
   let runner = JobRunner()
   let browser = BrowserBridge()
-  let voice = VoiceService()
+  let voice: VoiceService
   let overlay = OverlayHost()
   let capture = CaptureService()
   let provider = ReasoningProvider()
@@ -147,6 +159,11 @@ struct ResponseInputPlan: Sendable {
   var onScreenGuidanceTargetAccepted:
     ((ProviderTarget, ScreenEvidence, UInt64, ScreenGuidanceRequest) -> Void)?
   var onCursorCancelled: ((UInt64) -> Void)?
+  var onNarrationCaptionStarted: ((String, VoiceNarrationContext, Bool) -> Bool)?
+  var onNarrationCaptionUpdate: ((VoiceUtteranceUpdate) -> Void)?
+  var onNarrationCaptionFinished: ((VoiceNarrationContext) -> Void)?
+  var onExplanationNarrationEvent: ((VoiceUtteranceUpdate) -> Void)?
+  var onExplanationPresentationChanged: ((ExplanationPresentation) -> Void)?
   var onManualGuidanceVoiceStart: (() -> ManualGuidanceStep?)?
   var onPrepareScreenGuidance: ((UInt64, pid_t) async throws -> Void)?
   private(set) var responsePolicy = ResponsePolicy.resolve(text: "", screenGuidanceEnabled: false)
@@ -154,6 +171,14 @@ struct ResponseInputPlan: Sendable {
   private var acceptedGuidanceTarget = false
   private var guidanceNarration: String?
   private var narrationGate = TurnNarrationGate()
+  private let explanationPlayback = ExplanationPlayback()
+  private var explanationPlaybackEnabled = false
+  private var explanationCanonicalTip: SceneDocument?
+  private var committingExplanationScene = false
+  private var currentExplanationNarration: (context: VoiceNarrationContext, text: String)?
+  private var explanationRenderWait: Task<Void, Never>?
+  private var explanationRenderWaitID: UUID?
+  var explanationDisplayDocument: SceneDocument? { explanationPresentation?.document ?? scene }
   private var guidanceTurnStage: GuidanceTurnStage?
   private(set) var cursorFailureGeneration: UInt64?
   private(set) var activeGuidanceRequest: ScreenGuidanceRequest?
@@ -183,10 +208,12 @@ struct ResponseInputPlan: Sendable {
   private var trace: [[String: String]] = []
   init(
     acceptanceMode: Bool = false, store: LocalStore? = nil,
+    voice suppliedVoice: VoiceService? = nil,
     screenGuidanceEnabled: @escaping @MainActor () -> Bool = {
       CursorCompanionPreferences.load().screenGuidanceEnabled
     }
   ) {
+    self.voice = suppliedVoice ?? VoiceService()
     self.store = store
     self.screenGuidanceEnabled = screenGuidanceEnabled
     if !acceptanceMode {
@@ -209,7 +236,8 @@ struct ResponseInputPlan: Sendable {
     voice.onState = { [weak self] state in
       guard let self else { return }
       if !self.listening {
-        self.state = state == "Ready" && self.busy ? "Thinking" : state
+        self.state =
+          state == "Ready" && (self.busy || self.presentingExplanation) ? "Thinking" : state
         self.updateBadge()
       }
     }
@@ -242,6 +270,47 @@ struct ResponseInputPlan: Sendable {
       self.voiceNotice = notice
     }
     voice.onSpeechEvent = { [weak self] event in self?.record(event) }
+    voice.onUtteranceUpdate = { [weak self] update in self?.acceptNarrationUpdate(update) }
+    explanationPlayback.onPresent = { [weak self] presentation in
+      guard let self, self.explanationPlaybackEnabled,
+        presentation.generation == self.generation,
+        self.scene == self.explanationCanonicalTip
+      else { return }
+      self.explanationPresentation = presentation
+      self.record("explanation.visual.released")
+      self.explanationRenderWait?.cancel()
+      self.explanationRenderWaitID = nil
+      if ExplanationOverlay.hasRenderableContent(presentation.document) {
+        self.explanationRenderWaitID = presentation.beatID
+        self.explanationRenderWait = Task { @MainActor [weak self] in
+          do { try await Task.sleep(for: .seconds(5)) } catch { return }
+          guard let self, self.explanationPlaybackEnabled,
+            self.explanationPresentation == presentation,
+            self.explanationRenderWaitID == presentation.beatID
+          else { return }
+          self.finishTurnFailure(
+            error: ProviderError.message(
+              "The explanation surface could not present this step. Ask again."),
+            generation: presentation.generation, policy: self.responsePolicy)
+        }
+      }
+      self.onExplanationPresentationChanged?(presentation)
+      guard self.explanationPlaybackEnabled, self.explanationPresentation == presentation else {
+        return
+      }
+      if !self.scenePresentedForTurn {
+        self.scenePresentedForTurn = true
+        self.onSceneReady?()
+      }
+    }
+    explanationPlayback.onNarration = { [weak self] context, text in
+      self?.startExplanationNarration(context: context, text: text)
+    }
+    explanationPlayback.onActivityChanged = { [weak self] active in
+      guard let self else { return }
+      self.presentingExplanation = active
+      if !active && !self.busy && !self.voice.hasPendingSpeech { self.state = "Ready" }
+    }
     if !acceptanceMode {
       lastExternalPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
       workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -476,7 +545,9 @@ struct ResponseInputPlan: Sendable {
             current, ProviderTextPreview(unitID: 0, text: explanation, isComplete: true))
         }
         self.busy = false
-        if self.state != "Speaking" { self.state = "Ready" }
+        if self.state != "Speaking" {
+          self.state = self.presentingExplanation ? "Thinking" : "Ready"
+        }
         self.updateBadge()
         await self.persistConversation()
       } catch {
@@ -580,6 +651,7 @@ struct ResponseInputPlan: Sendable {
   /// Declare output ownership once for the current turn, independent of any
   /// retained document or previously selected sidebar destination.
   func configureResponseOutput(_ policy: ResponsePolicy) {
+    cancelExplanationPlayback(stopSpeech: false)
     responsePolicy = policy
     cursorFailureGeneration = nil
     guidanceTurnStage = nil
@@ -589,12 +661,16 @@ struct ResponseInputPlan: Sendable {
       policy.allowsNotebook
       ? NotebookTurnBinding(documentID: scene?.id, revision: scene?.revision) : nil
     scenePresentedForTurn = false
+    explanationPlaybackEnabled = policy.allowsNotebook && !policy.includesExistingNotebook
+    explanationCanonicalTip = scene
+    if explanationPlaybackEnabled { explanationPlayback.begin(generation: generation) }
   }
 
   /// Keep a current guidance failure readable without turning it into chat,
   /// speech, notebook content, or a retry. Stale work cannot alter a newer turn.
   func finishTurnFailure(error: Error, generation: UInt64, policy: ResponsePolicy) {
     guard generation == self.generation else { return }
+    cancelExplanationPlayback(stopSpeech: true)
     activeGuidanceRequest = nil
     busy = false
     state = "Ready"
@@ -797,6 +873,9 @@ struct ResponseInputPlan: Sendable {
   }
   private func acceptTextPreview(_ preview: ProviderTextPreview, generation: UInt64) async throws {
     guard generation == self.generation else { throw CancellationError() }
+    // A standalone explanation owns its complete semantic captions. Previewing
+    // future narration here would reveal it before its visual/speech beat.
+    guard !explanationPlaybackEnabled else { return }
     // Inert presentation only. Chat, speech, scenes and actions still wait for
     // a complete validated ProviderUnit through accept(_:generation:...).
     if !receivedTextPreview && !preview.text.isEmpty {
@@ -820,10 +899,17 @@ struct ResponseInputPlan: Sendable {
       guard let text = unit.text, text.utf8.count <= 32000 else {
         throw ProviderError.message("Invalid text unit.")
       }
+      if explanationPlaybackEnabled {
+        try explanationPlayback.checkCapacity(document: nil, narration: text)
+      }
       messages.append(ChatLine(role: "assistant", text: text))
       if responsePolicy.route == .screenGuidance { guidanceNarration = text }
       record("semantic.text.accepted")
-      speakNarration(text)
+      if explanationPlaybackEnabled {
+        try explanationPlayback.enqueue(document: nil, narration: text)
+      } else {
+        speakNarration(text)
+      }
     case "scene":
       guard responsePolicy.allowsNotebook else {
         record("visual.suppressed.responsePolicy")
@@ -842,15 +928,35 @@ struct ResponseInputPlan: Sendable {
           ? scene ?? SceneDocument(title: unit.title ?? "Explanation", width: 900, height: 560)
           : SceneDocument(title: unit.title ?? "Explanation", width: 900, height: 560),
         baseRevision: outputSceneIncludesExistingNotebook ? expectedBase : 0)
+      if let narration = unit.narration, narration.utf8.count > 32_000 {
+        throw ProviderError.message("Oversized scene narration.")
+      }
+      if explanationPlaybackEnabled {
+        try explanationPlayback.checkCapacity(document: document, narration: unit.narration)
+      }
       snapshotUndo()
+      committingExplanationScene = true
       scene = document
+      committingExplanationScene = false
+      explanationCanonicalTip = document
       self.outputSceneBinding = NotebookTurnBinding(
         documentID: document.id, revision: document.revision)
       outputSceneIncludesExistingNotebook = true
       section = "Notebook"
-      if !scenePresentedForTurn {
-        scenePresentedForTurn = true
-        onSceneReady?()
+      if explanationPlaybackEnabled {
+        // Saving and revision checks always use the canonical document. Only
+        // the native floating surface consumes these ordered snapshots.
+        try explanationPlayback.enqueue(document: document, narration: unit.narration)
+      } else {
+        explanationPresentation = nil
+        if !scenePresentedForTurn {
+          scenePresentedForTurn = true
+          onSceneReady?()
+        }
+      }
+      if let narration = unit.narration, !narration.isEmpty {
+        messages.append(ChatLine(role: "assistant", text: narration))
+        if !explanationPlaybackEnabled { speakNarration(narration) }
       }
       record("visual.accepted")
     case "target":
@@ -896,12 +1002,128 @@ struct ResponseInputPlan: Sendable {
     }
   }
   private func speakNarration(_ text: String) {
-    guard configuration.speechEnabled || turnSpeaksAloud, narrationGate.admit(text) else { return }
-    voice.speak(text)
+    guard configuration.speechEnabled || turnSpeaksAloud, narrationGate.allows(text) else { return }
+    if voice.speak(text) { _ = narrationGate.admit(text) }
+  }
+
+  func acknowledgeExplanationRenderSubmitted(_ presentation: ExplanationPresentation) {
+    guard explanationPlaybackEnabled, presentation == explanationPresentation,
+      presentation.generation == generation, scene == explanationCanonicalTip
+    else { return }
+    if explanationRenderWaitID == presentation.beatID {
+      explanationRenderWait?.cancel()
+      explanationRenderWait = nil
+      explanationRenderWaitID = nil
+    }
+    if explanationPlayback.acknowledgeRenderSubmitted(
+      beatID: presentation.beatID, generation: presentation.generation,
+      documentID: presentation.document.id, revision: presentation.document.revision)
+    {
+      record("explanation.visual.renderSubmitted")
+    }
+  }
+
+  private func startExplanationNarration(context: VoiceNarrationContext, text: String) {
+    guard explanationPlaybackEnabled, context.generation == generation,
+      scene == explanationCanonicalTip
+    else { return }
+    currentExplanationNarration = (context, text)
+    let useSpeech = (configuration.speechEnabled || turnSpeaksAloud) && narrationGate.allows(text)
+    if useSpeech { _ = onNarrationCaptionStarted?(text, context, true) }
+    guard explanationPlaybackEnabled, context.generation == generation,
+      currentExplanationNarration?.context == context
+    else { return }
+    if useSpeech, voice.speak(text, context: context) {
+      guard explanationPlaybackEnabled, context.generation == generation,
+        currentExplanationNarration?.context == context
+      else { return }
+      _ = narrationGate.admit(text)
+      record("explanation.narration.enqueued")
+      return
+    }
+    // Voice off, deduplicated or declined: the local word reveal is an explicit
+    // completion clock. It never impersonates AVSpeech playback progress.
+    startExplanationTextFallback(context: context, text: text)
+  }
+
+  private func startExplanationTextFallback(context: VoiceNarrationContext, text: String) {
+    guard currentExplanationNarration?.context == context, context.generation == generation,
+      explanationPlaybackEnabled
+    else { return }
+    record("explanation.narration.textFallback")
+    if onNarrationCaptionStarted?(text, context, false) != true {
+      completeExplanationCaption(context: context)
+    }
+  }
+
+  private func acceptNarrationUpdate(_ update: VoiceUtteranceUpdate) {
+    guard explanationPlaybackEnabled, update.context.generation == generation,
+      let current = currentExplanationNarration, current.context == update.context,
+      scene == explanationCanonicalTip
+    else { return }
+    onExplanationNarrationEvent?(update)
+    guard explanationPlaybackEnabled, update.context.generation == generation,
+      currentExplanationNarration?.context == update.context
+    else { return }
+    onNarrationCaptionUpdate?(update)
+    switch update.kind {
+    case .finished:
+      record("explanation.narration.engineFinished")
+      onNarrationCaptionFinished?(update.context)
+      completeExplanationCaption(context: update.context)
+    case .cancelled:
+      // Host Stop already revoked the context. An unexpected engine cancellation
+      // has a visible, paced fallback rather than silently skipping the beat.
+      startExplanationTextFallback(context: update.context, text: current.text)
+    case .started: record("explanation.narration.engineStarted")
+    case .range: record("explanation.narration.wordProgress")
+    case .enqueued: break
+    }
+  }
+
+  func completeExplanationCaption(context: VoiceNarrationContext) {
+    guard explanationPlaybackEnabled, context.generation == generation,
+      currentExplanationNarration?.context == context, scene == explanationCanonicalTip
+    else { return }
+    currentExplanationNarration = nil
+    _ = explanationPlayback.completeNarration(context: context)
+  }
+
+  /// Called when the user explicitly chooses an editor. The accepted canonical
+  /// scene remains editable; unreleased presentation and speech lose ownership.
+  func endExplanationPlaybackForEditing() {
+    if explanationPlaybackEnabled { stop() }
+    explanationPresentation = nil
+  }
+
+  func explanationSurfaceBecameUnavailable(documentID: String) {
+    guard explanationPlaybackEnabled, scenePresentedForTurn,
+      explanationPresentation?.document.id == documentID
+    else { return }
+    stop()
+    record("explanation.surface.unavailable")
+  }
+
+  private func cancelExplanationPlayback(stopSpeech: Bool) {
+    let owned = explanationPlaybackEnabled
+    explanationPlaybackEnabled = false
+    currentExplanationNarration = nil
+    explanationRenderWait?.cancel()
+    explanationRenderWait = nil
+    explanationRenderWaitID = nil
+    explanationPlayback.invalidate()
+    if owned {
+      outputSceneBinding = nil
+      if stopSpeech {
+        onCursorCancelled?(generation)
+        voice.stop()
+      }
+    }
   }
 
   func stop() {
     generation += 1
+    cancelExplanationPlayback(stopSpeech: false)
     cursorFailureGeneration = nil
     guidanceTurnStage = nil
     activeGuidanceRequest = nil

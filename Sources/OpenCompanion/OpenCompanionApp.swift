@@ -49,6 +49,7 @@ import SwiftUI
       "--guidance-live-acceptance", "--guidance-routing-acceptance",
       "--guidance-manual-live-acceptance",
       "--spatial-scene-live-acceptance", "--explanation-overlay-acceptance",
+      "--explanation-orbit-live-acceptance",
     ].contains(where: CommandLine.arguments.contains)
     model = AppModel(acceptanceMode: acceptanceMode)
     model.onOpen = { [weak self] in self?.openRequestedSurface() }
@@ -131,6 +132,23 @@ import SwiftUI
           print("SPATIAL_SCENE_LIVE_ACCEPTANCE_PASSED")
         } catch {
           print("SPATIAL_SCENE_LIVE_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
+    }
+    if let index = CommandLine.arguments.firstIndex(of: "--explanation-orbit-live-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 1 < CommandLine.arguments.count else {
+            throw ProviderError.message("Provide an output directory for live orbit acceptance.")
+          }
+          try await ExplanationOrbitLiveAcceptance.run(
+            model: model, output: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+          print("EXPLANATION_ORBIT_LIVE_ACCEPTANCE_PASSED")
+        } catch {
+          print("EXPLANATION_ORBIT_LIVE_ACCEPTANCE_FAILED: \(error.localizedDescription)")
           exit(1)
         }
         NSApp.terminate(nil)

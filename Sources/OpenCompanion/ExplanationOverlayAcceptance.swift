@@ -1,9 +1,11 @@
 import AppKit
 import CompanionCore
 import SceneKit
+import simd
 
-/// Explicit own-window/native-renderer check. It never captures the desktop,
-/// injects mouse/keyboard events, starts a provider, or records/plays audio.
+/// Explicit own-window/native-renderer check. Authored event objects go only
+/// to this app's own view; no system input is posted. It never captures the
+/// desktop, starts a provider, or records/plays audio.
 @MainActor enum ExplanationOverlayAcceptance {
   @MainActor static func run(model: AppModel, output: URL, documentURL: URL? = nil) async throws {
     try Task.checkCancellation()
@@ -32,7 +34,7 @@ import SceneKit
     let originalMessages = model.messages.map(\.id)
     model.configuration.speechEnabled = false
     model.playing = false
-    let overlay = ExplanationOverlay(model: model) { model.stop() }
+    let overlay = ExplanationOverlay(model: model, observeOrbitInput: false) { model.stop() }
     defer { overlay.shutdown() }
 
     // An empty streamed assembly arms the document without exposing a stage or
@@ -229,6 +231,11 @@ import SceneKit
       model.taskGeneration > generation, model.messages.map(\.id) == originalMessages,
       NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground
     else { throw ProviderError.message("Clear changed the retained scene, transcript or focus.") }
+    let syntheticOrbit = try await verifySyntheticOrbit(
+      model: model, overlay: overlay, screen: screen, foreground: foreground, output: output)
+    guard model.scene == document, model.messages.map(\.id) == originalMessages else {
+      throw ProviderError.message("Synthetic orbit acceptance changed the retained original scene.")
+    }
     let result: [String: Any] = [
       "result": "passed", "nativeOwnWindowAndViewOnly": true,
       "loadedSceneJSON": documentURL != nil,
@@ -239,6 +246,8 @@ import SceneKit
       "visibleCompleteLabelCount": expectedLabels.count,
       "overlappingLabelPairs": 0,
       "emptyFirstGroupRemainedHidden": true, "visualWindowEntirelyClickThrough": true,
+      "visualWindowClickThroughScope":
+        "Passive presentation; Option arming owns its bounded panel.",
       "clearControlBounded": [clear.frame.width, clear.frame.height],
       "transparentMeshPixels": meshCoverage.transparent,
       "visibleMeshPixels": meshCoverage.visible,
@@ -254,6 +263,8 @@ import SceneKit
       "nativeLabelsSettledWithScenePaused": true,
       "manualLabelClockAdvanceUsed": false,
       "cameraProjectionProgrammaticallyChanged": true, "physicalOrbitTested": false,
+      "syntheticOwnViewOrbit": syntheticOrbit,
+      "windowServerOrbitInputTested": false,
       "cameraSurfaceSettleWaitMS": cameraSurfaceSettleWaitMS,
       "nativeLeaderAnchorsVerifiedAfterCameraMotion": verifiedLeaderCount,
       "nativeLeaderSurfacesVerifiedBeforeCameraMotion": originalLeaderStarts.count,
@@ -271,6 +282,298 @@ import SceneKit
     ]
     try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
       .write(to: output.appendingPathComponent("explanation-acceptance.json"))
+  }
+
+  /// A separate asymmetric authored object avoids turning legitimate occlusion
+  /// of a complex lesson into a false failure of the input-ownership check.
+  private static func verifySyntheticOrbit(
+    model: AppModel, overlay: ExplanationOverlay, screen: NSScreen,
+    foreground: pid_t?, output: URL
+  ) async throws -> [String: Any] {
+    let retained = model.scene
+    let messageIDs = model.messages.map(\.id)
+    let document = try syntheticOrbitFixture().validated()
+    var diagnostics: [String: ExplanationOrbitDiagnostics] = [:]
+    defer {
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+      if let bytes = try? encoder.encode(diagnostics), bytes.count <= 64_000 {
+        try? bytes.write(
+          to: output.appendingPathComponent("synthetic-orbit-diagnostics.json"), options: .atomic)
+      }
+      overlay.dismiss()
+      model.scene = retained
+    }
+    model.scene = document
+    overlay.show(document: document, on: screen)
+    let (visual, clear, canvas) = try ownPresentation(document: document, overlay: overlay)
+    let controller = try require(
+      overlay.orbitControllerForAcceptance, "The synthetic orbit controller is unavailable.")
+    try await settleOrbitLabels(canvas)
+    let stage = try require(canvas.spatialStage, "The authored orbit stage is missing.")
+    let camera = try require(stage.pointOfView, "The authored orbit camera is missing.")
+    let point = try orbitPoint(canvas: canvas, stage: stage)
+    let pointer = orbitScreenPoint(point, canvas: canvas, panel: visual)
+    let before = camera.simdWorldTransform
+    diagnostics["initial"] = controller.diagnostics
+    guard visual.ignoresMouseEvents, !canvas.overlayCameraArmed,
+      controller.diagnostics.phase == "passive", !controller.diagnostics.tapEnabled,
+      !visual.canBecomeKey, !clear.canBecomeKey, !canvas.acceptsFirstResponder,
+      stage.acceptsFirstResponder == false, stage.allowsCameraControl == false,
+      visual.frame.width <= ExplanationOverlayLayout.maximumStageSize.width,
+      visual.frame.height <= ExplanationOverlayLayout.maximumStageSize.height
+    else { throw ProviderError.message("The authored orbit stage was not passive and bounded.") }
+
+    controller.reconcileForAcceptance(pointer: pointer, modifiers: [], buttons: [])
+    canvas.mouseDown(with: try orbitMouse(.leftMouseDown, at: point, canvas: canvas))
+    guard !canvas.isOverlayCameraDragging, controller.diagnostics.starts == 0,
+      camera.simdWorldTransform == before
+    else { throw ProviderError.message("A passive view acquired a synthetic drag.") }
+    controller.reconcileForAcceptance(
+      pointer: CGPoint(x: visual.frame.minX - 20, y: visual.frame.minY - 20),
+      modifiers: .option, buttons: [])
+    guard visual.ignoresMouseEvents, controller.diagnostics.phase == "passive" else {
+      throw ProviderError.message("Option away from visible geometry acquired the panel.")
+    }
+    controller.reconcileForAcceptance(
+      pointer: pointer, modifiers: [.control, .option], buttons: [])
+    guard visual.ignoresMouseEvents, controller.diagnostics.phase == "passive" else {
+      throw ProviderError.message("The voice modifier chord armed orbit.")
+    }
+    controller.reconcileForAcceptance(pointer: pointer, modifiers: .option, buttons: [])
+    diagnostics["armed"] = controller.diagnostics
+    guard !visual.ignoresMouseEvents, canvas.overlayCameraArmed,
+      controller.diagnostics.phase == "armed", controller.diagnostics.tapEnabled == false
+    else { throw ProviderError.message("Explicit synthetic Option did not arm the bounded panel.") }
+    // Actual own-event modifiers must veto even when the previous observation
+    // was Option only. Nothing is sent through WindowServer or another app.
+    canvas.mouseDown(
+      with: try orbitMouse(
+        .leftMouseDown, at: point, canvas: canvas, flags: [.control, .option]))
+    guard !canvas.isOverlayCameraDragging, controller.diagnostics.starts == 0,
+      visual.ignoresMouseEvents
+    else { throw ProviderError.message("A Control+Option mouse-down escaped the host veto.") }
+    controller.reconcileForAcceptance(pointer: pointer, modifiers: .option, buttons: [])
+    let beforeLeaders = try verifyLeaderAttachments(
+      document: document, currentDocument: model.scene, canvas: canvas, stage: stage,
+      phase: "synthetic-orbit-before", output: output)
+    try write(
+      canvas.explanationSnapshot(), to: output.appendingPathComponent("synthetic-orbit-before.png"))
+    canvas.mouseDown(with: try orbitMouse(.leftMouseDown, at: point, canvas: canvas))
+    guard canvas.isOverlayCameraDragging, controller.diagnostics.phase == "dragging",
+      controller.diagnostics.starts == 1
+    else { throw ProviderError.message("The own-view Option mouse-down did not begin orbit.") }
+    let moved = CGPoint(x: point.x + 55, y: point.y + 18)
+    controller.reconcileForAcceptance(
+      pointer: orbitScreenPoint(moved, canvas: canvas, panel: visual), modifiers: .option,
+      buttons: .left)
+    canvas.mouseDragged(with: try orbitMouse(.leftMouseDragged, at: moved, canvas: canvas))
+    canvas.mouseUp(with: try orbitMouse(.leftMouseUp, at: moved, canvas: canvas))
+    controller.reconcileForAcceptance(pointer: pointer, modifiers: [], buttons: [])
+    diagnostics["after-drag"] = controller.diagnostics
+    guard camera.simdWorldTransform != before, !canvas.isOverlayCameraDragging,
+      canvas.overlayCameraDragEventCount == 1, controller.diagnostics.starts == 1,
+      controller.diagnostics.ends == 1, visual.ignoresMouseEvents, !canvas.overlayCameraArmed,
+      stage.defaultCameraController.isInertiaRunning == false,
+      model.scene == document, model.messages.map(\.id) == messageIDs,
+      NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground
+    else {
+      throw ProviderError.message(
+        "Synthetic orbit changed ownership, document or focus incorrectly.")
+    }
+    try await settleOrbitLabels(canvas)
+    let afterLeaders = try verifyLeaderAttachments(
+      document: document, currentDocument: model.scene, canvas: canvas, stage: stage,
+      phase: "synthetic-orbit-after", output: output)
+    let label = try requireFrame(canvas.projectedLabelFrame(id: "orbit-label"))
+    let composite = try canvas.explanationSnapshot()
+    let baseline = try canvas.explanationSnapshot(includeSpatialLabels: false)
+    let pixels = changedPixels(
+      composite, baseline: baseline, in: canvas.canvasFrame(forDocumentRect: label),
+      canvasSize: canvas.bounds.size)
+    let orbitCoverage = coverage(composite)
+    guard beforeLeaders.count == 1, afterLeaders.count == 1,
+      canvas.projectedLabelText(id: "orbit-label") == "Orbit block",
+      CGRect(x: 0, y: 0, width: document.width, height: document.height).contains(label),
+      canvas.unresolvedLabelOverlapCount == 0, pixels >= 12,
+      orbitCoverage.visible > 500, orbitCoverage.transparent > 500
+    else {
+      throw ProviderError.message("Synthetic orbit lost the native label, surface or alpha pixels.")
+    }
+    try write(composite, to: output.appendingPathComponent("synthetic-orbit-after.png"))
+
+    func beginAgain() throws -> CGPoint {
+      let current = try orbitPoint(canvas: canvas, stage: stage)
+      controller.reconcileForAcceptance(
+        pointer: orbitScreenPoint(current, canvas: canvas, panel: visual),
+        modifiers: .option, buttons: [])
+      canvas.mouseDown(with: try orbitMouse(.leftMouseDown, at: current, canvas: canvas))
+      guard canvas.isOverlayCameraDragging else {
+        throw ProviderError.message("The authored cancellation gesture did not begin.")
+      }
+      return current
+    }
+    let priorityPoint = try beginAgain()
+    controller.reconcileForAcceptance(
+      pointer: orbitScreenPoint(priorityPoint, canvas: canvas, panel: visual),
+      modifiers: [.control, .option], buttons: .left)
+    let cancelledCamera = camera.simdWorldTransform
+    let dragEvents = canvas.overlayCameraDragEventCount
+    canvas.mouseDragged(with: try orbitMouse(.leftMouseDragged, at: moved, canvas: canvas))
+    guard !canvas.isOverlayCameraDragging, visual.ignoresMouseEvents,
+      !canvas.overlayCameraArmed, camera.simdWorldTransform == cancelledCamera,
+      canvas.overlayCameraDragEventCount == dragEvents
+    else { throw ProviderError.message("Voice-chord cancellation admitted a queued orbit event.") }
+    diagnostics["voice-priority"] = controller.diagnostics
+
+    _ = try beginAgain()
+    let generation = model.taskGeneration
+    model.stop()
+    controller.refresh()
+    diagnostics["generation-cancelled"] = controller.diagnostics
+    guard model.taskGeneration > generation, !canvas.isOverlayCameraDragging,
+      visual.ignoresMouseEvents, !canvas.overlayCameraArmed,
+      controller.diagnostics.phase == "passive"
+    else { throw ProviderError.message("A changed task generation retained orbit ownership.") }
+
+    try await Task.sleep(for: .milliseconds(20))
+    try await settleOrbitLabels(canvas)
+    _ = try beginAgain()
+    NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.willSleepNotification, object: nil)
+    diagnostics["simulated-sleep"] = controller.diagnostics
+    guard !visual.isVisible, !clear.isVisible, visual.contentView == nil,
+      !canvas.isOverlayCameraDragging, !canvas.overlayCameraArmed,
+      controller.diagnostics.phase == "passive"
+    else { throw ProviderError.message("Simulated sleep retained an orbit presentation.") }
+    NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+    overlay.show(document: document, on: screen)
+    let (renewed, renewedClear, renewedCanvas) = try ownPresentation(
+      document: document, overlay: overlay)
+    let renewedController = try require(
+      overlay.orbitControllerForAcceptance, "No renewed orbit controller.")
+    controller.reconcileForAcceptance(pointer: pointer, modifiers: .option, buttons: [])
+    guard controller.diagnostics.phase == "passive", !renewedCanvas.overlayCameraArmed else {
+      throw ProviderError.message("A closed orbit controller acquired a renewed presentation.")
+    }
+    try await settleOrbitLabels(renewedCanvas)
+    let renewedStage = try require(renewedCanvas.spatialStage, "No renewed authored orbit stage.")
+    let renewedPoint = try orbitPoint(canvas: renewedCanvas, stage: renewedStage)
+    renewedController.reconcileForAcceptance(
+      pointer: orbitScreenPoint(renewedPoint, canvas: renewedCanvas, panel: renewed),
+      modifiers: .option, buttons: [])
+    renewedCanvas.mouseDown(
+      with: try orbitMouse(.leftMouseDown, at: renewedPoint, canvas: renewedCanvas))
+    guard renewedCanvas.isOverlayCameraDragging else {
+      throw ProviderError.message("The authored display-change gesture did not begin.")
+    }
+    NotificationCenter.default.post(
+      name: NSApplication.didChangeScreenParametersNotification, object: nil)
+    diagnostics["simulated-display-change"] = renewedController.diagnostics
+    guard !renewed.isVisible, !renewedClear.isVisible, renewed.contentView == nil,
+      !renewedCanvas.overlayCameraArmed, !renewedCanvas.isOverlayCameraDragging,
+      renewedController.diagnostics.phase == "passive"
+    else { throw ProviderError.message("A simulated display change retained orbit ownership.") }
+
+    overlay.show(document: document, on: screen)
+    let (finalVisual, finalClear, finalCanvas) = try ownPresentation(
+      document: document, overlay: overlay)
+    let finalController = try require(
+      overlay.orbitControllerForAcceptance, "No final orbit controller.")
+    let lease = try require(overlay.presentationLease, "No final orbit presentation lease.")
+    try await settleOrbitLabels(finalCanvas)
+    let finalStage = try require(finalCanvas.spatialStage, "No final authored orbit stage.")
+    let finalPoint = try orbitPoint(canvas: finalCanvas, stage: finalStage)
+    finalController.reconcileForAcceptance(
+      pointer: orbitScreenPoint(finalPoint, canvas: finalCanvas, panel: finalVisual),
+      modifiers: .option, buttons: [])
+    finalCanvas.mouseDown(with: try orbitMouse(.leftMouseDown, at: finalPoint, canvas: finalCanvas))
+    guard finalCanvas.isOverlayCameraDragging else {
+      throw ProviderError.message("The authored Clear gesture did not begin.")
+    }
+    let beforeClear = model.taskGeneration
+    overlay.clearPresentation(lease: lease, documentID: document.id)
+    diagnostics["cleared"] = finalController.diagnostics
+    guard !finalVisual.isVisible, !finalClear.isVisible, finalVisual.contentView == nil,
+      !finalCanvas.overlayCameraArmed, !finalCanvas.isOverlayCameraDragging,
+      finalController.diagnostics.phase == "passive",
+      model.scene == document, model.taskGeneration > beforeClear,
+      model.messages.map(\.id) == messageIDs,
+      NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground
+    else {
+      throw ProviderError.message("Clear retained orbit ownership or changed the document/focus.")
+    }
+    return [
+      "result": "passed", "authoredFixtureOnly": true,
+      "syntheticOwnViewEvents": true, "globalInputPosted": false,
+      "externalModifierDeliveryTested": false, "windowServerInputTested": false,
+      "humanPhysicalOrbitTested": false, "ambientObservationEnabled": false,
+      "passiveWindowIgnoresMouseEvents": true, "armedOwnershipIsBoundedPanel": true,
+      "transparentPixelClickThroughWhileArmedClaimed": false,
+      "cameraChangedThroughOwnViewDragHandler": true, "canonicalDocumentUnchanged": true,
+      "requestedLeadersVerifiedBeforeAndAfterDrag": afterLeaders.count,
+      "labelGlyphChangedPixelsAfterDrag": pixels, "actualOwnViewDragEvents": dragEvents,
+      "voiceChordPriorityVerifiedSynthetically": true, "generationCancellationVerified": true,
+      "simulatedSleepTeardownVerified": true, "simulatedDisplayChangeTeardownVerified": true,
+      "actualSleepOrDisplayRemovalTested": false, "closedControllerCannotRearm": true,
+      "clearTeardownVerified": true, "foregroundPreserved": true,
+      "diagnostics": "synthetic-orbit-diagnostics.json",
+    ]
+  }
+
+  private static func settleOrbitLabels(_ canvas: RetainedCanvasView) async throws {
+    let deadline = ProcessInfo.processInfo.systemUptime + 6
+    while canvas.hasPendingSpatialLabels || canvas.hasPendingLabelAttachments {
+      try Task.checkCancellation()
+      guard ProcessInfo.processInfo.systemUptime < deadline else {
+        throw ProviderError.message("Authored orbit labels or surfaces did not settle.")
+      }
+      try await Task.sleep(for: .milliseconds(20))
+    }
+  }
+
+  private static func orbitPoint(canvas: RetainedCanvasView, stage: SCNView) throws -> CGPoint {
+    let node = try require(canvas.spatialNode(id: "orbit-body"), "No authored orbit body.")
+    let projected = stage.projectPoint(node.worldPosition)
+    let point = canvas.convert(
+      CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y)), from: stage)
+    guard canvas.visibleSpatialMesh(atCanvasPoint: point) == "orbit-body" else {
+      throw ProviderError.message("The authored orbit start misses a visible native triangle.")
+    }
+    return point
+  }
+
+  private static func orbitScreenPoint(_ point: CGPoint, canvas: NSView, panel: NSWindow) -> CGPoint
+  {
+    panel.convertPoint(toScreen: canvas.convert(point, to: nil))
+  }
+
+  private static func orbitMouse(
+    _ type: NSEvent.EventType, at point: CGPoint, canvas: NSView,
+    flags: NSEvent.ModifierFlags = .option
+  ) throws -> NSEvent {
+    try require(
+      NSEvent.mouseEvent(
+        with: type, location: canvas.convert(point, to: nil), modifierFlags: flags,
+        timestamp: ProcessInfo.processInfo.systemUptime,
+        windowNumber: canvas.window?.windowNumber ?? 0,
+        context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 0.5),
+      "Could not author an own-view orbit event.")
+  }
+
+  private static func syntheticOrbitFixture() -> SceneDocument {
+    .init(
+      id: "authored-synthetic-orbit", title: "Authored orbit fixture", width: 900, height: 560,
+      nodes: [
+        .init(
+          id: "orbit-body", kind: .mesh, fill: "#4488CC",
+          spatial3D: .init(
+            geometry: .box(width: 2.4, height: 1.2, depth: 0.65, chamferRadius: 0.04))),
+        .init(
+          id: "orbit-label", kind: .text, width: 140, height: 36,
+          text: "Orbit block", color: "#FFFFFF",
+          spatial3D: .init(
+            labelAnchor: .init(targetID: "orbit-body", point: .init(x: 0.9, y: 0.2, z: 0.325)))),
+      ])
   }
 
   private struct AttachmentCheck: Encodable {

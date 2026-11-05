@@ -32,6 +32,10 @@ enum CanvasMotionPolicy: Sendable, Equatable {
   case reducedMotion
 }
 
+enum CanvasCameraInteractionEvent: Sendable, Equatable {
+  case began, ended, cancelled
+}
+
 /// Local renderer timing only. Contains no document text, screenshot pixels,
 /// foreground application identity, or user-input events.
 struct CanvasDisplayClockDiagnostics: Codable, Sendable {
@@ -146,6 +150,25 @@ struct SceneCanvas: NSViewRepresentable {
   private var cameraFitKeys: [CameraFitKey] = []
   private var cameraFitDocumentID: String?
   private var cameraFitSize: CGSize = .zero
+  private var overlayCameraAdjusted = false
+  private var overlayDragDocumentID: String?
+  private var overlayDragGeneration: UInt64?
+  private var overlayDragPoint = CGPoint.zero
+  private(set) var isOverlayCameraDragging = false {
+    didSet {
+      if oldValue != isOverlayCameraDragging { window?.invalidateCursorRects(for: self) }
+    }
+  }
+  private(set) var overlayCameraDragEventCount = 0
+  var overlayCameraArmed = false {
+    didSet {
+      guard oldValue != overlayCameraArmed else { return }
+      if !overlayCameraArmed { cancelOverlayCameraInteraction() }
+      window?.invalidateCursorRects(for: self)
+    }
+  }
+  var shouldBeginOverlayCameraInteraction: ((CGPoint, NSEvent.ModifierFlags) -> Bool)?
+  var onOverlayCameraInteraction: ((CanvasCameraInteractionEvent) -> Void)?
   private var hasTypedSpatialContent = false
   private var poses: [ScenePose] = []
   private var dragParentInverse: AffineTransform2D = .identity
@@ -186,6 +209,10 @@ struct SceneCanvas: NSViewRepresentable {
   var presentation: CanvasPresentation = .editor {
     didSet {
       guard presentation != oldValue else { return }
+      cancelOverlayCameraInteraction()
+      overlayCameraArmed = false
+      overlayCameraAdjusted = false
+      cameraFitDocumentID = nil
       updateCanvasBackground()
       stage?.allowsCameraControl = presentation == .editor
       if presentation == .passiveOverlay {
@@ -231,8 +258,19 @@ struct SceneCanvas: NSViewRepresentable {
   }
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
   override func hitTest(_ point: NSPoint) -> NSView? {
-    guard presentation == .editor else { return nil }
-    return super.hitTest(point)
+    if presentation == .editor { return super.hitTest(point) }
+    guard overlayCameraArmed else { return nil }
+    let local = convert(point, from: superview)
+    return visibleSpatialMesh(atCanvasPoint: local) == nil ? nil : self
+  }
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+    presentation == .passiveOverlay ? overlayCameraArmed : super.acceptsFirstMouse(for: event)
+  }
+  override func resetCursorRects() {
+    super.resetCursorRects()
+    if presentation == .passiveOverlay, overlayCameraArmed {
+      addCursorRect(bounds, cursor: isOverlayCameraDragging ? .closedHand : .openHand)
+    }
   }
   override func layout() {
     super.layout()
@@ -288,6 +326,9 @@ struct SceneCanvas: NSViewRepresentable {
     visibilityChanged()
   }
   private func visibilityChanged() {
+    if window?.isVisible != true || isHiddenOrHasHiddenAncestor {
+      cancelOverlayCameraInteraction()
+    }
     try? clock?.setPlaying(
       nativePlaying && window?.isVisible == true && !isHiddenOrHasHiddenAncestor
         && !shouldReduceMotion,
@@ -358,6 +399,8 @@ struct SceneCanvas: NSViewRepresentable {
     nativeDisplayLink?.isPaused = false
   }
   func stopDisplayLink() {
+    overlayCameraArmed = false
+    cancelOverlayCameraInteraction()
     nativeDisplayLink?.invalidate()
     nativeDisplayLink = nil
     displayClockWindow = nil
@@ -425,6 +468,14 @@ struct SceneCanvas: NSViewRepresentable {
     _ document: SceneDocument, time: Double, selectedID: String?,
     presentationGeneration: UInt64? = nil
   ) {
+    if self.document.id != document.id
+      || presentationGeneration.map({ $0 != labelGeneration }) == true
+    {
+      cancelOverlayCameraInteraction()
+      overlayCameraArmed = false
+      overlayCameraAdjusted = false
+      cameraFitDocumentID = nil
+    }
     attachmentWorkEnabled = true
     displayRenderCount = min(1_000_000, displayRenderCount + 1)
     let documentChanged = self.document != document
@@ -650,6 +701,7 @@ struct SceneCanvas: NSViewRepresentable {
     hasTypedSpatialContent = nodes.contains { $0.spatial3D != nil }
     updateCanvasBackground()
     guard !nodes.isEmpty else {
+      cancelOverlayCameraInteraction()
       stage?.isPlaying = false
       stage?.removeFromSuperview()
       stage = nil
@@ -676,6 +728,7 @@ struct SceneCanvas: NSViewRepresentable {
       view.scene?.rootNode.addChildNode(camera)
       view.pointOfView = camera
       view.defaultCameraController.inertiaEnabled = false
+      view.canBecomeKeyResponder = { [weak self] in self?.presentation == .editor }
       view.onCameraChanged = { [weak self] in self?.updateCameraProjection() }
       addSubview(view)
       stage = view
@@ -769,6 +822,7 @@ struct SceneCanvas: NSViewRepresentable {
     if hasTypedSpatialContent,
       cameraFitDocumentID != document.id || cameraFitKeys != fitKeys
     {
+      cancelOverlayCameraInteraction()
       fitCameraToGeometry()
       cameraFitDocumentID = document.id
       cameraFitKeys = fitKeys
@@ -829,6 +883,7 @@ struct SceneCanvas: NSViewRepresentable {
   }
 
   private func fitCameraToGeometry() {
+    cancelOverlayCameraInteraction()
     guard let stage, let camera = stage.pointOfView else { return }
     var points: [SCNVector3] = []
     for node in meshNodes.values where node.geometry != nil {
@@ -854,7 +909,21 @@ struct SceneCanvas: NSViewRepresentable {
       stage.bounds.width > 0, stage.bounds.height > 0, let lens = camera.camera
     else { return }
     let origin = SIMD3(Double(center.x), Double(center.y), Double(center.z))
-    let back = simd_normalize(SIMD3<Double>(0.55, 0.3, 1))
+    var back = simd_normalize(SIMD3<Double>(0.55, 0.3, 1))
+    if presentation == .passiveOverlay, overlayCameraAdjusted {
+      let target = stage.defaultCameraController.target
+      let position = camera.worldPosition
+      let retained = SIMD3(
+        Double(position.x - target.x), Double(position.y - target.y),
+        Double(position.z - target.z))
+      let length = simd_length(retained)
+      if length.isFinite, length > 0.000_001 {
+        let candidate = retained / length
+        if simd_length(simd_cross(SIMD3<Double>(0, 1, 0), candidate)) > 0.000_001 {
+          back = candidate
+        }
+      }
+    }
     let right = simd_normalize(simd_cross(SIMD3<Double>(0, 1, 0), back))
     let up = simd_cross(back, right)
     let verticalTangent = tan(25 * Double.pi / 180)
@@ -1065,6 +1134,175 @@ struct SceneCanvas: NSViewRepresentable {
   var spatialStage: SCNView? { stage }
   var renderedDocumentID: String { document.id }
 
+  /// Canvas-local flipped coordinates. This is a native triangle query, not a
+  /// claim about cross-application routing through transparent window pixels.
+  func visibleSpatialMesh(atCanvasPoint point: CGPoint) -> String? {
+    guard point.x.isFinite, point.y.isFinite, bounds.contains(point),
+      !isHiddenOrHasHiddenAncestor, !drawing, let stage, !stage.isHidden,
+      hasTypedSpatialContent, stage.pointOfView != nil
+    else { return nil }
+    let local = stage.convert(point, from: self)
+    guard stage.bounds.contains(local) else { return nil }
+    var changedMasks = false
+    for node in meshNodes.values {
+      let mask = Self.visibleForCameraInteraction(node) ? 1 : 0
+      if node.categoryBitMask != mask {
+        node.categoryBitMask = mask
+        changedMasks = true
+      }
+    }
+    if changedMasks { SCNTransaction.flush() }
+    guard
+      let hit = stage.hitTest(
+        local,
+        options: [
+          .searchMode: SCNHitTestSearchMode.closest.rawValue, .boundingBoxOnly: false,
+          .clipToZRange: true, .backFaceCulling: true, .ignoreHiddenNodes: true,
+          .categoryBitMask: 1,
+        ]
+      ).first,
+      hit.worldCoordinates.x.isFinite, hit.worldCoordinates.y.isFinite,
+      hit.worldCoordinates.z.isFinite, Self.visibleForCameraInteraction(hit.node),
+      let id = meshNodes.first(where: { $0.value === hit.node })?.key,
+      let source = document.nodes.first(where: { $0.id == id }),
+      source.kind == .mesh, source.spatial3D?.geometry != nil
+    else { return nil }
+    return id
+  }
+
+  private static func visibleForCameraInteraction(_ node: SCNNode) -> Bool {
+    var ancestor: SCNNode? = node
+    var opacity = 1.0
+    var depth = 0
+    while let current = ancestor {
+      guard depth < 64, !current.isHidden, !current.presentation.isHidden else { return false }
+      let alpha = Double(current.presentation.opacity)
+      guard current.opacity.isFinite, current.opacity > 0, alpha.isFinite, alpha > 0 else {
+        return false
+      }
+      opacity *= min(1, alpha)
+      guard opacity > 0 else { return false }
+      ancestor = current.parent
+      depth += 1
+    }
+    guard let geometry = node.geometry else { return true }
+    return geometry.materials.isEmpty
+      || geometry.materials.contains { material in
+        let transparency = Double(material.transparency)
+        guard transparency.isFinite, transparency > 0 else { return false }
+        if let color = material.diffuse.contents as? NSColor {
+          return color.alphaComponent > 0
+        }
+        // Typed native materials are NSColor. Unknown texture/content types
+        // have no trusted alpha interpretation and cannot admit interaction.
+        return material.diffuse.contents == nil
+      }
+  }
+
+  /// Stops the native gesture and inertia synchronously; no delayed input or
+  /// ownership survives a host lease loss, Stop, replacement or detachment.
+  func cancelOverlayCameraInteraction() {
+    let wasDragging = isOverlayCameraDragging
+    isOverlayCameraDragging = false
+    overlayDragDocumentID = nil
+    overlayDragGeneration = nil
+    if let stage {
+      if wasDragging {
+        stage.defaultCameraController.endInteraction(
+          overlayDragPoint, withViewport: stage.bounds.size, velocity: .zero)
+      }
+      stage.defaultCameraController.stopInertia()
+    }
+    if wasDragging { onOverlayCameraInteraction?(.cancelled) }
+  }
+
+  private func beginOverlayCameraInteraction(with event: NSEvent) {
+    guard presentation == .passiveOverlay, overlayCameraArmed, !isOverlayCameraDragging,
+      event.type == .leftMouseDown, event.buttonNumber == 0, let stage
+    else { return }
+    let point = convert(event.locationInWindow, from: nil)
+    guard visibleSpatialMesh(atCanvasPoint: point) != nil else { return }
+    let documentID = document.id
+    let generation = labelGeneration
+    guard shouldBeginOverlayCameraInteraction?(point, event.modifierFlags) ?? true else { return }
+    guard overlayCameraArmed, presentation == .passiveOverlay, self.stage === stage,
+      document.id == documentID, labelGeneration == generation,
+      visibleSpatialMesh(atCanvasPoint: point) != nil,
+      let local = cameraInteractionPoint(point, stage: stage)
+    else {
+      onOverlayCameraInteraction?(.cancelled)
+      return
+    }
+    let controller = stage.defaultCameraController
+    controller.stopInertia()
+    controller.inertiaEnabled = false
+    controller.automaticTarget = false
+    controller.interactionMode = .orbitTurntable
+    controller.minimumVerticalAngle = -89
+    controller.maximumVerticalAngle = 89
+    controller.pointOfView = stage.pointOfView
+    overlayDragDocumentID = documentID
+    overlayDragGeneration = generation
+    overlayDragPoint = local
+    isOverlayCameraDragging = true
+    controller.beginInteraction(local, withViewport: stage.bounds.size)
+    onOverlayCameraInteraction?(.began)
+  }
+
+  private func cameraInteractionPoint(_ point: CGPoint, stage: SCNView) -> CGPoint? {
+    guard point.x.isFinite, point.y.isFinite,
+      abs(point.x) <= 1_000_000, abs(point.y) <= 1_000_000,
+      stage.bounds.width.isFinite, stage.bounds.height.isFinite,
+      stage.bounds.width > 0, stage.bounds.height > 0,
+      stage.bounds.width <= 16_384, stage.bounds.height <= 16_384
+    else { return nil }
+    let local = stage.convert(point, from: self)
+    guard local.x.isFinite, local.y.isFinite else { return nil }
+    return local
+  }
+
+  private func continueOverlayCameraInteraction(with event: NSEvent) {
+    guard isOverlayCameraDragging else { return }
+    guard overlayCameraArmed, presentation == .passiveOverlay,
+      overlayDragDocumentID == document.id, overlayDragGeneration == labelGeneration,
+      let stage, !stage.isHidden, !isHiddenOrHasHiddenAncestor,
+      let point = cameraInteractionPoint(convert(event.locationInWindow, from: nil), stage: stage)
+    else {
+      cancelOverlayCameraInteraction()
+      return
+    }
+    overlayCameraDragEventCount = min(1_000_000, overlayCameraDragEventCount + 1)
+    if hypot(point.x - overlayDragPoint.x, point.y - overlayDragPoint.y) > 0 {
+      overlayCameraAdjusted = true
+    }
+    stage.defaultCameraController.continueInteraction(
+      point, withViewport: stage.bounds.size, sensitivity: 1)
+    overlayDragPoint = point
+    updateCameraProjection()
+  }
+
+  private func endOverlayCameraInteraction(with event: NSEvent) {
+    guard isOverlayCameraDragging else { return }
+    guard overlayCameraArmed, presentation == .passiveOverlay,
+      overlayDragDocumentID == document.id, overlayDragGeneration == labelGeneration,
+      let stage
+    else {
+      cancelOverlayCameraInteraction()
+      return
+    }
+    let point =
+      cameraInteractionPoint(convert(event.locationInWindow, from: nil), stage: stage)
+      ?? overlayDragPoint
+    stage.defaultCameraController.endInteraction(
+      point, withViewport: stage.bounds.size, velocity: .zero)
+    stage.defaultCameraController.stopInertia()
+    isOverlayCameraDragging = false
+    overlayDragDocumentID = nil
+    overlayDragGeneration = nil
+    updateCameraProjection()
+    onOverlayCameraInteraction?(.ended)
+  }
+
   func updateCameraProjection() {
     SCNTransaction.flush()
     updateProjectedLabels()
@@ -1188,6 +1426,10 @@ struct SceneCanvas: NSViewRepresentable {
     return bitmap
   }
   override func mouseDown(with event: NSEvent) {
+    if presentation == .passiveOverlay {
+      beginOverlayCameraInteraction(with: event)
+      return
+    }
     guard presentation == .editor else { return }
     let point = convert(event.locationInWindow, from: nil)
     let local = CGPoint(x: (point.x - content.position.x) / ratio, y: point.y / ratio)
@@ -1216,6 +1458,10 @@ struct SceneCanvas: NSViewRepresentable {
     nodeStart = CGPoint(x: pose.node.x, y: pose.node.y)
   }
   override func mouseDragged(with event: NSEvent) {
+    if presentation == .passiveOverlay {
+      continueOverlayCameraInteraction(with: event)
+      return
+    }
     let point = convert(event.locationInWindow, from: nil)
     let local = Point2D(x: (point.x - content.position.x) / ratio, y: point.y / ratio)
     if drawing {
@@ -1237,6 +1483,10 @@ struct SceneCanvas: NSViewRepresentable {
     onMove?(selection, original.x + parentPoint.x - start.x, original.y + parentPoint.y - start.y)
   }
   override func mouseUp(with event: NSEvent) {
+    if presentation == .passiveOverlay {
+      endOverlayCameraInteraction(with: event)
+      return
+    }
     if drawing {
       if activeStroke.count >= 2 { onStroke?(activeStroke) }
       activeStroke.removeAll()
@@ -1252,6 +1502,8 @@ struct SceneCanvas: NSViewRepresentable {
 /// changes its camera. Inertia is disabled so there is no hidden idle clock.
 @MainActor private final class ExplanationSceneView: SCNView {
   var onCameraChanged: (() -> Void)?
+  var canBecomeKeyResponder: (() -> Bool)?
+  override var acceptsFirstResponder: Bool { canBecomeKeyResponder?() ?? false }
   override var isOpaque: Bool { false }
   override var isFlipped: Bool { false }
   override func mouseDragged(with event: NSEvent) {

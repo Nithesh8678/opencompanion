@@ -47,15 +47,18 @@ enum ExplanationOverlayLayout {
   }
 }
 
-/// Generated visuals use a completely click-through native window. The only
-/// interactive window is the tightly bounded Clear pill. No pointer polling,
-/// event reposting, desktop capture, or transparent hit-test inference is used.
+/// Generated visuals remain click-through until Option explicitly arms a real
+/// visible mesh. During that interaction the bounded visual panel owns input;
+/// no transparent-pixel mouse holes or event reposting are assumed.
 @MainActor final class ExplanationOverlay {
   private weak var model: AppModel?
   private let onClear: @MainActor () -> Void
   private var visualPanel: AnnotationPanel?
   private var clearPanel: AnnotationPanel?
   private var canvas: RetainedCanvasView?
+  private var orbitController: ExplanationOrbitController?
+  private var orbitHint: NSTextField?
+  private let observeOrbitInput: Bool
   private var subscriptions = Set<AnyCancellable>()
   private var refreshScheduled = false
   private var availability = ExplanationOverlayAvailability()
@@ -63,8 +66,12 @@ enum ExplanationOverlayLayout {
   private(set) var documentID: String?
   private(set) var presentationLease: UUID?
 
-  init(model: AppModel, onClear: @escaping @MainActor () -> Void) {
+  init(
+    model: AppModel, observeOrbitInput: Bool = true,
+    onClear: @escaping @MainActor () -> Void
+  ) {
     self.model = model
+    self.observeOrbitInput = observeOrbitInput
     self.onClear = onClear
     model.objectWillChange.sink { [weak self] in
       MainActor.assumeIsolated { self?.scheduleRefresh() }
@@ -134,6 +141,41 @@ enum ExplanationOverlayLayout {
     canvas = view
     visualPanel = visual
     clearPanel = clear
+    let hint = NSTextField(labelWithString: "⌥ Drag to rotate")
+    hint.font = .systemFont(ofSize: 11, weight: .medium)
+    hint.textColor = .white
+    hint.backgroundColor = NSColor.black.withAlphaComponent(0.82)
+    hint.drawsBackground = true
+    hint.alignment = .center
+    hint.wantsLayer = true
+    hint.layer?.cornerRadius = 9
+    hint.layer?.masksToBounds = true
+    hint.layer?.zPosition = 2_000_000
+    hint.frame = CGRect(x: 12, y: 12, width: 128, height: 25)
+    hint.isHidden = true
+    hint.setAccessibilityIdentifier("explanation.orbit.hint")
+    view.addSubview(hint)
+    orbitHint = hint
+    view.setAccessibilityHelp(
+      "Hold Option over a visible 3D part, then drag to rotate. Release Option to finish. Control and Option starts voice."
+    )
+    orbitController = ExplanationOrbitController(
+      canvas: view, panel: visual, observeInput: observeOrbitInput,
+      authority: { [weak self] in self?.orbitAuthority() },
+      available: { [weak self] in
+        guard let self, let model = self.model else { return false }
+        return self.availability.canPresent && !model.listening && !model.pushToTalkActive
+          && ![
+            "Preparing microphone", "Listening", "Finishing speech",
+            "Release Control+Option to send",
+          ].contains(model.voiceInputState)
+      },
+      onPhaseChange: { [weak self] phase in
+        guard let self, let hint = self.orbitHint else { return }
+        hint.stringValue = phase == .dragging ? "Rotating · release ⌥" : "⌥ Drag to rotate"
+        hint.isHidden = phase == .passive
+        if phase != .passive { self.canvas?.addSubview(hint, positioned: .above, relativeTo: nil) }
+      })
     refresh()
     visual.orderFrontRegardless()
     clear.orderFrontRegardless()
@@ -142,6 +184,9 @@ enum ExplanationOverlayLayout {
   }
 
   func dismiss() {
+    orbitController?.shutdown()
+    orbitController = nil
+    orbitHint = nil
     documentID = nil
     presentationLease = nil
     displayID = nil
@@ -174,6 +219,7 @@ enum ExplanationOverlayLayout {
     panel.title = "OpenCompanion Explanation"
     panel.identifier = NSUserInterfaceItemIdentifier("org.opencompanion.explanation.visual")
     panel.ignoresMouseEvents = true
+    panel.acceptsMouseMovedEvents = true
     panel.contentView = canvas
     return panel
   }
@@ -239,6 +285,26 @@ enum ExplanationOverlayLayout {
     canvas.render(
       document, time: canvas.currentTime, selectedID: nil,
       presentationGeneration: model.taskGeneration)
+    orbitController?.refresh()
+  }
+
+  private func orbitAuthority() -> ExplanationOrbitState.Authority? {
+    guard let lease = presentationLease, let documentID, let displayID, let model,
+      model.scene?.id == documentID,
+      model.scene?.nodes.contains(where: { $0.kind == .mesh && $0.spatial3D?.geometry != nil })
+        == true,
+      NSScreen.screens.contains(where: {
+        ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+          == displayID
+      })
+    else { return nil }
+    return .init(
+      lease: lease, documentID: documentID, generation: model.taskGeneration, displayID: displayID)
+  }
+
+  var orbitDiagnostics: ExplanationOrbitDiagnostics? { orbitController?.diagnostics }
+  var orbitControllerForAcceptance: ExplanationOrbitController? {
+    observeOrbitInput ? nil : orbitController
   }
 
   static func hasRenderableContent(_ document: SceneDocument) -> Bool {

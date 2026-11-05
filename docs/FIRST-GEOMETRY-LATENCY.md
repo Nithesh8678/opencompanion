@@ -1,6 +1,6 @@
 # First-geometry latency experiment
 
-Prepared 6 November 2026. This is an opt-in public-fixture benchmark plan and implementation contract. No benchmark request was run while adding this helper. Normal app requests retain introduction-first NDJSON, existing routing and disabled extra latency measurements. No model, effort, service tier, authentication or account preference is changed by the flag.
+Updated 6 November 2026. This is an opt-in public-fixture benchmark and implementation contract. The first six-request round is recorded below; its candidate was not promoted. Normal app requests retain introduction-first NDJSON, existing routing and disabled extra latency measurements. No model, effort, service tier, authentication or account preference is changed by the flag.
 
 ## Candidate and unchanged controls
 
@@ -57,7 +57,37 @@ A candidate is eligible for further study only when every final quality gate sti
 
 The template requires `trial_executable` to name the newly frozen executable containing this helper. There is no helper model flag: both arms read the same configured model argument and must report matching actual model, effort and routing. Run each row even if an earlier quality check fails. Eligibility also permits new 2D explanations, but these three 3D cases do not validate path-only plots or justify a general 2D default change.
 
-Before freezing the benchmark, **692 local Swift tests passed**: 620 application tests across 74 suites, 21 store tests across two suites and 51 core tests across four suites. The new checks cover unchanged default prompts, opt-in scope, framing/decoding boundaries, first-handler ownership, content-free counts, and cancellation during diagnostic observers. A stopped request cannot submit its turn or deliver its scene after those observers suspend. These are local regression checks, separate from the pending real-provider comparisons.
+Before freezing the benchmark, **692 local Swift tests passed**: 620 application tests across 74 suites, 21 store tests across two suites and 51 core tests across four suites. The new checks cover unchanged default prompts, opt-in scope, framing/decoding boundaries, first-handler ownership, content-free counts, and cancellation during diagnostic observers. A stopped request cannot submit its turn or deliver its scene after those observers suspend. These are local regression checks, separate from real-provider quality and latency.
+
+## Round 1: candidate revision 1 is not eligible for promotion
+
+All six planned requests ran sequentially using the same frozen, certificate-signed executable from source **`a60b66fb9f1f98f56f553dfb24ec604e83c9036e`**, SHA-256 **`1f46dd1000c47db76ad448e9e3dd184ed5fd168df1d1cf0c477747d3b1d7464f`**. Every receipt reports normal NDJSON, `measureSceneLatency:true`, actual **`gpt-5.6-terra`**, **low** effort and **`terraVisual`** routing. The baseline/candidate prompt sizes were 11,096/11,538 UTF-8 bytes; conversation and serialized input bytes matched within each pair. No image, desktop capture or microphone was used. Separate benchmark requests did not overlap; unrelated account activity and remote load were not controlled.
+
+| Order | Case / arm | Quality | First typed geometry (s) | Provider finish (s) |
+| --- | --- | --- | ---: | ---: |
+| 1 | Motor / baseline | Failed: camera-facing cutaway | 29.37375 | 48.92132 |
+| 2 | Motor / candidate 1 | Failed: only one mesh/label; incomplete lesson | 20.06812 | 20.06854 |
+| 3 | Water / baseline | Passed | 17.08059 | 32.65460 |
+| 4 | Water / candidate 1 | Failed: only one mesh/label; incomplete lesson | 25.36446 | 25.36514 |
+| 5 | Pendulum / baseline | Failed: rod does not connect both parts | 23.54354 | 35.13494 |
+| 6 | Pendulum / candidate 1 | Passed | 18.57921 | 27.79127 |
+
+Every first scene contained one admitted drawable typed mesh, one group and one label. Each baseline first admitted a standalone text unit; each candidate first admitted a scene. The two incomplete candidates reached a clean provider completion with no rejected scene or protocol failure: they ended after their starter part. Their first scene ended at EOF; the other four first scenes were newline-terminated. All failures remain in the receipts and table. The candidate's faster motor/pendulum timings therefore do **not** establish a valid quality-preserving latency improvement; its water geometry was also slower.
+
+| Order | Turn accepted → first delta (s) | First scene line start → end (s) | Line end → decoded (ms) | First handler start → completed (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 22.61120 | 4.62603 | 0.862 | 0.491 |
+| 2 | 15.26221 | 4.66449 | 0.418 | 0.213 |
+| 3 | 10.00071 | 6.40972 | 0.334 | 0.172 |
+| 4 | 20.58558 | 4.02074 | 0.649 | 0.297 |
+| 5 | 14.68081 | 7.03801 | 0.920 | 0.440 |
+| 6 | 15.10364 | 3.33700 | 0.883 | 0.434 |
+
+The observed host admission/decode work is far smaller than the earlier waits in these six samples. These client clocks cannot assign that waiting time to a specific remote mechanism. No displayed frame, acoustic onset, full native visibility or real user action was measured. The baseline quality failures also demonstrate that the current default is not a general geometry-quality guarantee.
+
+Private retained artifacts: `/tmp/OpenCompanion-FirstGeometry-2026-11-06-Round1-a60b66f/manifest.json`, with the six named row directories above. Each contains its case's `result.json` and `public-scene.json`; aggregate receipts, exit codes and per-request logs are retained. Public prompts do not authorize publishing local raw output or unrelated user content.
+
+Candidate revision 2 makes a bounded prompt correction: after the starter scene, complete the entire requested lesson in the same response, including every requested part and label in further complete units, without stopping or waiting for a follow-up. All default prompts and shared geometry rules stay unchanged. This is a new candidate, not a retry or a replacement for revision 1. Its next matched round reverses the within-case order; results must be reported separately rather than pooled as a repeat of the same treatment.
 
 ## Earlier diagnostic context
 

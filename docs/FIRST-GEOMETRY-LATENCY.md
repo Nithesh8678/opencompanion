@@ -1,6 +1,6 @@
 # First-geometry latency experiment
 
-Updated 6 November 2026. This is an opt-in public-fixture benchmark and implementation contract. The first six-request round is recorded below; its candidate was not promoted. Normal app requests retain introduction-first NDJSON, existing routing and disabled extra latency measurements. No model, effort, service tier, authentication or account preference is changed by the flag.
+Updated 6 November 2026. This is an opt-in public-fixture benchmark and implementation contract. Two separate six-request rounds are recorded below; neither candidate was promoted. Normal app requests retain introduction-first NDJSON, existing routing and disabled extra latency measurements. No model, effort, service tier, authentication or account preference is changed by the flag.
 
 ## Candidate and unchanged controls
 
@@ -61,7 +61,7 @@ Before freezing the benchmark, **692 local Swift tests passed**: 620 application
 
 ## Round 1: candidate revision 1 is not eligible for promotion
 
-All six planned requests ran sequentially using the same frozen, certificate-signed executable from source **`a60b66fb9f1f98f56f553dfb24ec604e83c9036e`**, SHA-256 **`1f46dd1000c47db76ad448e9e3dd184ed5fd168df1d1cf0c477747d3b1d7464f`**. Every receipt reports normal NDJSON, `measureSceneLatency:true`, actual **`gpt-5.6-terra`**, **low** effort and **`terraVisual`** routing. The baseline/candidate prompt sizes were 11,096/11,538 UTF-8 bytes; conversation and serialized input bytes matched within each pair. No image, desktop capture or microphone was used. Separate benchmark requests did not overlap; unrelated account activity and remote load were not controlled.
+All six planned requests ran sequentially using the same frozen, certificate-signed executable from source **`a60b66fb9f1f98f56f553dfb24ec604e83c9036e`**, SHA-256 **`1f46dd1000c47db76ad448e9e3dd184ed5fd168df1d1cf0c477747d3b1d7464f`**. Every receipt reports normal NDJSON, `measureSceneLatency:true`, actual **`gpt-5.6-terra`**, **low** effort and **`terraVisual`** routing. The baseline/candidate instruction-string sizes were 11,096/11,538 UTF-8 bytes; conversation and serialized input bytes matched within each pair. No image, desktop capture or microphone was used. Separate benchmark requests did not overlap; unrelated account activity and remote load were not controlled.
 
 | Order | Case / arm | Quality | First typed geometry (s) | Provider finish (s) |
 | --- | --- | --- | ---: | ---: |
@@ -72,22 +72,64 @@ All six planned requests ran sequentially using the same frozen, certificate-sig
 | 5 | Pendulum / baseline | Failed: rod does not connect both parts | 23.54354 | 35.13494 |
 | 6 | Pendulum / candidate 1 | Passed | 18.57921 | 27.79127 |
 
-Every first scene contained one admitted drawable typed mesh, one group and one label. Each baseline first admitted a standalone text unit; each candidate first admitted a scene. The two incomplete candidates reached a clean provider completion with no rejected scene or protocol failure: they ended after their starter part. Their first scene ended at EOF; the other four first scenes were newline-terminated. All failures remain in the receipts and table. The candidate's faster motor/pendulum timings therefore do **not** establish a valid quality-preserving latency improvement; its water geometry was also slower.
+Every first-scene admission summary recorded three nodes, including one group and one drawable typed mesh. Each baseline first admitted a standalone text unit; each candidate first admitted a scene. The two incomplete candidates reached a clean provider completion with no rejected scene or protocol failure: they ended after their starter part. Their first scene ended at EOF; the other four first scenes were newline-terminated. All failures remain in the receipts and table. The candidate's faster motor/pendulum timings therefore do **not** establish a valid quality-preserving latency improvement; its water geometry was also slower.
 
 | Order | Turn accepted → first delta (s) | First scene line start → end (s) | Line end → decoded (ms) | First handler start → completed (ms) |
 | --- | ---: | ---: | ---: | ---: |
 | 1 | 22.61120 | 4.62603 | 0.862 | 0.491 |
-| 2 | 15.26221 | 4.66449 | 0.418 | 0.213 |
-| 3 | 10.00071 | 6.40972 | 0.334 | 0.172 |
+| 2 | 15.26222 | 4.66449 | 0.412 | 0.214 |
+| 3 | 10.00071 | 6.40971 | 0.331 | 0.169 |
 | 4 | 20.58558 | 4.02074 | 0.649 | 0.297 |
-| 5 | 14.68081 | 7.03801 | 0.920 | 0.440 |
-| 6 | 15.10364 | 3.33700 | 0.883 | 0.434 |
+| 5 | 14.68081 | 7.03801 | 0.921 | 0.437 |
+| 6 | 15.10364 | 3.33701 | 0.875 | 0.425 |
 
 The observed host admission/decode work is far smaller than the earlier waits in these six samples. These client clocks cannot assign that waiting time to a specific remote mechanism. No displayed frame, acoustic onset, full native visibility or real user action was measured. The baseline quality failures also demonstrate that the current default is not a general geometry-quality guarantee.
 
 Private retained artifacts: `/tmp/OpenCompanion-FirstGeometry-2026-11-06-Round1-a60b66f/manifest.json`, with the six named row directories above. Each contains its case's `result.json` and `public-scene.json`; aggregate receipts, exit codes and per-request logs are retained. Public prompts do not authorize publishing local raw output or unrelated user content.
 
 Candidate revision 2 makes a bounded prompt correction: after the starter scene, complete the entire requested lesson in the same response, including every requested part and label in further complete units, without stopping or waiting for a follow-up. All default prompts and shared geometry rules stay unchanged. This is a new candidate, not a retry or a replacement for revision 1. Its next matched round reverses the within-case order; results must be reported separately rather than pooled as a repeat of the same treatment.
+
+## Round 2: completion wording does not rescue the candidate
+
+Six new sequential requests used frozen signed source **`4aa0f04c733c0fb957f9cfd3b140b3b4534b717e`**, SHA-256 **`7d4b982378fa5c529225e3ec9b67a2a91bd3439ba24e0c5a50b4dd85834779a7`**. This round reversed each within-case order and tested candidate revision 2. It is a different prompt treatment, not a replicated revision-1 round. All receipts again report normal NDJSON, explicit measurement, actual `gpt-5.6-terra`, low effort and `terraVisual`; the instruction-string sizes are 11,856 candidate / 11,096 baseline bytes. Conversation/input sizes match within pairs. The four focused prompt tests passed after the wording-only revision; the prior full native suite is scoped to the diagnostics checkpoint.
+
+| Order | Case / arm | Quality | First typed geometry (s) | Provider finish (s) |
+| --- | --- | --- | ---: | ---: |
+| 1 | Motor / candidate 2 | Failed: only one mesh/label; incomplete lesson | 27.05719 | 27.05809 |
+| 2 | Motor / baseline | Passed | 21.10637 | 52.66571 |
+| 3 | Water / candidate 2 | Failed: only one mesh/label; incomplete lesson | 16.99704 | 16.99770 |
+| 4 | Water / baseline | Failed: protocol rejection; partial scene retained | 14.67023 | 32.02593 |
+| 5 | Pendulum / candidate 2 | Passed | 16.04128 | 24.67200 |
+| 6 | Pendulum / baseline | Passed | 15.33252 | 25.44447 |
+
+| Order | Turn accepted → first delta (s) | First scene line start → end (s) | Line end → decoded (ms) | First handler start → completed (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 19.99453 | 6.18915 | 0.828 | 0.517 |
+| 2 | 14.88088 | 4.96557 | 0.366 | 0.138 |
+| 3 | 11.19901 | 5.68702 | 0.577 | 0.321 |
+| 4 | 10.65293 | 3.17446 | 0.706 | 0.472 |
+| 5 | 11.91665 | 3.93652 | 0.531 | 0.266 |
+| 6 | 12.06418 | 3.11659 | 0.642 | 0.461 |
+
+All first-scene summaries again recorded three nodes, one group and one drawable typed mesh. Candidate 2 again returned only one admitted mesh/label for motor and water, with clean provider completion and EOF framing. Its pendulum passed all existing checks, but its first typed geometry arrived **later** than the paired passing baseline. No candidate 2 case establishes a quality-preserving improvement in first-geometry latency.
+
+The water baseline retained two earlier scene units and three atom meshes before rejecting its next unit. The retained public rejected line is valid JSON but incorrectly mixes a text-label object into the `connectors` array; typed protocol decoding correctly refuses it. The independent final checks also detect missing bonds. No coercion, hidden retry, local guessed geometry or oracle weakening was introduced.
+
+Private retained root: `/tmp/OpenCompanion-FirstGeometry-2026-11-06-Round2-4aa0f04/`, with `manifest.json`, all six row/case receipts and scenes, per-request logs, and the water baseline's `public-rejected-unit.txt`. All 12 round-one/round-two outcomes remain recorded. **Both candidate revisions remain opt-in; default NDJSON prompts, model/effort selection, normal measurement settings and ordinary UI behavior remain unchanged.** These samples do not establish a general reliability rate, acoustic/display latency, FPS or HeyClicky parity. Next work must establish complete valid scene delivery before promoting a startup optimization.
+
+## Installed native verification and a diagnosed sampling failure
+
+The canonical `/Applications/OpenCompanion.app` was replaced with signed source `4aa0f04`, retaining team `BPR2T4D656` and the existing designated requirement. Its actual executable, build/install receipts and Info.plist agree on source/hash; strict deep signature verification passed. The installer reported `cleanupIssues:[]` and removed both temporary build/staging app bundles. No additional installed copy or user-data reset was introduced. Both exact-source CI runs passed: [diagnostics revision a60b66f](https://github.com/Nithesh8678/opencompanion/actions/runs/42093413404) and [completion wording revision 4aa0f04](https://github.com/Nithesh8678/opencompanion/actions/runs/42094528359).
+
+The exact installed `4aa0f04` authored narration check passed at `/tmp/OpenCompanion-FirstGeometry-Final-Narration-4aa0f04/explanation-narration-acceptance.json`. Both stages reached their actual native surface targets, with submitted-layer tip errors **0.499886 / 0.783001 logical points** and nearest caption/body gap **8.485281 logical points**. The second stage recovered after `hostBoundsUnavailable`. Native synthesis start/range/finish callbacks, scene-before-speech-enqueue ordering, stale post-Stop rejection, unchanged physical pointer and unchanged foreground passed. Own cursor-window PNGs were inspected; each captured only the initial caption prefix “The”. This is authored native execution with actual synthesis requested, not microphone, provider, acoustic recording, whole-desktop compositing or FPS evidence. The earlier physical user confirmation belongs to the separately recorded `e8a7278` workflow, not a new physical test of `4aa0f04`.
+
+A separate exact-installed native overlay check of round-two's passing public pendulum scene failed at its combined final-composite assertion. The failure and own-view PNG remain at `/tmp/OpenCompanion-FirstGeometry-Final-Pendulum-4aa0f04/`. The image shows the complete support/rod/bob lesson; all three requested leaders separately passed canonical-anchor preservation and whole-scene closest-triangle target checks. Visual inspection alone does not override that failed assertion.
+
+A diagnostic-only build then retained the same predicates/sampler and wrote bounded scalar metrics before the assertion. At `/tmp/OpenCompanion-FirstGeometry-Pendulum-Predicate-Diagnostic/final-composite-metrics.json`, **15 geometry samples all matched**; only the minimum-20-samples predicate failed. Label/leader changed-pixel counts were **1,178 / 132**, final visible/transparent counts **26,268 / 930,413**, with all remaining pixel predicates true. This establishes undersampling of a thin object by the original viewport grid for that run. No sample-count or 65% match threshold was lowered. A coverage correction and a fresh exact-installed verification are required before claiming this native pendulum check passes.
+
+The coverage correction subsequently passed **701 local Swift tests** (629 application across 75 suites, 21 store across two suites, 51 core across four suites). Nine new synthetic checks include thin off-grid geometry, displaced/wrong-color/empty images, insufficient genuine opaque pixels, backing-scale/offset mapping, preservation of existing sufficiently populated passes and failures, work bounds, unavailable colors and invalid/off-canvas mappings. The helper retains an original grid result with at least 20 samples. Otherwise a format-checked, bounded fallback selects up to 128 opaque-pixel rank quantiles with constant storage, at most two passes over eight million pixels and at most 128 color-converted pairs. It preserves the original coordinate mapping and alpha/color tolerances.
+
+The corrected diagnostic native pendulum run passed every original assertion at `/tmp/OpenCompanion-FirstGeometry-Pendulum-Coverage-Diagnostic/explanation-acceptance.json`. Its metrics retain the original **15/15** grid result and report **128/128** fallback matches, 21,864 eligible opaque pixels and 1,043,566 raw alpha visits. This is area-weighted sampled composite consistency; very small components or periodic corruption can escape finite quantile sampling. All-target native surface/leader checks remain separate. A clean signed installation check follows this diagnostic result; it is not retroactively assigned to the earlier failed installed binary.
 
 ## Earlier diagnostic context
 

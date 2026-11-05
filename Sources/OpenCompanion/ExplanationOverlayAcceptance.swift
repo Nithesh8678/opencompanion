@@ -164,6 +164,63 @@ import simd
     let leaderPixels = changedPixels(
       composite, baseline: baseline, in: leaderFrame.insetBy(dx: -2, dy: -2),
       canvasSize: canvas.bounds.size, excluding: labelFrame.insetBy(dx: -1, dy: -1))
+    let geometryMatchFraction =
+      geometryPixels.samples > 0
+      ? Double(geometryPixels.matches) / Double(geometryPixels.samples) : nil
+    let finalCompositeMetrics: [String: Any] = [
+      "schemaVersion": 1, "phase": "before-final-composite-guard",
+      "ownViewOnly": true, "desktopCaptured": false,
+      "typedMeshCount": document.nodes.filter { $0.spatial3D?.geometry != nil }.count,
+      "expectedAnchoredLabelCount": expectedLabels.count,
+      "projectedLabelFrameCount": visibleFrames.count,
+      "requestedLeaderCount": document.nodes.filter { $0.spatial3D?.labelAnchor?.leader == true }
+        .count,
+      "meshVisiblePixels": meshCoverage.visible,
+      "meshTransparentPixels": meshCoverage.transparent,
+      "finalVisiblePixels": finalCoverage.visible,
+      "finalTransparentPixels": finalCoverage.transparent,
+      "geometrySamples": geometryPixels.samples, "geometryMatches": geometryPixels.matches,
+      "geometryMatchFraction": geometryMatchFraction.map { $0 as Any } ?? NSNull(),
+      "geometrySamplingMethod": geometryPixels.method.rawValue,
+      "geometryViewportGridSamples": geometryPixels.gridSamples,
+      "geometryViewportGridMatches": geometryPixels.gridMatches,
+      "geometryOpaqueNativePixels": geometryPixels.opaqueNativePixels.map { $0 as Any } ?? NSNull(),
+      "geometryRawAlphaPixelsVisited": geometryPixels.alphaPixelsVisited,
+      "geometrySelectedNativePixels": geometryPixels.selectedNativePixels,
+      "labelPixels": labelPixels, "leaderPixels": leaderPixels,
+      "predicates": [
+        "finalVisibleOver500": finalCoverage.visible > 500,
+        "finalTransparentOver500": finalCoverage.transparent > 500,
+        "geometrySamplesAtLeast20": geometryPixels.samples >= 20,
+        "geometryMatchFractionAtLeast0_65": geometryMatchFraction.map { $0 >= 0.65 } ?? false,
+        "labelPixelsAtLeast12": labelPixels >= 12,
+        "leaderPixelsAtLeast6": leaderPixels >= 6,
+      ],
+      "frames": [
+        "visualWindowGlobalAppKit": metricFrame(visual.frame),
+        "canvasBounds": metricFrame(canvas.bounds),
+        "stageFrameInCanvas": metricFrame(stage.frame),
+        "stageBounds": metricFrame(stage.bounds),
+        "sampledLabelDocumentFrame": metricFrame(initial),
+        "sampledLabelCanvasFrame": metricFrame(labelFrame),
+        "sampledLeaderDocumentBounds": metricFrame(leaderPath.boundingBoxOfPath),
+        "sampledLeaderCanvasBounds": metricFrame(leaderFrame),
+        "leaderSampleCanvasFrame": metricFrame(leaderFrame.insetBy(dx: -2, dy: -2)),
+        "leaderExcludedCanvasFrame": metricFrame(labelFrame.insetBy(dx: -1, dy: -1)),
+      ],
+      "bitmaps": [
+        "nativeMesh": bitmapMetrics(meshSnapshot),
+        "baselineWithoutSpatialLabels": bitmapMetrics(baseline),
+        "finalComposite": bitmapMetrics(composite),
+      ],
+    ]
+    let finalCompositeMetricBytes = try JSONSerialization.data(
+      withJSONObject: finalCompositeMetrics, options: [.prettyPrinted, .sortedKeys])
+    guard finalCompositeMetricBytes.count <= 16_384 else {
+      throw ProviderError.message("The content-free final composite diagnostic exceeded its bound.")
+    }
+    try finalCompositeMetricBytes.write(
+      to: output.appendingPathComponent("final-composite-metrics.json"), options: .atomic)
     guard finalCoverage.visible > 500, finalCoverage.transparent > 500,
       geometryPixels.samples >= 20,
       Double(geometryPixels.matches) / Double(geometryPixels.samples) >= 0.65,
@@ -834,6 +891,28 @@ import simd
     return (visible, transparent)
   }
 
+  /// Scalar own-view diagnostics only: no label text, node IDs or pixel data.
+  private static func metricFrame(_ frame: CGRect) -> [String: Any] {
+    func finite(_ value: CGFloat) -> Any { value.isFinite ? Double(value) as Any : NSNull() }
+    return [
+      "x": finite(frame.origin.x), "y": finite(frame.origin.y),
+      "width": finite(frame.size.width), "height": finite(frame.size.height),
+    ]
+  }
+
+  private static func bitmapMetrics(_ bitmap: NSBitmapImageRep) -> [String: Any] {
+    [
+      "pixelsWide": bitmap.pixelsWide, "pixelsHigh": bitmap.pixelsHigh,
+      "bitsPerSample": bitmap.bitsPerSample, "samplesPerPixel": bitmap.samplesPerPixel,
+      "bitsPerPixel": bitmap.bitsPerPixel, "bytesPerRow": bitmap.bytesPerRow,
+      "hasAlpha": bitmap.hasAlpha, "isPlanar": bitmap.isPlanar,
+      "alphaFirst": bitmap.bitmapFormat.contains(.alphaFirst),
+      "bitmapFormatRawValue": bitmap.bitmapFormat.rawValue,
+      "bitmapDataAvailable": bitmap.bitmapData != nil,
+      "logicalSize": metricFrame(CGRect(origin: .zero, size: bitmap.size)),
+    ]
+  }
+
   private static func write(_ bitmap: NSBitmapImageRep, to url: URL) throws {
     guard let bytes = bitmap.representation(using: .png, properties: [:]) else {
       throw ProviderError.message("Could not encode the own-view explanation snapshot.")
@@ -880,11 +959,11 @@ import simd
   private static func matchingGeometryPixels(
     _ native: NSBitmapImageRep, composite: NSBitmapImageRep, stageFrame: CGRect,
     canvasSize: CGSize
-  ) -> (samples: Int, matches: Int) {
+  ) -> NativeCompositeGeometryComparison.Result {
     guard native.pixelsWide > 0, native.pixelsHigh > 0,
       composite.pixelsWide > 0, composite.pixelsHigh > 0,
       canvasSize.width > 0, canvasSize.height > 0
-    else { return (0, 0) }
+    else { return NativeCompositeGeometryComparison.preservingGrid(.init(samples: 0, matches: 0)) }
     let strideSize = max(1, Int(sqrt(Double(native.pixelsWide * native.pixelsHigh) / 512)))
     var samples = 0
     var matches = 0
@@ -914,7 +993,37 @@ import simd
         }
       }
     }
-    return (samples, matches)
+    let grid = NativeCompositeGeometryComparison.Counts(samples: samples, matches: matches)
+    guard samples < 20 else { return NativeCompositeGeometryComparison.preservingGrid(grid) }
+    let permittedFormat: NSBitmapImageRep.Format = [.alphaFirst, .alphaNonpremultiplied]
+    guard native.bitsPerSample == 8, native.samplesPerPixel == 4, native.bitsPerPixel == 32,
+      native.hasAlpha, !native.isPlanar,
+      native.bitmapFormat.subtracting(permittedFormat).isEmpty,
+      native.pixelsWide <= NativeCompositeGeometryComparison.maximumDimension,
+      native.bytesPerRow >= native.pixelsWide * 4, let bytes = native.bitmapData
+    else { return NativeCompositeGeometryComparison.preservingGrid(grid) }
+    let alpha = native.bitmapFormat.contains(.alphaFirst) ? 0 : 3
+    return NativeCompositeGeometryComparison.compare(
+      grid: grid, nativeWidth: native.pixelsWide, nativeHeight: native.pixelsHigh,
+      compositeWidth: composite.pixelsWide, compositeHeight: composite.pixelsHigh,
+      stageFrame: stageFrame, canvasSize: canvasSize,
+      nativeAlpha: { x, y in bytes[y * native.bytesPerRow + x * 4 + alpha] },
+      colors: { sample in
+        guard
+          let expected = native.colorAt(x: sample.nativeX, y: sample.nativeY)?
+            .usingColorSpace(.deviceRGB),
+          let actual = composite.colorAt(x: sample.compositeX, y: sample.compositeY)?
+            .usingColorSpace(.deviceRGB)
+        else { return nil }
+        return (
+          .init(
+            red: Double(expected.redComponent), green: Double(expected.greenComponent),
+            blue: Double(expected.blueComponent), alpha: Double(expected.alphaComponent)),
+          .init(
+            red: Double(actual.redComponent), green: Double(actual.greenComponent),
+            blue: Double(actual.blueComponent), alpha: Double(actual.alphaComponent))
+        )
+      })
   }
 
   private static func requireFrame(_ value: CGRect?) throws -> CGRect {

@@ -57,7 +57,24 @@ A separate default-provider water trial passed at `/tmp/OpenCompanion-Narration-
 
 The provider helper does not exercise AppModel staged presentation, native rendering or audio. Its success and the authored native synthesis check are distinct evidence; together they do not establish a live provider-to-audible-rendered explanation. Scientific accuracy beyond the illustrative oracle is unverified.
 
-Signed installation and exact-source CI for this new slice were pending when this document was written. The earlier installed checkpoint is recorded separately in [FEATURE-STATUS.md](FEATURE-STATUS.md); do not attribute these modified-debug results to that installed binary. Physical listening quality, route/mute/headphone behavior, broader concepts and full HeyClicky interaction parity remain open.
+## Exact signed installation
+
+The installed source is **`228d49502960a165c77fb8e60279ce7aa36f5ec2`**, executable SHA-256 **`7274e5ca874064463fa71bb5276feb50e84c3b26dab01eb3715083d1a8ec4f9d`**, at `/Applications/OpenCompanion.app`. Build/install receipts, Info.plist and independently hashed executable agree. It reuses the existing certificate/team, `BPR2T4D656`; normal macOS deep strict signature verification passed and the designated requirement is satisfied. The local arm64 app is not notarized. Only that canonical Companion app remains in Applications; temporary build/staging apps were removed and installer cleanup issues are empty.
+
+The exact installed executable passed `--explanation-narration-acceptance` at `/tmp/OpenCompanion-Narration-Installed-2026-11-05`. Both actual native starts/ranges/finishes, exact rendered revisions before enqueue, canonical revision two ahead of presentation one, cursor prefixes, foreground/passivity and stale post-Stop rejection passed. Root inspected both own-view PNGs, showing a sphere first and then the added box. Single-run elapsed times:
+
+| Stage | Presentation release | Speech enqueue | Delegate start | Delegate finish |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 11.372 ms | 74.434 ms | 90.141 ms | 5,864.077 ms |
+| 2 | 5,864.638 ms | 5,868.333 ms | 5,870.060 ms | 10,612.303 ms |
+
+Those are host/native-engine observations, not audible sample timestamps. This authored helper made no provider call, desktop/microphone capture, audio recording or physical input. It cannot establish an end-to-end model-to-audible-rendered turn.
+
+**Separate user-reported real workflow:** with this updated canonical app open, the user was asked to hold Control+Option and say “Create a 3D explanation of a water molecule.” They reported **“Parts and captions follow the speech smoothly.”** This adds attributed feedback for one physical hotkey/provider/presentation workflow and subjective speech/visual feel. No prompt-free trace or recording was correlated with that response, so its model identity, timings, acoustic word alignment, frame rate and audio route are not independently established. It does not rewrite the authored helper's physical-input/acoustic fields or close the broader conceptual-explanation gate.
+
+A separate exact-installed native regression loaded the public water document from the earlier `0c52cfeb` default-model trial. At `/tmp/OpenCompanion-Narration-Installed-Water-Native-2026-11-05`, five meshes, all three complete labels and all three requested leaders passed independent full-scene closest-surface checks before/after programmatic camera movement. Canonical hints stayed unchanged, label overlap was zero, alpha/composite pixels and foreground/Clear teardown passed, and the separate authored-box synthetic own-view orbit/lifecycle checks passed. Its own-view PNG was inspected. That regression used no provider, speech, desktop capture or physical orbit.
+
+After helpers, CUA reopened the canonical app normally and observed only `org.opencompanion.cursor`, with no Dashboard or Notebook. Exact-source [CI run 42078512787](https://github.com/Nithesh8678/opencompanion/actions/runs/42078512787) passed native tests, the native app build and protocol checks for the exact installed source. Physical listening quality, route/mute/headphone behavior, broader concepts and full HeyClicky interaction parity remain open.
 
 ## Implementation entry points
 

@@ -19,6 +19,7 @@ enum SpatialSceneLiveAcceptance {
       arguments: ProcessInfo.processInfo.arguments)
     let sceneStart = try SpatialSceneStartSelection.select(
       arguments: ProcessInfo.processInfo.arguments, outputMode: outputMode)
+    let ndjsonAuditRequested = outputMode == .ndjson
     let cases = [
       Case(
         id: "brushed-dc-motor",
@@ -56,6 +57,10 @@ enum SpatialSceneLiveAcceptance {
         policy: policy, hasImage: false, hasScene: false, outputMode: outputMode)
       let started = ProcessInfo.processInfo.systemUptime
       let collector = SpatialSceneAcceptanceCollector(started: started)
+      var onNDJSONAudit: (@Sendable (CodexNDJSONAudit) async -> Void)?
+      if ndjsonAuditRequested {
+        onNDJSONAudit = { await collector.recordNDJSONAudit($0) }
+      }
       var failure: String?
       do {
         try await CodexProvider().stream(
@@ -66,7 +71,8 @@ enum SpatialSceneLiveAcceptance {
           onStructuredProgress: { await collector.structuredProgress($0) },
           onUnit: { try await collector.receive($0) }, responsePolicy: policy,
           outputMode: outputMode, sceneStart: sceneStart, measureSceneLatency: true,
-          onRejectedLine: { await collector.recordRejectedLine($0) })
+          onRejectedLine: { await collector.recordRejectedLine($0) },
+          onNDJSONAudit: onNDJSONAudit)
       } catch {
         failure = error.localizedDescription
       }
@@ -109,6 +115,7 @@ enum SpatialSceneLiveAcceptance {
         "outputMode": outputMode.rawValue,
         "sceneStart": sceneStart.rawValue,
         "measureSceneLatency": true,
+        "ndjsonAuditRequested": ndjsonAuditRequested, "ndjsonAudit": NSNull(),
         "firstAdmission": NSNull(), "firstSceneAdmission": NSNull(),
         "model": snapshot.routing?.model ?? "unreported",
         "effort": snapshot.routing?.effort ?? "provider-default",
@@ -155,6 +162,9 @@ enum SpatialSceneLiveAcceptance {
         result["structuredStageProgress"] = try JSONSerialization.jsonObject(
           with: encoder.encode(progress))
       }
+      if let audit = snapshot.ndjsonAudit {
+        result["ndjsonAudit"] = try JSONSerialization.jsonObject(with: encoder.encode(audit))
+      }
       results.append(result)
       try write(result, to: directory.appendingPathComponent("result.json"))
       try FileHandle.standardOutput.write(
@@ -167,6 +177,7 @@ enum SpatialSceneLiveAcceptance {
         "outputMode": outputMode.rawValue,
         "sceneStart": sceneStart.rawValue,
         "measureSceneLatency": true,
+        "ndjsonAuditRequested": ndjsonAuditRequested,
         "selectedCases": selectedIDs,
         "scope":
           "Real provider units and strict native semantic admission; no rendering, capture, audio or physical-task proof.",
@@ -617,6 +628,7 @@ struct SpatialSceneAcceptanceSnapshot: Sendable {
   let firstTypedMS: Double?
   let routing: CodexRoutingSelection?
   let timings: [CodexTimingEvent]
+  let ndjsonAudit: CodexNDJSONAudit?
   let firstAdmission: SpatialSceneAdmissionSummary?
   let firstSceneAdmission: SpatialSceneAdmissionSummary?
 }
@@ -718,6 +730,7 @@ actor SpatialSceneAcceptanceCollector {
   private var firstTypedMS: Double?
   private var routing: CodexRoutingSelection?
   private var timings: [CodexTimingEvent] = []
+  private var ndjsonAudit: CodexNDJSONAudit?
   private var firstAdmission: SpatialSceneAdmissionSummary?
   private var firstSceneAdmission: SpatialSceneAdmissionSummary?
   private let started: TimeInterval
@@ -730,6 +743,12 @@ actor SpatialSceneAcceptanceCollector {
   func timing(_ event: CodexTimingEvent) {
     guard timings.count < CodexTimingEvent.Stage.allCases.count else { return }
     timings.append(event)
+  }
+  func recordNDJSONAudit(_ value: CodexNDJSONAudit) {
+    // The transport supplies one terminal, content-free snapshot even when
+    // admission fails. A late duplicate cannot replace this request's receipt.
+    guard ndjsonAudit == nil else { return }
+    ndjsonAudit = value
   }
   func recordRejectedLine(_ data: Data) {
     guard rejectedLine == nil, !data.isEmpty,
@@ -808,6 +827,7 @@ actor SpatialSceneAcceptanceCollector {
       rejectedLine: rejectedLine,
       progressiveGeometryUnits: progressiveGeometryUnits,
       firstSceneMS: firstSceneMS, firstTypedMS: firstTypedMS, routing: routing, timings: timings,
+      ndjsonAudit: ndjsonAudit,
       firstAdmission: firstAdmission, firstSceneAdmission: firstSceneAdmission)
   }
 

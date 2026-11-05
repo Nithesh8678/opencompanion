@@ -8,6 +8,8 @@ Official changelog, homepage/pricing, latest Mac release, trust and privacy page
 
 The objective of broad product parity is substantially larger than the current guidance and explanation slices. A passing target or scene test proves neither a complete assistant nor a successful external task. Use the checklist below to choose and verify independent end-to-end flows.
 
+**6 November public-page refresh:** the inspected [official changelog][changelog] still has Mac 1.1.2 (30 October) and Windows 1.1.4 (1 November) as its newest platform entries. The [homepage][home] still presents screen-aware conversation, guidance and task agents. No later entry was observed in those pages. This check adds no reference runtime or private architecture claim; release, policy and recording evidence retains its own earlier date.
+
 ## Evidence rules
 
 | Label | Meaning |

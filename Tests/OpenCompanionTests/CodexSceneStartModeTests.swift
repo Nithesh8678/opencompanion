@@ -5,9 +5,10 @@ import Testing
 @testable import OpenCompanion
 
 struct CodexSceneStartModeTests {
-  @Test func defaultPromptsRemainByteEquivalentToThePreAblationCheckpoint() {
-    // SHA-256 snapshots of the complete UTF-8 prompts at 969c49b, before this
-    // opt-in experiment. Compare against old bytes, not two new code paths.
+  @Test func defaultPromptsMatchTheirRecordedContracts() {
+    // Conversation/guidance retain the pre-ablation 969c49b bytes. Notebook
+    // snapshots intentionally include the shared connector/playback grammar
+    // clarification; implicit startup must still equal explicit intro-first.
     let cases: [(ResponsePolicy, String)] = [
       (
         .init(route: .conversation, includesExistingNotebook: false),
@@ -19,11 +20,11 @@ struct CodexSceneStartModeTests {
       ),
       (
         .init(route: .notebook, includesExistingNotebook: false),
-        "e27ab1ea72962d04e2b46b52edb402e3542cf27a4bc9dbcc0c6b92dfbb9e67c8"
+        "a90d06205e2e788a4ef4291f0288235637bef637e6984498061eedc02c678ff2"
       ),
       (
         .init(route: .notebook, includesExistingNotebook: true),
-        "2d70ca24aef350de12937b55b7bc9265f81e744d1a237e7ccfe4ef09ce0c9dc3"
+        "0db6226e6ee649ed3b2c7fbe5b92fc2d0a1608960912bb50a32d931006a4c072"
       ),
     ]
     for (policy, expected) in cases {

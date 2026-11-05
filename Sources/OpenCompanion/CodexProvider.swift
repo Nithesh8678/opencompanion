@@ -82,7 +82,8 @@ actor CodexProvider {
     outputMode: CodexOutputMode = .ndjson,
     sceneStart: CodexSceneStartMode = .introductionFirst,
     measureSceneLatency: Bool = false,
-    onRejectedLine: (@Sendable (Data) async -> Void)? = nil
+    onRejectedLine: (@Sendable (Data) async -> Void)? = nil,
+    onNDJSONAudit: (@Sendable (CodexNDJSONAudit) async -> Void)? = nil
   ) async throws {
     let requestPolicy =
       responsePolicy
@@ -254,14 +255,16 @@ actor CodexProvider {
           throw error
         }
         if measureFirstHandler { await timing.finishFirstSceneHandler(success: true) }
-        // The steps decoder records a successful scene callback before checking
-        // cancellation between scene and narration. Do not turn that known
-        // admission into an uncounted callback failure in this wrapper.
-        if outputMode != .structuredSpatialSteps { try Task.checkCancellation() }
+        // These decoders count successful host admission before their own
+        // post-callback cancellation check. Do not turn a known admission into
+        // an uncounted callback failure in this wrapper.
+        if outputMode != .structuredSpatialSteps && outputMode != .ndjson {
+          try Task.checkCancellation()
+        }
         await timing.mark(.firstUnitAccepted)
         if unit.type == "scene" { await timing.mark(.firstSceneAccepted) }
       }
-      var decoder = ProviderTextStreamDecoder()
+      var ndjson = CodexNDJSONOutput(threadID: threadID)
       let onSceneLineDecoded: (@Sendable (ProviderLineWireSample) async -> Void)?
       if measureSceneLatency {
         onSceneLineDecoded = { sample in await timing.recordSceneLine(sample) }
@@ -272,51 +275,93 @@ actor CodexProvider {
       var lastSpatialProgress: StructuredSpatialStageProgress?
       var totalBytes = 0
       var sawCompleted = false
-      while let message = try await iterator.next() {
-        try Task.checkCancellation()
-        if let error = message["error"] {
-          throw ProviderError.message(
-            "Codex app-server error: \(error["message"]?.string ?? "request rejected")")
-        }
-        if message["id"]?.integer == 5, let turnID = message["result"]?["turn"]?["id"]?.string {
-          session.setTurn(threadID: threadID, turnID: turnID)
-          if outputMode.isStructured { try structured.bind(turnID: turnID) }
-          await timing.mark(.turnAccepted)
-        }
-        guard let method = message["method"]?.string else { continue }
-        let params = message["params"]
-        if message["id"] != nil {
-          try session.rejectToolRequest(message)
-          throw ProviderError.message(
-            "Codex requested an interactive capability. Teaching mode permits no external actions.")
-        }
-        if method == "item/started", let itemType = params?["item"]?["type"]?.string,
-          [
-            "commandExecution", "mcpToolCall", "dynamicToolCall", "fileChange", "webSearch",
-            "imageGeneration", "collabAgentToolCall",
-          ].contains(itemType)
-        {
-          throw ProviderError.message(
-            "Codex attempted a tool call outside the teaching response scope.")
-        }
-        if method == "item/agentMessage/delta", let delta = params?["delta"]?.string,
-          outputMode == .ndjson || structured.matchesTurn(params)
-        {
-          if !delta.isEmpty { await timing.mark(.firstTextDelta) }
-          totalBytes += delta.utf8.count
-          guard totalBytes <= 2_000_000 else {
-            throw ProviderError.message("Codex output exceeded the bounded response budget.")
+      do {
+        while let message = try await iterator.next() {
+          try Task.checkCancellation()
+          if let error = message["error"] {
+            throw ProviderError.message(
+              "Codex app-server error: \(error["message"]?.string ?? "request rejected")")
+          }
+          if message["id"]?.integer == 5, let turnID = message["result"]?["turn"]?["id"]?.string {
+            session.setTurn(threadID: threadID, turnID: turnID)
+            if outputMode.isStructured {
+              try structured.bind(turnID: turnID)
+            } else {
+              try ndjson.bind(turnID: turnID)
+            }
+            await timing.mark(.turnAccepted)
+          }
+          guard let method = message["method"]?.string else { continue }
+          let params = message["params"]
+          if message["id"] != nil {
+            try session.rejectToolRequest(message)
+            throw ProviderError.message(
+              "Codex requested an interactive capability. Teaching mode permits no external actions."
+            )
+          }
+          if method == "item/started",
+            outputMode != .ndjson || ndjson.matchesTurn(params),
+            let itemType = params?["item"]?["type"]?.string,
+            [
+              "commandExecution", "mcpToolCall", "dynamicToolCall", "fileChange", "webSearch",
+              "imageGeneration", "collabAgentToolCall",
+            ].contains(itemType)
+          {
+            throw ProviderError.message(
+              "Codex attempted a tool call outside the teaching response scope.")
+          }
+          if method == "item/agentMessage/delta", let delta = params?["delta"]?.string,
+            outputMode == .ndjson ? ndjson.matchesTurn(params) : structured.matchesTurn(params)
+          {
+            if !delta.isEmpty { await timing.mark(.firstTextDelta) }
+            totalBytes += delta.utf8.count
+            guard totalBytes <= 2_000_000 else {
+              throw ProviderError.message("Codex output exceeded the bounded response budget.")
+            }
           }
           if outputMode == .ndjson {
-            try await decoder.append(
-              delta, onUnit: deliverUnit, onText: onText, onRejectedLine: onRejectedLine,
-              onSceneLineDecoded: onSceneLineDecoded)
+            try await ndjson.receive(
+              method: method, params: params, onUnit: deliverUnit, onText: onText,
+              onRejectedLine: onRejectedLine, onSceneLineDecoded: onSceneLineDecoded)
+          }
+          if outputMode.isStructured {
+            do {
+              try await structured.receive(
+                method: method, params: params, onUnit: deliverUnit, onText: onText)
+            } catch {
+              if let progress = structured.spatialProgress, progress != lastSpatialProgress {
+                await onStructuredProgress?(progress)
+              }
+              throw error
+            }
+            if let progress = structured.spatialProgress, progress != lastSpatialProgress {
+              await onStructuredProgress?(progress)
+              lastSpatialProgress = progress
+            }
+            if structured.finalMessageStarted { await timing.mark(.finalMessageStarted) }
+            if structured.finalMessageCompleted { await timing.mark(.finalMessageCompleted) }
+          }
+          if method == "turn/completed" {
+            if outputMode.isStructured {
+              if !structured.matchesTurn(params) { continue }
+            } else if !ndjson.matchesTurn(params) {
+              continue
+            }
+            guard params?["turn"]?["status"]?.string == "completed" else {
+              throw ProviderError.message(
+                "Codex turn did not complete: \(params?["turn"]?["error"]?["message"]?.string ?? params?["turn"]?["status"]?.string ?? "unknown status")"
+              )
+            }
+            sawCompleted = true
+            break
           }
         }
         if outputMode.isStructured {
+          guard sawCompleted else {
+            throw ProviderError.message("Codex ended before the structured turn completed.")
+          }
           do {
-            try await structured.receive(
-              method: method, params: params, onUnit: deliverUnit, onText: onText)
+            try await structured.finishTurn(onUnit: deliverUnit, onText: onText)
           } catch {
             if let progress = structured.spatialProgress, progress != lastSpatialProgress {
               await onStructuredProgress?(progress)
@@ -325,53 +370,34 @@ actor CodexProvider {
           }
           if let progress = structured.spatialProgress, progress != lastSpatialProgress {
             await onStructuredProgress?(progress)
-            lastSpatialProgress = progress
           }
-          if structured.finalMessageStarted { await timing.mark(.finalMessageStarted) }
-          if structured.finalMessageCompleted { await timing.mark(.finalMessageCompleted) }
-        }
-        if method == "turn/completed" {
-          if outputMode.isStructured, !structured.matchesTurn(params) { continue }
-          guard params?["turn"]?["status"]?.string == "completed" else {
-            throw ProviderError.message(
-              "Codex turn did not complete: \(params?["turn"]?["error"]?["message"]?.string ?? params?["turn"]?["status"]?.string ?? "unknown status")"
-            )
+          if structured.usedPhaseCompatibilityFallback {
+            await timing.mark(.phaseCompatibilityFallback)
+            await timing.mark(.finalMessageCompleted)
           }
-          sawCompleted = true
-          break
+        } else {
+          try ndjson.finishTurn()
         }
+        let acceptedUnits =
+          outputMode.isStructured ? structured.acceptedUnits : ndjson.acceptedUnits
+        guard sawCompleted, acceptedUnits > 0 else {
+          throw ProviderError.message(
+            "Codex ended before a complete teaching response was accepted.")
+        }
+        try Task.checkCancellation()
+        await timing.mark(.responseCompleted)
+      } catch {
+        if outputMode == .ndjson, let onNDJSONAudit {
+          await onNDJSONAudit(
+            ndjson.audit(
+              outcome: Task.isCancelled || error is CancellationError ? .cancelled : .failed))
+        }
+        throw error
       }
-      if outputMode.isStructured {
-        guard sawCompleted else {
-          throw ProviderError.message("Codex ended before the structured turn completed.")
-        }
-        do {
-          try await structured.finishTurn(onUnit: deliverUnit, onText: onText)
-        } catch {
-          if let progress = structured.spatialProgress, progress != lastSpatialProgress {
-            await onStructuredProgress?(progress)
-          }
-          throw error
-        }
-        if let progress = structured.spatialProgress, progress != lastSpatialProgress {
-          await onStructuredProgress?(progress)
-        }
-        if structured.usedPhaseCompatibilityFallback {
-          await timing.mark(.phaseCompatibilityFallback)
-          await timing.mark(.finalMessageCompleted)
-        }
-      } else {
-        try await decoder.finish(
-          onUnit: deliverUnit, onText: onText, onRejectedLine: onRejectedLine,
-          onSceneLineDecoded: onSceneLineDecoded)
+      if outputMode == .ndjson, let onNDJSONAudit {
+        await onNDJSONAudit(ndjson.audit(outcome: .completed))
+        try Task.checkCancellation()
       }
-      let acceptedUnits =
-        outputMode.isStructured ? structured.acceptedUnits : decoder.acceptedUnits
-      guard sawCompleted, acceptedUnits > 0 else {
-        throw ProviderError.message("Codex ended before a complete teaching response was accepted.")
-      }
-      try Task.checkCancellation()
-      await timing.mark(.responseCompleted)
     } onCancel: {
       session.close()
     }

@@ -301,6 +301,74 @@ struct SpatialSceneLiveDiagnosticsTests {
       ])
   }
 
+  @Test func deliveryAuditIsAbsentUntilTheExplicitTerminalCallbackArrives() async throws {
+    let collector = SpatialSceneAcceptanceCollector(started: ProcessInfo.processInfo.systemUptime)
+    try await collector.receive(text("An ordinary accepted public paragraph."))
+    try await collector.receive(
+      .init(
+        type: "scene",
+        nodes: [
+          .init(id: "public-ball", kind: .mesh, spatial3D: .init(geometry: .sphere(radius: 1)))
+        ]))
+    let snapshot = await collector.snapshot()
+    #expect(snapshot.ndjsonAudit == nil)
+    #expect(snapshot.textUnits == 1 && snapshot.sceneUnits == 1)
+    #expect(snapshot.firstAdmission?.unitType == "text")
+  }
+
+  @Test func failedTerminalAuditSurvivesARejectedSceneWithoutChangingEarlierAdmission()
+    async throws
+  {
+    let collector = SpatialSceneAcceptanceCollector(started: ProcessInfo.processInfo.systemUptime)
+    try await collector.receive(
+      .init(
+        type: "scene",
+        nodes: [
+          .init(
+            id: "PUBLIC_NODE_ID_NOT_IN_AUDIT", kind: .mesh,
+            spatial3D: .init(geometry: .sphere(radius: 1)))
+        ], narration: "PUBLIC_NARRATION_NOT_IN_AUDIT"))
+    let before = await collector.snapshot()
+    do {
+      try await collector.receive(
+        .init(
+          type: "scene",
+          nodes: [
+            .init(
+              id: "invalid-label", kind: .text,
+              spatial3D: .init(labelAnchor: .init(targetID: "missing-part")))
+          ]))
+      Issue.record("A scene with a missing label target was admitted.")
+    } catch {}
+    let failed = deliveryAudit(outcome: .failed, acceptedUnits: 1)
+    await collector.recordNDJSONAudit(failed)
+    let after = await collector.snapshot()
+    #expect(after.ndjsonAudit == failed && after.ndjsonAudit?.outcome == .failed)
+    #expect(after.document == before.document && after.sceneUnits == before.sceneUnits)
+    #expect(after.textUnits == before.textUnits && after.firstAdmission == before.firstAdmission)
+    #expect(after.lastRejectedScene != nil)
+    let encoded = try JSONEncoder().encode(try #require(after.ndjsonAudit))
+    let roundTripped = try JSONDecoder().decode(CodexNDJSONAudit.self, from: encoded)
+    #expect(roundTripped == failed)
+    let payload = String(decoding: encoded, as: UTF8.self)
+    #expect(!payload.contains("PUBLIC_NODE_ID_NOT_IN_AUDIT"))
+    #expect(!payload.contains("PUBLIC_NARRATION_NOT_IN_AUDIT"))
+    #expect(!payload.contains("missing-part"))
+  }
+
+  @Test func cancelledTerminalAuditCannotBeReplacedByALateSuccessOrClaimAdmission() async {
+    let collector = SpatialSceneAcceptanceCollector(started: ProcessInfo.processInfo.systemUptime)
+    let cancelled = deliveryAudit(outcome: .cancelled, acceptedUnits: 0)
+    await collector.recordNDJSONAudit(cancelled)
+    await collector.recordNDJSONAudit(deliveryAudit(outcome: .completed, acceptedUnits: 1))
+    let snapshot = await collector.snapshot()
+    #expect(snapshot.ndjsonAudit == cancelled)
+    #expect(snapshot.ndjsonAudit?.acceptedUnits == 0)
+    #expect(snapshot.document.nodes.isEmpty && snapshot.document.revision == 0)
+    #expect(snapshot.sceneUnits == 0 && snapshot.textUnits == 0)
+    #expect(snapshot.firstAdmission == nil && snapshot.firstSceneAdmission == nil)
+  }
+
   @Test func truncationNeverSplitsAUnicodeScalarOrResumesAfterAnOmittedSuffix() async throws {
     let collector = SpatialSceneAcceptanceCollector(started: ProcessInfo.processInfo.systemUptime)
     let ascii = String(repeating: "a", count: 16_381)
@@ -416,5 +484,20 @@ struct SpatialSceneLiveDiagnosticsTests {
 
   private func text(_ value: String) -> ProviderUnit {
     ProviderUnit(type: "text", text: value)
+  }
+
+  private func deliveryAudit(outcome: CodexNDJSONAudit.Outcome, acceptedUnits: Int)
+    -> CodexNDJSONAudit
+  {
+    .init(
+      outcome: outcome,
+      items: [
+        .init(
+          ordinal: 0, phase: "final_answer", started: true, deltaEvents: 2,
+          deltaUTF8Bytes: 120, completedUTF8Bytes: nil, appendedSuffixUTF8Bytes: 0,
+          streamedSHA256: String(repeating: "a", count: 64), completedSHA256: nil)
+      ],
+      acceptedUnits: acceptedUnits, deltaUTF8Bytes: 120, completedUTF8Bytes: 0,
+      completedOnlyItems: 0, duplicateCompletions: 0, ignoredScopeEvents: 0)
   }
 }

@@ -757,12 +757,36 @@ import Testing
     let thread = try encoded(["id": 4, "result": ["thread": ["id": "fixture-thread"]]])
     let wrongModel = try encoded(["id": 4, "error": ["message": "default model selection failed"]])
     let turn = try encoded(["id": 5, "result": ["turn": ["id": "fixture-turn"]]])
+    let itemStarted = try encoded([
+      "method": "item/started",
+      "params": [
+        "threadId": "fixture-thread", "turnId": "fixture-turn",
+        "item": ["id": "fixture-answer", "type": "agentMessage", "phase": "final_answer"],
+      ],
+    ])
     let delta = try encoded([
       "method": "item/agentMessage/delta",
-      "params": ["delta": responseText],
+      "params": [
+        "threadId": "fixture-thread", "turnId": "fixture-turn",
+        "itemId": "fixture-answer", "delta": responseText,
+      ],
+    ])
+    let itemCompleted = try encoded([
+      "method": "item/completed",
+      "params": [
+        "threadId": "fixture-thread", "turnId": "fixture-turn",
+        "item": [
+          "id": "fixture-answer", "type": "agentMessage", "phase": "final_answer",
+          "text": responseText,
+        ],
+      ],
     ])
     let completed = try encoded([
-      "method": "turn/completed", "params": ["turn": ["status": "completed"]],
+      "method": "turn/completed",
+      "params": [
+        "threadId": "fixture-thread",
+        "turn": ["id": "fixture-turn", "status": "completed"],
+      ],
     ])
     let responses: [String: Any] = [
       "_expectedModel": expectedRequestModel ?? selectedModel,
@@ -792,7 +816,9 @@ import Testing
                   response=json.loads(r'''\(wrongModel)''')
               print(json.dumps(response),flush=True)
           if method == "turn/start" and \(completeTurn ? "True" : "False"):
+              print(r'''\(itemStarted)''',flush=True)
               print(r'''\(delta)''',flush=True)
+              print(r'''\(itemCompleted)''',flush=True)
               print(r'''\(completed)''',flush=True)
       """
     try Data(script.utf8).write(to: executable)

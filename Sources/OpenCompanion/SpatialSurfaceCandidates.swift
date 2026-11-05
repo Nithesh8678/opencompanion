@@ -88,10 +88,18 @@ enum SpatialSurfaceCandidates {
       }
       closest = nearest(boundary, to: hint)
       let middleRadius = (inner + outer) / 2
-      let angles =
-        full
-        ? (0..<8).map { start + Double($0) * .pi / 4 }
-        : (0..<5).map { start + sweep * Double($0) / 4 }
+      var angles: [Double] = []
+      if full {
+        for index in 0..<8 {
+          let offset: Double = Double(index) * Double.pi / 4.0
+          angles.append(start + offset)
+        }
+      } else {
+        for index in 0..<5 {
+          let offset: Double = sweep * Double(index) / 4.0
+          angles.append(start + offset)
+        }
+      }
       for angle in angles {
         for radius in [inner, outer] {
           samples.append(.init(x: radius * cos(angle), y: 0, z: radius * sin(angle)))

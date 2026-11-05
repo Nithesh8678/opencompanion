@@ -15,7 +15,8 @@ enum SpatialSceneLiveAcceptance {
 
   @MainActor static func run(output: URL, executable: String, model: String) async throws {
     try Task.checkCancellation()
-    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+    let outputMode = try SpatialSceneOutputSelection.select(
+      arguments: ProcessInfo.processInfo.arguments)
     let cases = [
       Case(
         id: "brushed-dc-motor",
@@ -29,8 +30,12 @@ enum SpatialSceneLiveAcceptance {
           "Create a small interactive 3D ball-and-stick explanation of a water molecule. Show one oxygen atom, two hydrogen atoms and the two bonds in a bent arrangement, with short labels attached to the atoms. Explain that the sizes and bond lengths are illustrative. Build it progressively.",
         minimumMeshes: 5, minimumLabels: 3, concepts: ["oxygen", "hydrogen"]),
     ]
+    let selectedIDs = try SpatialSceneCaseSelection.select(
+      arguments: ProcessInfo.processInfo.arguments, knownIDs: cases.map(\.id))
+    let selectedCases = cases.filter { selectedIDs.contains($0.id) }
+    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
     var results: [[String: Any]] = []
-    for fixture in cases {
+    for fixture in selectedCases {
       try Task.checkCancellation()
       let directory = output.appendingPathComponent(fixture.id, isDirectory: true)
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -49,7 +54,8 @@ enum SpatialSceneLiveAcceptance {
           messages: [.init(role: "user", text: fixture.prompt)], context: "", image: nil,
           scene: nil, onRouting: { await collector.route($0) },
           onTiming: { await collector.timing($0) },
-          onUnit: { try await collector.receive($0) }, responsePolicy: policy)
+          onUnit: { try await collector.receive($0) }, responsePolicy: policy,
+          outputMode: outputMode)
       } catch {
         failure = error.localizedDescription
       }
@@ -77,13 +83,18 @@ enum SpatialSceneLiveAcceptance {
       let encoder = JSONEncoder()
       encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
       try encoder.encode(document).write(to: directory.appendingPathComponent("public-scene.json"))
-      let result: [String: Any] = [
+      var result: [String: Any] = [
         "id": fixture.id, "result": passed ? "passed" : "failed",
         "failure": failure ?? "", "unmetChecks": unmet, "publicPromptOnly": true,
+        "outputMode": outputMode.rawValue,
         "model": snapshot.routing?.model ?? "unreported",
         "effort": snapshot.routing?.effort ?? "provider-default",
         "routingReason": snapshot.routing?.reason.rawValue ?? "unreported",
         "sceneUnits": snapshot.sceneUnits, "textUnits": snapshot.textUnits,
+        "narrationPreview": snapshot.narrationPreview,
+        "narrationPreviewUTF8Bytes": snapshot.narrationPreviewUTF8Bytes,
+        "narrationPreviewTruncated": snapshot.narrationPreviewTruncated,
+        "lastRejectedScene": NSNull(),
         "progressiveGeometryUnits": snapshot.progressiveGeometryUnits,
         "typedMeshCount": meshes.count, "anchoredLabelCount": labels.count,
         "geometryTypes": geometryTypes.sorted(), "matchedLabelConcepts": concepts,
@@ -99,6 +110,10 @@ enum SpatialSceneLiveAcceptance {
         "nativeRenderVerified": false, "acousticTimingVerified": false,
         "physicalAccuracyVerified": false,
       ]
+      if let rejection = snapshot.lastRejectedScene {
+        result["lastRejectedScene"] = try JSONSerialization.jsonObject(
+          with: encoder.encode(rejection))
+      }
       results.append(result)
       try write(result, to: directory.appendingPathComponent("result.json"))
       try FileHandle.standardOutput.write(
@@ -108,6 +123,8 @@ enum SpatialSceneLiveAcceptance {
     try write(
       [
         "result": passed ? "passed" : "failed", "cases": results,
+        "outputMode": outputMode.rawValue,
+        "selectedCases": selectedIDs,
         "scope":
           "Real provider units and strict native semantic admission; no rendering, capture, audio or physical-task proof.",
       ], to: output.appendingPathComponent("spatial-scene-live-acceptance.json"))
@@ -129,6 +146,53 @@ enum SpatialSceneLiveAcceptance {
   private static func write(_ object: [String: Any], to url: URL) throws {
     try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
       .write(to: url, options: .atomic)
+  }
+}
+
+/// Selection applies only to the explicit public acceptance helper. Invalid
+/// arguments cannot start a provider turn or change normal app preferences.
+enum SpatialSceneOutputSelection {
+  static func select(arguments: [String]) throws -> CodexOutputMode {
+    let originalFlag = "--structured-scene-output"
+    let unifiedFlag = "--structured-unified-output"
+    guard
+      !arguments.contains(where: {
+        $0.hasPrefix(originalFlag + "=") || $0.hasPrefix(unifiedFlag + "=")
+      })
+    else {
+      throw ProviderError.message("Structured output flags do not accept a value.")
+    }
+    let selected = arguments.filter { $0 == originalFlag || $0 == unifiedFlag }
+    guard selected.count <= 1 else {
+      throw ProviderError.message("Specify one structured output format at most once.")
+    }
+    switch selected.first {
+    case originalFlag: return .structuredScene
+    case unifiedFlag: return .structuredUnifiedScene
+    default: return .ndjson
+    }
+  }
+}
+
+enum SpatialSceneCaseSelection {
+  static func select(arguments: [String], knownIDs: [String]) throws -> [String] {
+    guard !arguments.contains(where: { $0.hasPrefix("--spatial-scene-case=") }) else {
+      throw ProviderError.message("Use --spatial-scene-case followed by one known case ID.")
+    }
+    let flags = arguments.indices.filter { arguments[$0] == "--spatial-scene-case" }
+    guard flags.count <= 1 else {
+      throw ProviderError.message("Specify --spatial-scene-case at most once.")
+    }
+    guard let index = flags.first else { return knownIDs }
+    guard index + 1 < arguments.count, !arguments[index + 1].hasPrefix("--") else {
+      throw ProviderError.message("--spatial-scene-case requires a known case ID.")
+    }
+    let id = arguments[index + 1]
+    guard knownIDs.contains(id) else {
+      throw ProviderError.message(
+        "Unknown spatial scene acceptance case; use a documented case ID.")
+    }
+    return [id]
   }
 }
 
@@ -385,6 +449,10 @@ enum SpatialSceneContentOracle {
 struct SpatialSceneAcceptanceSnapshot: Sendable {
   let document: SceneDocument
   let textUnits: Int
+  let narrationPreview: [String]
+  let narrationPreviewUTF8Bytes: Int
+  let narrationPreviewTruncated: Bool
+  let lastRejectedScene: SpatialRejectedSceneSummary?
   let sceneUnits: Int
   let progressiveGeometryUnits: Int
   let firstSceneMS: Double?
@@ -393,9 +461,60 @@ struct SpatialSceneAcceptanceSnapshot: Sendable {
   let timings: [CodexTimingEvent]
 }
 
+/// A public-fixture failure graph, not raw scene/narration persistence. Counts
+/// cover the complete proposal; only bounded identity/reference rows are kept.
+struct SpatialRejectedSceneSummary: Codable, Sendable, Equatable {
+  struct Node: Codable, Sendable, Equatable {
+    let id: String
+    let kind: String
+    let parentID: String?
+    let targetID: String?
+  }
+  let error: String
+  let nodeCount: Int
+  let meshCount: Int
+  let nodes: [Node]
+  let truncated: Bool
+
+  init(unit: ProviderUnit, error: String) {
+    let proposed = unit.nodes ?? []
+    let boundedError = Self.prefix(error, maximumUTF8Bytes: 2_048)
+    self.error = boundedError
+    nodeCount = proposed.count
+    meshCount = proposed.reduce(0) { $0 + ($1.kind == .mesh ? 1 : 0) }
+    var shortened = boundedError.utf8.count < error.utf8.count || proposed.count > 128
+    var rows: [Node] = []
+    for node in proposed.prefix(128) {
+      let id = Self.prefix(node.id, maximumUTF8Bytes: 256)
+      let parent = node.parentID.map { Self.prefix($0, maximumUTF8Bytes: 256) }
+      let originalTarget = node.spatial3D?.labelAnchor?.targetID
+      let target = originalTarget.map { Self.prefix($0, maximumUTF8Bytes: 256) }
+      if id != node.id || parent != node.parentID || target != originalTarget { shortened = true }
+      rows.append(.init(id: id, kind: node.kind.rawValue, parentID: parent, targetID: target))
+    }
+    nodes = rows
+    truncated = shortened
+  }
+
+  private static func prefix(_ value: String, maximumUTF8Bytes: Int) -> String {
+    var result = String.UnicodeScalarView()
+    var count = 0
+    for scalar in value.unicodeScalars {
+      guard scalar.utf8.count <= maximumUTF8Bytes - count else { break }
+      result.append(scalar)
+      count += scalar.utf8.count
+    }
+    return String(result)
+  }
+}
+
 actor SpatialSceneAcceptanceCollector {
   private var document = SceneDocument(title: "Public generated 3D lesson", width: 900, height: 560)
   private var textUnits = 0
+  private var narrationPreview: [String] = []
+  private var narrationPreviewUTF8Bytes = 0
+  private var narrationPreviewTruncated = false
+  private var lastRejectedScene: SpatialRejectedSceneSummary?
   private var sceneUnits = 0
   private var progressiveGeometryUnits = 0
   private var encounteredMeshIDs: Set<String> = []
@@ -419,10 +538,28 @@ actor SpatialSceneAcceptanceCollector {
         throw ProviderError.message("Invalid or excessive public narration units.")
       }
       textUnits += 1
+      let remaining = 16_384 - narrationPreviewUTF8Bytes
+      if !narrationPreviewTruncated, narrationPreview.count < 64, remaining > 0 {
+        let preview = Self.unicodePrefix(text, maximumUTF8Bytes: remaining)
+        if !preview.isEmpty {
+          narrationPreview.append(preview)
+          narrationPreviewUTF8Bytes += preview.utf8.count
+        }
+        if preview.utf8.count < text.utf8.count { narrationPreviewTruncated = true }
+      } else {
+        narrationPreviewTruncated = true
+      }
     case "scene":
       guard sceneUnits < 96 else { throw ProviderError.message("Excessive public scene units.") }
-      document = try ProviderSceneBoundary.applying(
-        unit, to: document, baseRevision: document.revision)
+      let accepted: SceneDocument
+      do {
+        accepted = try ProviderSceneBoundary.applying(
+          unit, to: document, baseRevision: document.revision)
+      } catch {
+        lastRejectedScene = .init(unit: unit, error: error.localizedDescription)
+        throw error
+      }
+      document = accepted
       let meshIDs = Set(
         document.nodes.compactMap { node in
           node.kind == .mesh && node.spatial3D?.geometry != nil ? node.id : nil
@@ -444,8 +581,24 @@ actor SpatialSceneAcceptanceCollector {
   }
   func snapshot() -> SpatialSceneAcceptanceSnapshot {
     .init(
-      document: document, textUnits: textUnits, sceneUnits: sceneUnits,
+      document: document, textUnits: textUnits,
+      narrationPreview: narrationPreview, narrationPreviewUTF8Bytes: narrationPreviewUTF8Bytes,
+      narrationPreviewTruncated: narrationPreviewTruncated,
+      lastRejectedScene: lastRejectedScene,
+      sceneUnits: sceneUnits,
       progressiveGeometryUnits: progressiveGeometryUnits,
       firstSceneMS: firstSceneMS, firstTypedMS: firstTypedMS, routing: routing, timings: timings)
+  }
+
+  private static func unicodePrefix(_ text: String, maximumUTF8Bytes: Int) -> String {
+    var result = String.UnicodeScalarView()
+    var count = 0
+    for scalar in text.unicodeScalars {
+      let next = scalar.utf8.count
+      guard next <= maximumUTF8Bytes - count else { break }
+      result.append(scalar)
+      count += next
+    }
+    return String(result)
   }
 }

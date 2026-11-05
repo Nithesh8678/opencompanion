@@ -77,13 +77,15 @@ actor CodexProvider {
     onTiming: (@Sendable (CodexTimingEvent) async -> Void)? = nil,
     onUnit: @escaping @Sendable (ProviderUnit) async throws -> Void,
     onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil,
-    responsePolicy: ResponsePolicy? = nil
+    responsePolicy: ResponsePolicy? = nil,
+    outputMode: CodexOutputMode = .ndjson
   ) async throws {
     let requestPolicy =
       responsePolicy
       ?? ResponsePolicy.resolve(
         text: messages.last(where: { $0.role == "user" })?.text ?? "",
         screenGuidanceEnabled: image != nil, inNotebook: scene != nil, hasNotebook: scene != nil)
+    try outputMode.validate(policy: requestPolicy, hasImage: image != nil, hasScene: scene != nil)
     guard activeSession == nil else {
       throw ProviderError.message(
         "A Codex request is already active. Stop it before starting another.")
@@ -163,11 +165,15 @@ actor CodexProvider {
           "approvalPolicy": .string("never"), "sandbox": .string("read-only"),
           "cwd": .string(session.workingDirectory.path),
           "baseInstructions": .string(
-            ReasoningProvider.baseInstructions(for: requestPolicy)
+            (outputMode.isStructured
+              ? ReasoningProvider.standaloneStructuredSceneInstructions(for: requestPolicy)
+              : ReasoningProvider.baseInstructions(for: requestPolicy))
               + "\nYou are a native assistant response provider. Do not call any tools, inspect files, use shell, or follow local project instructions. All needed context is supplied in the user input."
           ),
           "developerInstructions": .string(
-            "Emit only the permitted NDJSON assistant units for the current response policy. No tools are authorized for this thread."
+            outputMode.isStructured
+              ? "Emit one schema-constrained final answer object with a progressive units array. Do not emit interim commentary. No tools are authorized for this thread."
+              : "Emit only the permitted NDJSON assistant units for the current response policy. No tools are authorized for this thread."
           ),
           "dynamicTools": .array([]), "config": config, "serviceName": .string("opencompanion"),
         ]))
@@ -205,6 +211,7 @@ actor CodexProvider {
         "approvalPolicy": .string("never"),
       ]
       if let effort = routing.effort { turnParams["effort"] = .string(effort) }
+      if let schema = outputMode.schema { turnParams["outputSchema"] = schema }
       try session.send(method: "turn/start", id: 5, params: .object(turnParams))
       await timing.mark(.turnSubmitted)
       let deliverUnit: @Sendable (ProviderUnit) async throws -> Void = { unit in
@@ -215,6 +222,7 @@ actor CodexProvider {
         if unit.type == "scene" { await timing.mark(.firstSceneAccepted) }
       }
       var decoder = ProviderTextStreamDecoder()
+      var structured = CodexStructuredOutput(threadID: threadID)
       var totalBytes = 0
       var sawCompleted = false
       while let message = try await iterator.next() {
@@ -225,6 +233,7 @@ actor CodexProvider {
         }
         if message["id"]?.integer == 5, let turnID = message["result"]?["turn"]?["id"]?.string {
           session.setTurn(threadID: threadID, turnID: turnID)
+          if outputMode.isStructured { try structured.bind(turnID: turnID) }
           await timing.mark(.turnAccepted)
         }
         guard let method = message["method"]?.string else { continue }
@@ -243,15 +252,26 @@ actor CodexProvider {
           throw ProviderError.message(
             "Codex attempted a tool call outside the teaching response scope.")
         }
-        if method == "item/agentMessage/delta", let delta = params?["delta"]?.string {
+        if method == "item/agentMessage/delta", let delta = params?["delta"]?.string,
+          outputMode == .ndjson || structured.matchesTurn(params)
+        {
           if !delta.isEmpty { await timing.mark(.firstTextDelta) }
           totalBytes += delta.utf8.count
           guard totalBytes <= 2_000_000 else {
             throw ProviderError.message("Codex output exceeded the bounded response budget.")
           }
-          try await decoder.append(delta, onUnit: deliverUnit, onText: onText)
+          if outputMode == .ndjson {
+            try await decoder.append(delta, onUnit: deliverUnit, onText: onText)
+          }
+        }
+        if outputMode.isStructured {
+          try await structured.receive(
+            method: method, params: params, onUnit: deliverUnit, onText: onText)
+          if structured.finalMessageStarted { await timing.mark(.finalMessageStarted) }
+          if structured.finalMessageCompleted { await timing.mark(.finalMessageCompleted) }
         }
         if method == "turn/completed" {
+          if outputMode.isStructured, !structured.matchesTurn(params) { continue }
           guard params?["turn"]?["status"]?.string == "completed" else {
             throw ProviderError.message(
               "Codex turn did not complete: \(params?["turn"]?["error"]?["message"]?.string ?? params?["turn"]?["status"]?.string ?? "unknown status")"
@@ -261,8 +281,21 @@ actor CodexProvider {
           break
         }
       }
-      try await decoder.finish(onUnit: deliverUnit, onText: onText)
-      guard sawCompleted, decoder.acceptedUnits > 0 else {
+      if outputMode.isStructured {
+        guard sawCompleted else {
+          throw ProviderError.message("Codex ended before the structured turn completed.")
+        }
+        try await structured.finishTurn(onUnit: deliverUnit, onText: onText)
+        if structured.usedPhaseCompatibilityFallback {
+          await timing.mark(.phaseCompatibilityFallback)
+          await timing.mark(.finalMessageCompleted)
+        }
+      } else {
+        try await decoder.finish(onUnit: deliverUnit, onText: onText)
+      }
+      let acceptedUnits =
+        outputMode.isStructured ? structured.acceptedUnits : decoder.acceptedUnits
+      guard sawCompleted, acceptedUnits > 0 else {
         throw ProviderError.message("Codex ended before a complete teaching response was accepted.")
       }
       try Task.checkCancellation()

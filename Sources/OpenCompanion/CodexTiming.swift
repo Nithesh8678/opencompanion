@@ -7,6 +7,7 @@ struct CodexTimingEvent: Codable, Sendable, Equatable {
     case requestStarted, sessionStarted, initialized, accountVerified, routingSelected
     case configurationReady, threadReady, turnSubmitted, turnAccepted
     case firstTextDelta, firstUnitAccepted, firstSceneAccepted, responseCompleted
+    case finalMessageStarted, finalMessageCompleted, phaseCompatibilityFallback
   }
   let stage: Stage
   let elapsedMS: Double

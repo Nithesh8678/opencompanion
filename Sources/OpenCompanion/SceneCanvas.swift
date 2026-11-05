@@ -26,6 +26,12 @@ enum CanvasPresentation: Sendable, Equatable {
   case passiveOverlay
 }
 
+enum CanvasMotionPolicy: Sendable, Equatable {
+  case system
+  case fullMotion
+  case reducedMotion
+}
+
 /// Local renderer timing only. Contains no document text, screenshot pixels,
 /// foreground application identity, or user-input events.
 struct CanvasDisplayClockDiagnostics: Codable, Sendable {
@@ -92,6 +98,14 @@ struct SceneCanvas: NSViewRepresentable {
 @MainActor final class RetainedCanvasView: NSView {
   override var isFlipped: Bool { true }
   override var acceptsFirstResponder: Bool { presentation == .editor }
+  private let motionPolicy: CanvasMotionPolicy
+  private var shouldReduceMotion: Bool {
+    switch motionPolicy {
+    case .system: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    case .fullMotion: false
+    case .reducedMotion: true
+    }
+  }
   private var nodeLayers: [String: CALayer] = [:]
   private var originals: [String: SceneNode] = [:]
   private var layerKinds: [String: SceneNode.Kind] = [:]
@@ -187,7 +201,11 @@ struct SceneCanvas: NSViewRepresentable {
   }
   var onSelect: ((String?) -> Void)?
   var onMove: ((String, Double, Double) -> Void)?
-  override init(frame: NSRect) {
+  override convenience init(frame: NSRect) {
+    self.init(frame: frame, motionPolicy: .system)
+  }
+  init(frame: NSRect, motionPolicy: CanvasMotionPolicy) {
+    self.motionPolicy = motionPolicy
     super.init(frame: frame)
     wantsLayer = true
     layer?.backgroundColor = NSColor.white.cgColor
@@ -232,7 +250,7 @@ struct SceneCanvas: NSViewRepresentable {
       ) { [weak self] _ in
         Task { @MainActor in
           guard let self else { return }
-          if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+          if self.shouldReduceMotion {
             self.layer?.removeAllAnimations()
             for node in self.nodeLayers.values { node.removeAllAnimations() }
             for node in self.meshNodes.values { node.removeAllAnimations() }
@@ -266,7 +284,7 @@ struct SceneCanvas: NSViewRepresentable {
   private func visibilityChanged() {
     try? clock?.setPlaying(
       nativePlaying && window?.isVisible == true && !isHiddenOrHasHiddenAncestor
-        && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+        && !shouldReduceMotion,
       at: ProcessInfo.processInfo.systemUptime)
     updateDisplayLink()
   }
@@ -278,7 +296,7 @@ struct SceneCanvas: NSViewRepresentable {
     if let playing {
       let clockActive =
         playing && window?.isVisible == true && !isHiddenOrHasHiddenAncestor
-        && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        && !shouldReduceMotion
       if clock == nil || clockDocumentID != documentID || lastSeekRevision != seekRevision {
         clock = AnimationClock(
           at: now, phase: max(0, time), speed: min(16, max(0, speed)), isPlaying: clockActive)
@@ -306,7 +324,7 @@ struct SceneCanvas: NSViewRepresentable {
     updateDisplayLink()
   }
   private func updateDisplayLink() {
-    let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    let reduceMotion = shouldReduceMotion
     if reduceMotion, labelReveal.hasRevealableText {
       advanceSpatialLabels(by: 0, reduceMotion: true)
     }
@@ -348,7 +366,7 @@ struct SceneCanvas: NSViewRepresentable {
     guard sender === nativeDisplayLink else { return }
     guard nativePlaying || labelReveal.hasRevealableText,
       !isHiddenOrHasHiddenAncestor, window?.isVisible == true,
-      !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+      !shouldReduceMotion
     else {
       sender.isPaused = true
       lastDisplayTime = nil
@@ -439,7 +457,7 @@ struct SceneCanvas: NSViewRepresentable {
         target.anchorPoint = .zero
         nodeLayers[node.id] = target
         layerKinds[node.id] = node.kind
-        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        if !shouldReduceMotion {
           let animation = CABasicAnimation(keyPath: "opacity")
           animation.fromValue = 0
           animation.toValue = node.opacity
@@ -665,7 +683,7 @@ struct SceneCanvas: NSViewRepresentable {
         let node = SCNNode()
         node.name = source.id
         meshNodes[source.id] = node
-        if source.kind == .mesh, !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        if source.kind == .mesh, !shouldReduceMotion {
           let fade = CABasicAnimation(keyPath: "opacity")
           fade.fromValue = 0
           fade.toValue = source.opacity
@@ -1043,7 +1061,7 @@ struct SceneCanvas: NSViewRepresentable {
       windowVisible: window?.isVisible == true, windowOnDisplay: window?.screen != nil,
       windowOcclusionVisible: window?.occlusionState.contains(.visible) == true,
       hiddenAncestor: isHiddenOrHasHiddenAncestor,
-      reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+      reduceMotion: shouldReduceMotion,
       scenePlaying: nativePlaying, pendingLabels: hasPendingSpatialLabels,
       callbackCount: displayCallbackCount, acceptedCallbackCount: acceptedDisplayCallbackCount,
       labelAdvanceCount: displayLabelAdvanceCount, renderCount: displayRenderCount,
@@ -1079,7 +1097,7 @@ struct SceneCanvas: NSViewRepresentable {
     }
     labelReveal.reconcile(
       documentID: document.id, generation: labelGeneration, labels: labels,
-      reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+      reduceMotion: shouldReduceMotion)
   }
 
   func canvasFrame(forDocumentRect rect: CGRect) -> CGRect {

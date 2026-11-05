@@ -112,8 +112,50 @@ struct SpatialLabelRevealTests {
 }
 
 @Suite @MainActor struct SpatialLabelNativeTests {
-  @Test func clockDiagnosticsDoNotExposeTextOrStartForAnUnmountedView() throws {
+  @Test(arguments: [false, true])
+  func explicitMotionPolicyControlsRevealAndReplacementWithoutGlobalPreferences(
+    _ reduceMotion: Bool
+  ) throws {
+    let view = RetainedCanvasView(
+      frame: CGRect(x: 0, y: 0, width: 620, height: 420),
+      motionPolicy: reduceMotion ? .reducedMotion : .fullMotion)
+    view.presentation = .passiveOverlay
+    view.render(try fixture().validated(), time: 0, selectedID: nil, presentationGeneration: 1)
+    #expect(view.displayClockDiagnostics.reduceMotion == reduceMotion)
+    #expect(view.hasPendingSpatialLabels == !reduceMotion)
+    #expect(view.needsDisplayClock == !reduceMotion)
+    #expect(
+      view.projectedLabelText(id: "label") == (reduceMotion ? "Copper winding assembly" : ""))
+    view.advanceSpatialLabels(by: 0.01)
+    #expect(
+      view.projectedLabelText(id: "label") == (reduceMotion ? "Copper winding assembly" : "Copper"))
+    if reduceMotion {
+      #expect(view.spatialNode(id: "rotor")?.animationKeys.isEmpty == true)
+      let textLayers = (view.layer?.sublayers ?? []).flatMap { $0.sublayers ?? [] }
+        .compactMap { $0 as? CATextLayer }
+      #expect(textLayers.allSatisfy { ($0.animationKeys() ?? []).isEmpty })
+    }
+    var replacement = fixture()
+    replacement.nodes[1].text = "Updated winding assembly"
+    view.render(
+      try replacement.validated(), time: 0, selectedID: nil, presentationGeneration: 2)
+    #expect(
+      view.projectedLabelText(id: "label") == (reduceMotion ? "Updated winding assembly" : ""))
+    #expect(view.hasPendingSpatialLabels == !reduceMotion)
+    view.stopDisplayLink()
+    #expect(!view.hasPendingSpatialLabels && !view.isDisplayClockRunning)
+  }
+
+  @Test func defaultViewMotionPolicyReadsTheCurrentSystemSetting() {
     let view = RetainedCanvasView(frame: CGRect(x: 0, y: 0, width: 620, height: 420))
+    #expect(
+      view.displayClockDiagnostics.reduceMotion
+        == NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+  }
+
+  @Test func clockDiagnosticsDoNotExposeTextOrStartForAnUnmountedView() throws {
+    let view = RetainedCanvasView(
+      frame: CGRect(x: 0, y: 0, width: 620, height: 420), motionPolicy: .fullMotion)
     view.presentation = .passiveOverlay
     view.render(try fixture().validated(), time: 0, selectedID: nil, presentationGeneration: 1)
     let pending = view.displayClockDiagnostics
@@ -135,7 +177,8 @@ struct SpatialLabelRevealTests {
   }
 
   @Test func passiveLabelsRevealRetainedGlyphsWithoutChangingTheirMeasuredBounds() throws {
-    let view = RetainedCanvasView(frame: CGRect(x: 0, y: 0, width: 620, height: 420))
+    let view = RetainedCanvasView(
+      frame: CGRect(x: 0, y: 0, width: 620, height: 420), motionPolicy: .fullMotion)
     view.presentation = .passiveOverlay
     let document = try fixture().validated()
     view.render(document, time: 0, selectedID: nil, presentationGeneration: 1)
@@ -157,7 +200,8 @@ struct SpatialLabelRevealTests {
   }
 
   @Test func editorLabelsAreImmediateAndStoppingUnmountedPresentationCancelsPacing() throws {
-    let view = RetainedCanvasView(frame: CGRect(x: 0, y: 0, width: 620, height: 420))
+    let view = RetainedCanvasView(
+      frame: CGRect(x: 0, y: 0, width: 620, height: 420), motionPolicy: .fullMotion)
     view.render(try fixture().validated(), time: 0, selectedID: nil)
     #expect(view.projectedLabelText(id: "label") == "Copper winding assembly")
     #expect(!view.hasPendingSpatialLabels)
@@ -176,7 +220,8 @@ struct SpatialLabelRevealTests {
   }
 
   @Test func disabledOrUnprojectableLeadersNeverReturnStalePaths() throws {
-    let view = RetainedCanvasView(frame: CGRect(x: 0, y: 0, width: 620, height: 420))
+    let view = RetainedCanvasView(
+      frame: CGRect(x: 0, y: 0, width: 620, height: 420), motionPolicy: .fullMotion)
     var document = fixture()
     view.render(try document.validated(), time: 0, selectedID: nil)
     #expect(view.projectedLeaderPath(id: "label") != nil)

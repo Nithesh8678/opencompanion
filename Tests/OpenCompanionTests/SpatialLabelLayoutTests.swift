@@ -108,7 +108,8 @@ struct SpatialLabelLayoutTests {
 @Suite @MainActor struct SpatialLabelLayoutNativeTests {
   @Test func intrinsicWordsDoNotOrphanTheirFinalLetterAtModelPreferredWidths() throws {
     for presentation in [CanvasPresentation.editor, .passiveOverlay] {
-      let view = RetainedCanvasView(frame: CGRect(x: 0, y: 0, width: 620, height: 420))
+      let view = RetainedCanvasView(
+        frame: CGRect(x: 0, y: 0, width: 620, height: 420), motionPolicy: .fullMotion)
       view.presentation = presentation
       let body = SceneNode(
         id: "body", kind: .mesh, spatial3D: .init(geometry: .cylinder(radius: 0.5, height: 1.2)))
@@ -151,7 +152,8 @@ struct SpatialLabelLayoutTests {
   }
 
   @Test func diagnosticSnapshotUsesBoundedBackingResolution() throws {
-    let view = RetainedCanvasView(frame: CGRect(x: 0, y: 0, width: 620, height: 420))
+    let view = RetainedCanvasView(
+      frame: CGRect(x: 0, y: 0, width: 620, height: 420), motionPolicy: .fullMotion)
     view.presentation = .passiveOverlay
     let bitmap = try view.explanationSnapshot()
     #expect(bitmap.pixelsWide == 1240 && bitmap.pixelsHigh == 840)
@@ -164,7 +166,8 @@ struct SpatialLabelLayoutTests {
   }
 
   @Test func nativeCalloutsUseTightCanonicalBoundsAndPreserveAnchorsDuringPacing() throws {
-    let view = RetainedCanvasView(frame: CGRect(x: 0, y: 0, width: 620, height: 420))
+    let view = RetainedCanvasView(
+      frame: CGRect(x: 0, y: 0, width: 620, height: 420), motionPolicy: .fullMotion)
     view.presentation = .passiveOverlay
     let document = try fixture().validated()
     view.render(document, time: 0, selectedID: nil, presentationGeneration: 1)
@@ -191,7 +194,8 @@ struct SpatialLabelLayoutTests {
     var document = fixture()
     document.width = 100_000
     document.height = 68_000
-    let view = RetainedCanvasView(frame: CGRect(x: 0, y: 0, width: 620, height: 420))
+    let view = RetainedCanvasView(
+      frame: CGRect(x: 0, y: 0, width: 620, height: 420), motionPolicy: .fullMotion)
     view.render(try document.validated(), time: 0, selectedID: nil)
     #expect(view.projectedLabelFrames.count == 12 && view.unresolvedLabelOverlapCount == 0)
     assertFrames(view.projectedLabelFrames, canvas: view, document: document)

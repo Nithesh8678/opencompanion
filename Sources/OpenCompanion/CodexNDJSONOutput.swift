@@ -73,8 +73,11 @@ struct CodexNDJSONOutput: Sendable {
 
   func matchesTurn(_ params: JSONValue?) -> Bool {
     guard let turnID else { return false }
+    let direct = params?["turnId"]?.string
+    let nested = params?["turn"]?["id"]?.string
+    guard direct == nil || nested == nil || direct == nested else { return false }
     return params?["threadId"]?.string == threadID
-      && (params?["turnId"]?.string ?? params?["turn"]?["id"]?.string) == turnID
+      && (direct ?? nested) == turnID
   }
 
   mutating func receive(

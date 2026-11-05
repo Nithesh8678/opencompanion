@@ -88,6 +88,22 @@ struct CodexNDJSONOutputTests: Sendable {
     #expect(output.audit(outcome: .completed).ignoredScopeEvents == 4)
   }
 
+  @Test func contradictoryCompletionScopeCannotEndTheOwnedTurn() throws {
+    let output = try bound()
+    let nested: JSONValue = .object(["id": .string("turn")])
+    let valid: JSONValue = .object([
+      "threadId": .string("thread"), "turnId": .string("turn"), "turn": nested,
+    ])
+    #expect(output.matchesTurn(valid))
+    for (direct, nestedID) in [("turn", "other"), ("other", "turn")] {
+      let conflict: JSONValue = .object([
+        "threadId": .string("thread"), "turnId": .string(direct),
+        "turn": .object(["id": .string(nestedID)]),
+      ])
+      #expect(!output.matchesTurn(conflict))
+    }
+  }
+
   @Test func overlapsLateDeltasRestartTypeMutationAndMissingIDFailClosed() async throws {
     let cases: [[Event]] = [
       [start(), start("other")],

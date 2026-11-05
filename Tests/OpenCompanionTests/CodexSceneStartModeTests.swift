@@ -20,11 +20,11 @@ struct CodexSceneStartModeTests {
       ),
       (
         .init(route: .notebook, includesExistingNotebook: false),
-        "a90d06205e2e788a4ef4291f0288235637bef637e6984498061eedc02c678ff2"
+        "4e371d2fd80b6d0ce37c1bf65701e1fe478480976625739c937c95298ffebf85"
       ),
       (
         .init(route: .notebook, includesExistingNotebook: true),
-        "0db6226e6ee649ed3b2c7fbe5b92fc2d0a1608960912bb50a32d931006a4c072"
+        "d5268de6dce8228b1458142c017e05380bf02bc0e3507e2fc22907d95db49cf9"
       ),
     ]
     for (policy, expected) in cases {

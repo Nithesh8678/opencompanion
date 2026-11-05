@@ -254,6 +254,11 @@ import SwiftUI
       cursor?.sceneNodeVisitBounds = { [weak self] authority in
         self?.explanationOverlay?.sceneNodeVisitBounds(authority: authority)
       }
+      cursor?.onSceneNodeVisitEnded = { [weak self] authority, reason in
+        if reason == .hostBoundsUnavailable {
+          self?.explanationOverlay?.reconcileSceneFocus(authority: authority)
+        }
+      }
       model.onExplanationFocusStarted = { [weak self] context, presentation in
         self?.explanationOverlay?.beginSceneFocus(context: context, presentation: presentation)
       }

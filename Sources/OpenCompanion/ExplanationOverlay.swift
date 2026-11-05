@@ -70,6 +70,8 @@ enum ExplanationOverlayLayout {
     let authority: SceneFocusAuthority
   }
   private var narratedFocus: NarratedFocus?
+  private var focusReconciliationTask: Task<Void, Never>?
+  private var focusReconciliationID: UUID?
   var onSceneFocusPoint: ((SceneFocusAuthority, CGPoint) -> Void)?
   var onSceneFocusEnded: ((SceneFocusAuthority) -> Void)?
 
@@ -202,6 +204,7 @@ enum ExplanationOverlayLayout {
 
   func dismiss() {
     endSceneFocus()
+    cancelFocusReconciliation()
     orbitController?.shutdown()
     orbitController = nil
     orbitHint = nil
@@ -262,23 +265,63 @@ enum ExplanationOverlayLayout {
   func endSceneFocus(context: VoiceNarrationContext? = nil) {
     guard let owned = narratedFocus, context == nil || owned.context == context else { return }
     // Revoke before callbacks or resolver cleanup, both of which may reenter.
+    cancelFocusReconciliation()
     narratedFocus = nil
     canvas?.clearSceneFocus()
     onSceneFocusEnded?(owned.authority)
   }
 
+  /// A cancelled cursor visit can request one recheck after its current render
+  /// stack. Bounds reads stay pure and unavailable points never retain a pose.
+  func reconcileSceneFocus(authority: SceneFocusAuthority) {
+    guard currentFocusCanvas(authority: authority) != nil, focusReconciliationTask == nil else {
+      return
+    }
+    let id = UUID()
+    focusReconciliationID = id
+    focusReconciliationTask = Task { @MainActor [weak self] in
+      await Task.yield()
+      guard let self else { return }
+      defer {
+        if self.focusReconciliationID == id {
+          self.focusReconciliationTask = nil
+          self.focusReconciliationID = nil
+        }
+      }
+      guard !Task.isCancelled, self.focusReconciliationID == id,
+        let canvas = self.currentFocusCanvas(authority: authority)
+      else { return }
+      canvas.requestSceneFocusReconciliation()
+    }
+  }
+
+  private func cancelFocusReconciliation() {
+    focusReconciliationID = nil
+    focusReconciliationTask?.cancel()
+    focusReconciliationTask = nil
+  }
+
+  private func currentFocusCanvas(authority: SceneFocusAuthority) -> RetainedCanvasView? {
+    guard narratedFocus?.authority == authority, presentationLease == authority.presentationLease,
+      availability.canPresent, let model, model.explanationFocusIsCurrent(authority),
+      let visualPanel, visualPanel.isVisible, let canvas, canvas.window === visualPanel,
+      !canvas.isHiddenOrHasHiddenAncestor,
+      canvas.renderedDocumentID == authority.documentID,
+      canvas.renderedDocumentRevision == authority.documentRevision,
+      orbitController?.diagnostics.phase == "passive"
+    else { return nil }
+    return canvas
+  }
+
   /// A cheap authority/bounds read for the cursor clock. It never captures or
   /// ray-tests; projection changes arrive from the native scene/camera clock.
   func sceneNodeVisitBounds(authority: SceneFocusAuthority) -> CGRect? {
-    guard narratedFocus?.authority == authority, presentationLease == authority.presentationLease,
-      availability.canPresent, let model, model.explanationFocusIsCurrent(authority),
-      let visualPanel, visualPanel.isVisible, let canvas,
+    guard let canvas = currentFocusCanvas(authority: authority), let visualPanel,
       let projection = canvas.currentSceneFocusProjection,
       projection.targetID == authority.focusID,
       projection.documentID == authority.documentID,
       projection.documentRevision == authority.documentRevision,
-      projection.generation == authority.generation,
-      orbitController?.diagnostics.phase == "passive"
+      projection.generation == authority.generation
     else { return nil }
     return visualPanel.frame
   }

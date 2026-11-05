@@ -149,6 +149,7 @@ struct SceneCanvas: NSViewRepresentable {
   private var sceneFocusCameraStamp: [Double]?
   private var lastSceneFocusProjection: SceneFocusProjection?
   private var focusAwaitingVisibleFade = false
+  private var focusReconciliationPending = false
   private var focusAppearanceRetryUntil: TimeInterval?
   private(set) var renderSubmissionSerial: UInt64 = 0
   var onSceneFocusProjectionChanged: ((SceneFocusProjection?) -> Void)?
@@ -390,9 +391,10 @@ struct SceneCanvas: NSViewRepresentable {
     }
     guard
       nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork
-        || focusAwaitingVisibleFade,
+        || focusAwaitingVisibleFade || focusReconciliationPending,
       let window, window.isVisible, !isHiddenOrHasHiddenAncestor,
       !reduceMotion || attachmentResolver.hasPendingWork || focusAwaitingVisibleFade
+        || focusReconciliationPending
     else {
       nativeDisplayLink?.isPaused = true
       lastDisplayTime = nil
@@ -435,9 +437,10 @@ struct SceneCanvas: NSViewRepresentable {
     guard sender === nativeDisplayLink else { return }
     guard
       nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork
-        || focusAwaitingVisibleFade,
+        || focusAwaitingVisibleFade || focusReconciliationPending,
       !isHiddenOrHasHiddenAncestor, window?.isVisible == true,
       !shouldReduceMotion || attachmentResolver.hasPendingWork || focusAwaitingVisibleFade
+        || focusReconciliationPending
     else {
       sender.isPaused = true
       lastDisplayTime = nil
@@ -447,12 +450,18 @@ struct SceneCanvas: NSViewRepresentable {
     let delta = max(0, now - (lastDisplayTime ?? now))
     lastDisplayTime = now
     displayAccumulatedDelta = min(1_000_000, displayAccumulatedDelta + delta)
+    // Consume before publication: a host request from a synchronous callback
+    // belongs to the next native frame, never a recursive resolver pass.
+    let reconcileFocus = focusReconciliationPending
+    focusReconciliationPending = false
     let labelChanged = labelReveal.advance(by: delta, reduceMotion: shouldReduceMotion)
     if labelChanged { displayLabelAdvanceCount = min(1_000_000, displayLabelAdvanceCount + 1) }
     if nativePlaying, !shouldReduceMotion, let time = try? clock?.value(at: now) {
       currentTime = time
       render(document, time: time, selectedID: selection)
-    } else if labelChanged || attachmentResolver.hasPendingWork || focusAwaitingVisibleFade {
+    } else if labelChanged || attachmentResolver.hasPendingWork || focusAwaitingVisibleFade
+      || reconcileFocus
+    {
       updateProjectedLabels()
     }
     updateDisplayLink()
@@ -1274,9 +1283,20 @@ struct SceneCanvas: NSViewRepresentable {
     sceneFocusCanvasPoint = nil
     sceneFocusCameraStamp = nil
     focusAwaitingVisibleFade = false
+    focusReconciliationPending = false
     focusAppearanceRetryUntil = nil
     focusResolver.reset()
     publishSceneFocusProjection(nil)
+  }
+
+  /// A host may observe a transiently unavailable projection between native
+  /// publication ticks. Reoffer the current result even when its value recovers
+  /// unchanged. Existing resolver context checks retain the normal ray budget.
+  func requestSceneFocusReconciliation() {
+    guard focusSurfaceMounted, sceneFocusTargetID != nil else { return }
+    lastSceneFocusProjection = nil
+    focusReconciliationPending = true
+    updateDisplayLink()
   }
 
   /// Counts only native focus rays; label diagnostics remain independently
@@ -1567,7 +1587,7 @@ struct SceneCanvas: NSViewRepresentable {
   var hasPendingSpatialLabels: Bool { labelReveal.hasRevealableText }
   var needsDisplayClock: Bool {
     nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork
-      || focusAwaitingVisibleFade
+      || focusAwaitingVisibleFade || focusReconciliationPending
   }
   var hasPendingLabelAttachments: Bool { attachmentResolver.hasPendingWork }
   func resolvePendingLabelAttachments() {

@@ -76,6 +76,34 @@ enum ExplanationNarrationAcceptance {
     cursor.sceneNodeVisitBounds = { [weak overlay] authority in
       overlay?.sceneNodeVisitBounds(authority: authority)
     }
+    let recordFocusEnd: (String, String, SceneFocusAuthority) -> Void = {
+      source, reason, authority in
+      guard observation.focusEndEvents.count < 64 else {
+        observation.fail("The authored focus-end trace exceeded its bound.")
+        return
+      }
+      let projection = try? ownCanvas(
+        overlay: overlay, documentID: model.explanationDisplayDocument?.id
+      )
+      .currentSceneFocusProjection
+      observation.focusEndEvents.append([
+        "source": source, "reason": reason, "focusID": authority.focusID,
+        "beatID": authority.beatID.uuidString,
+        "stage": observation.stage(for: authority.beatID) ?? 0,
+        "elapsedMS": (ProcessInfo.processInfo.systemUptime - observation.started) * 1_000,
+        "modelFocusIsCurrent": model.explanationFocusIsCurrent(authority),
+        "presentedFocusID": model.explanationPresentation?.focusID ?? "",
+        "presentedBeatID": model.explanationPresentation?.beatID.uuidString ?? "",
+        "projectionTargetID": projection?.targetID ?? "",
+        "projectionRevision": projection?.documentRevision ?? -1,
+      ])
+    }
+    cursor.onSceneNodeVisitEnded = { authority, reason in
+      recordFocusEnd("cursor", reason.rawValue, authority)
+      if reason == .hostBoundsUnavailable {
+        overlay.reconcileSceneFocus(authority: authority)
+      }
+    }
     model.onExplanationFocusStarted = { context, presentation in
       overlay.beginSceneFocus(context: context, presentation: presentation)
     }
@@ -96,6 +124,7 @@ enum ExplanationNarrationAcceptance {
       }
     }
     overlay.onSceneFocusEnded = { [weak cursor] authority in
+      recordFocusEnd("overlay", "hostEnded", authority)
       cursor?.cancelSceneNodeVisit(authority: authority)
     }
     cursor.onNarrationCaptionCompleted = { model.completeExplanationCaption(context: $0) }
@@ -571,6 +600,7 @@ enum ExplanationNarrationAcceptance {
       "focusVisitStages": observation.focusVisitStages.sorted(),
       "focusArrivalStages": observation.focusArrivalStages.sorted(),
       "focusPointCounts": observation.focusPointCounts.mapKeysToStrings(),
+      "focusEndEvents": observation.focusEndEvents,
       "focusWaitTimeouts": Dictionary(
         uniqueKeysWithValues: observation.focusWaitTimeouts.map { (String($0.key), $0.value) }),
       "focusArrivals": observation.focusArrivalReceipts.keys.sorted().compactMap {
@@ -612,6 +642,7 @@ enum ExplanationNarrationAcceptance {
     var cursorAboveExplanationStages = Set<Int>()
     var focusArrivalReceipts: [Int: [String: Any]] = [:]
     var focusWaitTimeouts: [Int: [String: Any]] = [:]
+    var focusEndEvents: [[String: Any]] = []
     var staleFocusAfterStopRejected = false
     var canonicalTipAhead = false
     var failure: String?

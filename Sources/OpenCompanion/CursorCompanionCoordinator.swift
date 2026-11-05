@@ -9,6 +9,17 @@ struct CursorCompanionTiming: Codable {
   var firstGlyphRenderSubmissionMS: Double?
 }
 
+enum SceneCursorVisitEndReason: String, Codable, Sendable {
+  case preferencesDisabled, repliesDisabled, displayChanged, suspended
+  case newInput, newResponse, generationCancelled, inputEnded
+  case responseCompleted, captionDismissed, presentationCleared, shutdown
+  case narrationContextChanged, nativeNarrationFinished, narrationAbandoned, localCaptionCompleted
+  case replacedByNewVisit, explicitCancellation, explicitScopedCancellation, screenGuidanceStarted
+  case authorityUnavailable, boundsObserverUnavailable, hostBoundsUnavailable
+  case authorityChangedDuringBoundsRead, pointOrBoundsInvalid, pointExcluded,
+    projectionUpdateRejected
+}
+
 struct CursorCompanionSnapshot: Codable {
   let generation: UInt64?
   let phase: String
@@ -74,6 +85,10 @@ struct CursorCompanionSnapshot: Codable {
   /// Returns the current own-scene panel only while this exact narration and
   /// presentation lease is active. Absence revokes the visit, never the caption.
   var sceneNodeVisitBounds: ((SceneFocusAuthority) -> CGRect?)?
+  /// Optional lifecycle observation. The old owner is revoked before delivery;
+  /// callers that record a trace remain responsible for bounding their storage.
+  var onSceneNodeVisitEnded: ((SceneFocusAuthority, SceneCursorVisitEndReason) -> Void)?
+  private(set) var lastSceneNodeVisitEndReason: SceneCursorVisitEndReason?
   var sceneNodeVisitAuthority: SceneFocusAuthority? { sceneVisit?.authority }
   var sceneNodeVisitTargetPoint: CGPoint? { sceneVisit?.target }
   private var lastPlacement: CursorCompanionPlacement?
@@ -124,7 +139,8 @@ struct CursorCompanionSnapshot: Codable {
         guard let self else { return }
         self.preferences = .load()
         if !self.preferences.enabled || !self.preferences.showReplies {
-          self.endSceneNodeVisit()
+          self.endSceneNodeVisit(
+            reason: self.preferences.enabled ? .repliesDisabled : .preferencesDisabled)
           self.abandonNarration()
         }
         if !self.preferences.showReplies {
@@ -138,7 +154,7 @@ struct CursorCompanionSnapshot: Codable {
       .sink { [weak self] _ in
         MainActor.assumeIsolated {
           guard let self else { return }
-          self.endSceneNodeVisit()
+          self.endSceneNodeVisit(reason: .displayChanged)
           if self.guidanceExplanationEvidence != nil { self.clearGuidanceExplanation() }
           self.guidance = nil
           self.lastPlacement = nil
@@ -161,7 +177,7 @@ struct CursorCompanionSnapshot: Codable {
         MainActor.assumeIsolated {
           guard let self else { return }
           self.suspended = true
-          self.clearPresentation()
+          self.clearPresentation(reason: .suspended)
           self.panel.orderOut(nil)
           self.stopClock()
         }
@@ -216,7 +232,7 @@ struct CursorCompanionSnapshot: Codable {
   }
 
   private func begin(generation: UInt64, stage: Stage, phase: NotchActivityPhase) {
-    clearPresentation()
+    clearPresentation(reason: stage == .input ? .newInput : .newResponse)
     watermark = generation
     self.generation = generation
     self.stage = stage
@@ -231,7 +247,7 @@ struct CursorCompanionSnapshot: Codable {
   func cancel(generation: UInt64) {
     guard generation >= watermark else { return }
     watermark = generation
-    clearPresentation()
+    clearPresentation(reason: .generationCancelled)
     renderNow()
     wake()
   }
@@ -284,7 +300,7 @@ struct CursorCompanionSnapshot: Codable {
       visit.authority.generation != context.generation
         || visit.authority.beatID != context.narrationID
     {
-      endSceneNodeVisit()
+      endSceneNodeVisit(reason: .narrationContextChanged)
     }
     abandonNarration()
     narration = next
@@ -331,7 +347,7 @@ struct CursorCompanionSnapshot: Codable {
     if owned.visibleText != owned.text {
       word = nextWord(previous: owned.visibleText, current: owned.text)
     }
-    endSceneNodeVisit(for: context)
+    endSceneNodeVisit(for: context, reason: .nativeNarrationFinished)
     narration = nil
     settleNarrationText(owned.text)
     renderNow()
@@ -354,7 +370,7 @@ struct CursorCompanionSnapshot: Codable {
 
   private func abandonNarration() {
     guard var owned = narration else { return }
-    endSceneNodeVisit(for: owned.context)
+    endSceneNodeVisit(for: owned.context, reason: .narrationAbandoned)
     narration = nil
     reveal.reset()
     highestAcceptedPreviewID = nil
@@ -372,7 +388,7 @@ struct CursorCompanionSnapshot: Codable {
     let context = owned.takeLocalCompletion(at: uptime)
     narration = owned
     guard let context else { return }
-    endSceneNodeVisit(for: context)
+    endSceneNodeVisit(for: context, reason: .localCaptionCompleted)
     narration = nil
     settleNarrationText(owned.text)
     dispatchNarrationCompletion(context)
@@ -383,10 +399,14 @@ struct CursorCompanionSnapshot: Codable {
   @discardableResult func visitSceneNode(
     authority: SceneFocusAuthority, point: CGPoint
   ) -> Bool {
-    guard let bounds = currentSceneBounds(for: authority),
+    let validation = sceneBoundsValidation(for: authority)
+    guard let bounds = validation.bounds,
       SceneCursorVisit.valid(point: point, in: bounds)
     else {
-      if sceneVisit?.authority == authority { cancelSceneNodeVisit(authority: authority) }
+      if sceneVisit?.authority == authority {
+        cancelSceneNodeVisit(
+          authority: authority, reason: validation.failure ?? .pointOrBoundsInvalid)
+      }
       return false
     }
     if sceneVisit?.authority == authority {
@@ -399,7 +419,10 @@ struct CursorCompanionSnapshot: Codable {
         from: hasRenderedBody ? lastBodyCenter : CGPoint(x: x.value, y: y.value),
         point: point, bounds: bounds, at: now)
     else { return false }
+    let replaced = sceneVisit?.authority
     sceneVisit = next
+    if let replaced { reportSceneNodeVisitEnded(replaced, reason: .replacedByNewVisit) }
+    guard sceneVisit?.authority == authority else { return false }
     cancelDismissal()
     view.cancelCaptionDismissal()
     renderNow()
@@ -411,13 +434,15 @@ struct CursorCompanionSnapshot: Codable {
     authority: SceneFocusAuthority, point: CGPoint
   ) -> Bool {
     guard sceneVisit?.authority == authority else { return false }
-    guard let bounds = currentSceneBounds(for: authority),
+    let validation = sceneBoundsValidation(for: authority)
+    guard let bounds = validation.bounds,
       sceneVisit?.authority == authority,
       sceneVisit?.update(
         authority: authority, point: point, bounds: bounds,
         at: ProcessInfo.processInfo.systemUptime, reduceMotion: reduceMotion) == true
     else {
-      cancelSceneNodeVisit(authority: authority)
+      cancelSceneNodeVisit(
+        authority: authority, reason: validation.failure ?? .projectionUpdateRejected)
       return false
     }
     renderNow()
@@ -426,19 +451,34 @@ struct CursorCompanionSnapshot: Codable {
   }
 
   func cancelSceneNodeVisit(authority: SceneFocusAuthority? = nil) {
+    cancelSceneNodeVisit(
+      authority: authority,
+      reason: authority == nil ? .explicitCancellation : .explicitScopedCancellation)
+  }
+
+  private func cancelSceneNodeVisit(
+    authority: SceneFocusAuthority?, reason: SceneCursorVisitEndReason
+  ) {
     guard let current = sceneVisit, authority == nil || current.authority == authority else {
       return
     }
-    endSceneNodeVisit()
+    endSceneNodeVisit(reason: reason)
     renderNow()
     wake()
   }
 
   private func currentSceneBounds(for authority: SceneFocusAuthority) -> CGRect? {
-    guard ownsSceneAuthority(authority), let bounds = sceneNodeVisitBounds?(authority),
-      ownsSceneAuthority(authority)
-    else { return nil }
-    return bounds
+    sceneBoundsValidation(for: authority).bounds
+  }
+
+  private func sceneBoundsValidation(
+    for authority: SceneFocusAuthority
+  ) -> (bounds: CGRect?, failure: SceneCursorVisitEndReason?) {
+    guard ownsSceneAuthority(authority) else { return (nil, .authorityUnavailable) }
+    guard let observer = sceneNodeVisitBounds else { return (nil, .boundsObserverUnavailable) }
+    guard let bounds = observer(authority) else { return (nil, .hostBoundsUnavailable) }
+    guard ownsSceneAuthority(authority) else { return (nil, .authorityChangedDuringBoundsRead) }
+    return (bounds, nil)
   }
 
   private func ownsSceneAuthority(_ authority: SceneFocusAuthority) -> Bool {
@@ -453,26 +493,34 @@ struct CursorCompanionSnapshot: Codable {
 
   private func validateSceneNodeVisit() {
     guard let current = sceneVisit else { return }
-    let bounds = currentSceneBounds(for: current.authority)
+    let validation = sceneBoundsValidation(for: current.authority)
     // The host callback may synchronously publish a newer presentation.
     guard sceneVisit?.authority == current.authority else { return }
-    guard let bounds, SceneCursorVisit.valid(point: current.target, in: bounds),
-      !exclusionFrames().contains(where: { $0.contains(current.target) })
-    else {
-      endSceneNodeVisit()
+    guard let bounds = validation.bounds else {
+      endSceneNodeVisit(reason: validation.failure ?? .hostBoundsUnavailable)
+      return
+    }
+    guard SceneCursorVisit.valid(point: current.target, in: bounds) else {
+      endSceneNodeVisit(reason: .pointOrBoundsInvalid)
+      return
+    }
+    guard !exclusionFrames().contains(where: { $0.contains(current.target) }) else {
+      endSceneNodeVisit(reason: .pointExcluded)
       return
     }
   }
 
-  private func endSceneNodeVisit(for context: VoiceNarrationContext) {
+  private func endSceneNodeVisit(
+    for context: VoiceNarrationContext, reason: SceneCursorVisitEndReason
+  ) {
     guard let current = sceneVisit, current.authority.generation == context.generation,
       current.authority.beatID == context.narrationID
     else { return }
-    endSceneNodeVisit()
+    endSceneNodeVisit(reason: reason)
   }
 
-  private func endSceneNodeVisit() {
-    guard sceneVisit != nil else { return }
+  private func endSceneNodeVisit(reason: SceneCursorVisitEndReason) {
+    guard let previous = sceneVisit else { return }
     sceneVisit = nil
     // Rebase the existing follower spring at the actual last painted body.
     // Revoking a projection therefore returns smoothly without touching text.
@@ -481,6 +529,14 @@ struct CursorCompanionSnapshot: Codable {
     x.target = followTarget.x
     y.target = followTarget.y
     initialized = true
+    reportSceneNodeVisitEnded(previous.authority, reason: reason)
+  }
+
+  private func reportSceneNodeVisitEnded(
+    _ authority: SceneFocusAuthority, reason: SceneCursorVisitEndReason
+  ) {
+    lastSceneNodeVisitEndReason = reason
+    onSceneNodeVisitEnded?(authority, reason)
   }
 
   /// Called only after OverlayHost accepted the target against the selected
@@ -492,7 +548,7 @@ struct CursorCompanionSnapshot: Codable {
       evidence.screenRect.width > 0, evidence.screenRect.height > 0,
       target.instruction.utf8.count <= 32_000
     else { return 0 }
-    endSceneNodeVisit()
+    endSceneNodeVisit(reason: .screenGuidanceStarted)
     if let previous = guidanceExplanationEvidence, previous != ScreenEvidenceIdentity(evidence) {
       clearGuidanceExplanation()
     }
@@ -595,7 +651,7 @@ struct CursorCompanionSnapshot: Codable {
       case "Finishing speech", "Release Control+Option to send": phase = .thinking
       default:
         if !model.listening && !model.pushToTalkActive {
-          clearPresentation()
+          clearPresentation(reason: .inputEnded)
         }
       }
     case .response:
@@ -618,7 +674,7 @@ struct CursorCompanionSnapshot: Codable {
     else { return }
     phase = .idle
     if reveal.visibleText.isEmpty {
-      clearPresentation()
+      clearPresentation(reason: .responseCompleted)
     } else {
       let deadline = ProcessInfo.processInfo.systemUptime + 3.5
       dismissal = deadline
@@ -632,15 +688,15 @@ struct CursorCompanionSnapshot: Codable {
         }
         guard self.generation == owner, self.dismissal == deadline else { return }
         self.dismissalTask = nil
-        self.clearPresentation()
+        self.clearPresentation(reason: .captionDismissed)
         self.renderNow()
         self.wake()
       }
     }
   }
 
-  private func clearPresentation() {
-    endSceneNodeVisit()
+  private func clearPresentation(reason: SceneCursorVisitEndReason) {
+    endSceneNodeVisit(reason: reason)
     abandonNarration()
     if guidance != nil {
       x = NotchSpring(lastBodyCenter.x, frequency: 38)
@@ -740,7 +796,7 @@ struct CursorCompanionSnapshot: Codable {
     validateGuidanceExplanation()
     validateSceneNodeVisit()
     guard preferences.enabled, !suspended else {
-      endSceneNodeVisit()
+      endSceneNodeVisit(reason: suspended ? .suspended : .preferencesDisabled)
       abandonNarration()
       panel.orderOut(nil)
       return
@@ -949,7 +1005,7 @@ struct CursorCompanionSnapshot: Codable {
     globalMouse = nil
     localMouse = nil
     subscriptions.removeAll()
-    clearPresentation()
+    clearPresentation(reason: .shutdown)
     panel.orderOut(nil)
   }
 }

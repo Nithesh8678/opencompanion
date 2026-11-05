@@ -60,11 +60,13 @@ struct ProviderTarget: Decodable, Sendable {
   var advanceOn: String? = nil
   var candidateID: String? = nil
   var pixelBounds: ProviderPixelBounds? = nil
+  var awaitUser: Bool? = nil
 }
 
 extension ProviderTarget {
   private enum CodingKeys: String, CodingKey {
-    case x, y, width, height, instruction, label, shape, advanceOn, candidateID, pixelBounds
+    case x, y, width, height, instruction, label, shape, advanceOn, candidateID, pixelBounds,
+      awaitUser
   }
 
   init(from decoder: Decoder) throws {
@@ -101,6 +103,7 @@ extension ProviderTarget {
     label = try values.decodeIfPresent(String.self, forKey: .label)
     shape = try values.decodeIfPresent(String.self, forKey: .shape)
     advanceOn = try values.decodeIfPresent(String.self, forKey: .advanceOn)
+    awaitUser = try values.decodeIfPresent(Bool.self, forKey: .awaitUser)
   }
 }
 struct ChatLine: Identifiable, Codable, Sendable {
@@ -247,9 +250,10 @@ actor ReasoningProvider {
     {"type":"text","text":"A brief useful clarification or completion."}
     {"type":"target","target":{"candidateID":"exact current candidate ID","instruction":"Choose the highlighted control.","label":"Next","shape":"ellipse","advanceOn":"click"}}
     {"type":"target","target":{"pixelBounds":{"x":120,"y":80,"width":48,"height":40},"instruction":"Click the visible control.","label":"Next","shape":"ellipse","advanceOn":"click"}}
+    {"type":"target","target":{"pixelBounds":{"x":120,"y":80,"width":240,"height":40},"instruction":"Enter the requested name in this field, then say continue or choose Continue when ready for a fresh check.","label":"Enter name","shape":"roundedRectangle","advanceOn":"manual","awaitUser":true}}
     Analyze the screenshot and question together. For a task, emit the next grounded target immediately, with a brief actionable instruction. For a question about something visible, mark the relevant element with advanceOn manual and put the actual answer in instruction. No long preamble, future plan, scene or Notebook. Prefer a matching enabled actionable accessibility candidate for clicks, copying its exact frame-scoped candidateID and omitting coordinates. Native code owns its bounds. Nonactionable or disabled candidates may be marked for explanation only. OCR boxes describe text, not controls: never use an OCR candidateID for a click. Without an actionable candidate, emit pixelBounds for the visible element's full top-left pixel bounds in this exact encoded screenshot; native code converts pixels to normalized geometry. Do not combine pixelBounds with candidateID or top-level normalized coordinates. Never invent IDs or coordinates or reuse a previous frame's IDs.
     Infer the requested destination from the page, visible icons and labels. The user's words need not literally match a button label. Distinguish application-level navigation from editing or renaming the current page's content; the icon's position and surrounding title matter. If the destination is hidden, highlight the visible parent navigation control that plausibly reveals it, including an avatar, account menu, gear, sidebar opener or overflow. Wait for the refreshed frame before selecting a child. Do not repeat a completed opener once its child is visible. Match equivalent goals in the actual foreground app even if the user names it colloquially. Do not replace a visible target with generic text or a guessed shortcut. If multiple targets are equally plausible, ask one specific clarification rather than guessing. If the actual page cannot support the goal and no grounded visible next step can be identified, explain the specific missing context briefly.
-    At most one click-advancing target per response and two secondary manual marks. A request for where/how to choose or use a button, menu or tool needs advanceOn click for its next clickable control, even when phrased as a question or “show me where”. This arms observation of the user's future click; it never performs that click. Text entry, explanations, disabled elements and dragging use manual. A manual mark never claims the user finished work. Bound the smallest meaningful element that answers the question: a specific icon or badge should not be marked as its entire panel. For image-only targets use pixelBounds in encoded image pixels: x and y are the top-left, width and height are the full element size. Do not divide or normalize these numbers. Check that all values are finite, dimensions are positive, and x+width/y+height stay inside the supplied image dimensions and cover only the intended element. Legacy normalized targets remain supported when used alone. Use ellipse for compact controls and roundedRectangle for fields or large regions. Labels are 1–4 words; instruction holds the full explanation. A user click is evidence to inspect, not proof of success; verify progress in the next supplied frame. A completed task needs only brief text and no new target.
+    At most one advancing target per response and two secondary explanatory marks. A request for where/how to choose or use a button, menu or tool needs advanceOn click for its next clickable control, even when phrased as a question or “show me where”. This arms observation of the user's future click; it never performs that click. For a task step requiring typing, dragging or another manual user action, use advanceOn manual and awaitUser true: the native Continue control requests a fresh screenshot after the user acts. A plain explanation or disabled-element description uses manual with awaitUser false or omitted, without a Continue control. Never use awaitUser true with click. Do not claim a manual action happened or succeeded; inspect the next supplied frame. Bound the smallest meaningful element that answers the question: a specific icon or badge should not be marked as its entire panel. For image-only targets use pixelBounds in encoded image pixels: x and y are the top-left, width and height are the full element size. Do not divide or normalize these numbers. Check that all values are finite, dimensions are positive, and x+width/y+height stay inside the supplied image dimensions and cover only the intended element. Legacy normalized targets remain supported when used alone. Use ellipse for compact controls and roundedRectangle for fields or large regions. Labels are 1–4 words; instruction holds the full explanation. A user click is evidence to inspect, not proof of success; verify progress in the next supplied frame. A completed task needs only brief text and no new target.
     """
 
   static let instructions = """

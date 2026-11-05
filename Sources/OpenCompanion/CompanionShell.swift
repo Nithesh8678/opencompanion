@@ -538,7 +538,8 @@ private final class ResidentCompanionPanel: NSPanel {
     }
     let initialPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
     guard initialPID == ownPID || initialPID == expectedPID else {
-      throw ProviderError.message("The active app changed. Bring the intended app forward and ask again.")
+      throw ProviderError.message(
+        "The active app changed. Bring the intended app forward and ask again.")
     }
     invalidateInvocations()
     let invocationID = UUID()
@@ -556,10 +557,12 @@ private final class ResidentCompanionPanel: NSPanel {
     }
     let foregroundPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
     guard foregroundPID == ownPID || foregroundPID == expectedPID else {
-      throw ProviderError.message("The active app changed. Bring the intended app forward and ask again.")
+      throw ProviderError.message(
+        "The active app changed. Bring the intended app forward and ask again.")
     }
     if foregroundPID != expectedPID, !application.activate(options: []) {
-      throw ProviderError.message("The intended app could not regain focus. Bring it forward and ask again.")
+      throw ProviderError.message(
+        "The intended app could not regain focus. Bring it forward and ask again.")
     }
     let deadline = ProcessInfo.processInfo.systemUptime + 1
     while invocationPermitted(invocationID, generation: generation) {
@@ -567,10 +570,12 @@ private final class ResidentCompanionPanel: NSPanel {
       let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
       if currentPID == expectedPID { return }
       guard currentPID == ownPID else {
-        throw ProviderError.message("The active app changed. Bring the intended app forward and ask again.")
+        throw ProviderError.message(
+          "The active app changed. Bring the intended app forward and ask again.")
       }
       guard !application.isTerminated, ProcessInfo.processInfo.systemUptime < deadline else {
-        throw ProviderError.message("The intended app did not regain focus. Bring it forward and ask again.")
+        throw ProviderError.message(
+          "The intended app did not regain focus. Bring it forward and ask again.")
       }
       try await Task.sleep(for: .milliseconds(16))
     }
@@ -1306,6 +1311,12 @@ private struct CompanionShellView: View {
           Color(white: 0.09), in: RoundedRectangle(cornerRadius: 15))
       }
       HStack(spacing: 16) {
+        Button(action: model.newConversation) {
+          Image(systemName: "square.and.pencil")
+            .font(.system(size: 12, weight: .medium)).frame(width: 24, height: 24)
+            .background(Color(white: 0.09), in: RoundedRectangle(cornerRadius: 6))
+        }.accessibilityLabel("New chat").accessibilityIdentifier("companion.newChat")
+          .help("Start a new conversation")
         Menu {
           Button("Share display") { capture(.display) }
           Button("Choose a window…") { capture(.window) }

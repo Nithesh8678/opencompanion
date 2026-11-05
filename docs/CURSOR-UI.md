@@ -37,7 +37,7 @@ pointing animation and reading hold; frame/foreground changes, Stop and a new
 generation clear queued and visible explanations. Text and target narration
 share a bounded per-turn speech deduplicator.
 
-The implementation checkpoint passed 333 Swift tests (293 app, 15 store,
+The implementation checkpoint at `cf443ec` passed 333 Swift tests (293 app, 15 store,
 25 core), 29 installer/signing tests, a certificate-signed app build and installed
 native cursor acceptance, including source invalidation during flight and the
 stopped reading hold. The expanded installed-bundle/live-provider run passed all
@@ -62,17 +62,21 @@ click continuation and navigation level, and native pixel conversion removes
 model-side normalization. A separate false failure was corrected in the oracle:
 manual rounded rectangles are valid production shapes, with unchanged strict
 badge geometry. Source-bound manual-caption and notch regressions passed in the
-installed app. The real GUI profile/physical click continuation remains a
-separate acceptance step; no universal app accuracy or exact HeyClicky parity is
-claimed.
+installed app. The user subsequently physically checked the actual screen and
+confirmed both the correct profile/avatar highlight and the next guidance step
+after clicking it. This is user-reported acceptance of that specific workflow,
+separate from the authored-image tests. It does not establish trace-correlated
+click-to-next-frame latency, longer workflows, arbitrary-app accuracy or exact
+HeyClicky parity.
 
 Updated 4 November 2026. The installed cursor/annotation and notch checks passed,
 and a public conversational request completed through ChatGPT via Codex. A live
-public-screen request grounded its first target correctly. Physical click-to-next-
-frame continuation remains pending in the saved trace; the UI driver's button
-invocation does not deliver a global mouse-up event. The user separately reported
-that the next Table name field was highlighted. These boundaries are separate
-from source and unit-test coverage.
+public-screen request grounded its first target correctly. In that earlier
+fixture run, the UI driver's button invocation did not deliver a global mouse-up
+event, so its saved trace did not verify click-to-next-frame continuation. The
+user separately reported that the next Table name field was highlighted. The
+later physical profile/avatar check above confirms the user-observed next step
+for that real-screen workflow; it does not retroactively change the fixture trace.
 
 A later standalone GUI guidance attempt exposed a stale Screen Recording grant:
 the old System Settings entry appeared enabled, but the running app's permission
@@ -80,9 +84,10 @@ preflight failed. With explicit user approval, that one entry was removed and
 the exact canonical app was re-added and enabled. The updated GUI app has been
 launched. The user subsequently reported reaching Thinking and receiving a
 shortcut-only clarification, rather than a circle, while this Codex window was
-visible. This establishes progress beyond the earlier capture failure, not
-successful guidance. The successful CLI-context capture is not a substitute for
-normal GUI verification.
+visible. That earlier attempt established progress beyond the capture failure,
+rather than successful guidance. The later user-reported profile/avatar highlight
+and physical click continuation are the current normal-GUI evidence. A successful
+CLI-context capture alone is not a substitute for that verification.
 
 ## Current-frame control grounding
 
@@ -381,8 +386,10 @@ permission entries or change system grants automatically. With explicit user
 approval, only OpenCompanion's Screen Recording row was removed through System
 Settings, `/Applications/OpenCompanion.app` was re-added, and its new row was
 enabled. Other apps' permission grants were not reset. The updated signed app was
-launched normally. GUI capture/focus/voice acceptance awaits the user's physical
-retry; an enabled new row alone does not establish that workflow's success.
+launched normally. The user subsequently confirmed a correct profile/avatar
+highlight and the next guidance step after a physical click on the actual screen.
+That report covers this workflow; an enabled row alone does not establish success,
+and broader voice, denial/revocation and display acceptance remain separate.
 
 ## Guidance failure feedback
 
@@ -468,6 +475,33 @@ No cursor flight or observed click injects a desktop click, types text, performs
 an AX action, or proves a model-generated postcondition. The user performs the
 actions; fresh perception is used to request verification.
 
+## Manual steps and explicit continuation
+
+Typing, dragging and other user-performed steps can use a manual target with
+`awaitUser: true`. A separate nonactivating black/pink Continue/Stop panel appears
+near that target without taking keyboard focus from the app being edited. Pure
+explanations keep `awaitUser` false or omitted and expose no continuation control.
+Continue consumes the owned step once, waits for the existing short settle period,
+and requests a fresh capture and model verification. It never proves that the user
+performed the instructed action.
+
+Holding Control+Option snapshots a valid waiting step before cancelling old output.
+An exact bounded continuation such as “continue” or “I’m done” can resume that goal
+after release; other questions retain normal routing. Foreground/frame ownership,
+voice generation, mark expiry, request deadline and step budget are rechecked.
+Disabled or expired guidance reports a notice without falling through to a model
+conversation. Spoken and button continuations retain the source request's speech
+policy. Internal verification prompts are provider-only; saved chat shows the
+recognized voice command or “Continue”.
+
+Controller, submission, strict-decoder and negative-display layout tests pass.
+`--guidance-manual-live-acceptance OUTPUT` is an opt-in production capture/model
+check restricted to the opaque public Guidance Fixture. It asks for a field edit,
+waits for the real native Continue button, then requires a new frame containing the
+edit and a grounded next checkbox target. It does not type, click the checkbox,
+use the microphone, or claim the external task completed. Its native run is pending
+at this source checkpoint.
+
 ## Verification entry points
 
 Run `swift test` for parser, word pacing, Unicode, caption layout, ownership,
@@ -524,7 +558,7 @@ displays, fullscreen/Spaces and exact visual parity need separate acceptance.
 
 ## Recorded verification
 
-- Latest completed automated checkpoint: 241 Swift tests (201 app, 15 store,
+- Latest completed automated checkpoint at `cf443ec`: 333 Swift tests (293 app, 15 store,
   25 core) and 29 Python installer/signing tests passed, including capture
   provenance, route admission, native target styling and eight failure-feedback
   tests covering ten parameter cases.
@@ -538,8 +572,11 @@ displays, fullscreen/Spaces and exact visual parity need separate acceptance.
   CLI-context capture succeeded separately. The guarded error now explains the
   one-entry remove/re-add/reopen repair. That repair was performed with explicit
   user approval, the new canonical-app row is enabled and the updated GUI app is
-  launched. The configured signing identity and capture guard are unchanged;
-  the user's physical retry and GUI workflow acceptance remain pending.
+  launched. The configured signing identity and capture guard are unchanged.
+  The user later physically verified the correct profile/avatar highlight and
+  the next guidance step after clicking it on the actual screen. This is a
+  user-reported workflow result, not a trace-correlated latency measurement or
+  evidence of universal app guidance.
 - Installed cursor acceptance passed again on the current binary: unfinished word waits, ordered whole-word
   reveal, one canonical Chat commit, immediate restart, four-row emoji caption,
   Reduce Motion, idle clock shutdown, fixed annotation capture and no focus theft.

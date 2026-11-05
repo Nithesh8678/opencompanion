@@ -18,6 +18,7 @@ import SwiftUI
   private var shell: CompanionShell?
   private var cursor: CursorCompanionCoordinator?
   private var screenGuidance: ScreenGuidanceCoordinator?
+  private var manualGuidanceControls: ManualGuidanceControls?
   private var utilityWindow: NSWindow?
   private var explanationPanel: NSPanel?
   private let hotkey = HotkeyService()
@@ -37,10 +38,14 @@ import SwiftUI
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
     NSApp.appearance = NSAppearance(named: .darkAqua)
+    let liveGuidanceAcceptance =
+      CommandLine.arguments.contains("--guidance-live-acceptance")
+      || CommandLine.arguments.contains("--guidance-manual-live-acceptance")
     let acceptanceMode = [
       "--keychain-acceptance", "--smoke-test-codex", "--render-acceptance", "--capture-acceptance",
       "--interaction-acceptance", "--cursor-acceptance", "--cursor-live-acceptance",
       "--guidance-live-acceptance", "--guidance-routing-acceptance",
+      "--guidance-manual-live-acceptance",
     ].contains(where: CommandLine.arguments.contains)
     model = AppModel(acceptanceMode: acceptanceMode)
     model.onOpen = { [weak self] in self?.openRequestedSurface() }
@@ -124,7 +129,7 @@ import SwiftUI
     shell?.show(anchor: .notch)
     if !acceptanceMode || CommandLine.arguments.contains("--cursor-acceptance")
       || CommandLine.arguments.contains("--cursor-live-acceptance")
-      || CommandLine.arguments.contains("--guidance-live-acceptance")
+      || liveGuidanceAcceptance
     {
       cursor = CursorCompanionCoordinator(
         model: model, observePointer: !acceptanceMode,
@@ -150,8 +155,14 @@ import SwiftUI
         self?.screenGuidance?.cancel()
       }
     }
-    if !acceptanceMode || CommandLine.arguments.contains("--guidance-live-acceptance") {
+    if !acceptanceMode || liveGuidanceAcceptance {
       screenGuidance = ScreenGuidanceCoordinator(model: model)
+      if let screenGuidance {
+        manualGuidanceControls = ManualGuidanceControls(coordinator: screenGuidance, model: model)
+      }
+      model.onManualGuidanceVoiceStart = { [weak self] in
+        self?.screenGuidance?.takeManualStepForVoice()
+      }
       model.onScreenGuidanceTargetAccepted = { [weak self] target, evidence, generation, request in
         self?.screenGuidance?.accept(
           target: target, evidence: evidence,
@@ -170,6 +181,25 @@ import SwiftUI
           print("GUIDANCE_LIVE_ACCEPTANCE_PASSED")
         } catch {
           print("GUIDANCE_LIVE_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
+    }
+    if let index = CommandLine.arguments.firstIndex(of: "--guidance-manual-live-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 1 < CommandLine.arguments.count, let cursor else {
+            throw ProviderError.message(
+              "Provide an output directory for manual guidance acceptance.")
+          }
+          try await ManualGuidanceLiveAcceptance.run(
+            model: model, cursor: cursor,
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+          print("MANUAL_GUIDANCE_LIVE_ACCEPTANCE_PASSED")
+        } catch {
+          print("MANUAL_GUIDANCE_LIVE_ACCEPTANCE_FAILED: \(error.localizedDescription)")
           exit(1)
         }
         NSApp.terminate(nil)
@@ -426,6 +456,8 @@ import SwiftUI
     ).target = self
     appMenu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
       .target = self
+    appMenu.addItem(withTitle: "New chat", action: #selector(newChat), keyEquivalent: "n")
+      .target = self
     appMenu.addItem(.separator())
     appMenu.addItem(withTitle: "Quit OpenCompanion", action: #selector(quit), keyEquivalent: "q")
       .target = self
@@ -508,6 +540,10 @@ import SwiftUI
   @objc private func openSettings() {
     shell?.openSettings()
   }
+  @objc private func newChat() {
+    model.newConversation()
+    shell?.navigate(to: .chat)
+  }
   @objc private func stop() {
     voiceShortcut.cancelActive(reason: .manualStop)
     model.stop()
@@ -521,6 +557,7 @@ import SwiftUI
     voiceShortcut.stop()
     cursor?.shutdown()
     screenGuidance?.shutdown()
+    manualGuidanceControls?.shutdown()
     shell?.shutdown()
     model.stop()
     model.runner.stop()

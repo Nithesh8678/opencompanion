@@ -103,6 +103,15 @@ struct WorkspaceView: View {
         }
       }
       Spacer()
+      if isChat {
+        Button(action: model.newConversation) {
+          Image(systemName: "square.and.pencil").font(.system(size: 14, weight: .medium))
+            .frame(width: 30, height: 30)
+            .background(WorkspacePalette.surface, in: RoundedRectangle(cornerRadius: 8))
+        }.buttonStyle(.plain).foregroundStyle(WorkspacePalette.secondary)
+          .accessibilityLabel("New chat").accessibilityIdentifier("workspace.newChat")
+          .help("Start a new conversation")
+      }
       if model.busy || model.listening || model.state == "Speaking" || model.state == "Observing"
         || model.voice.hasPendingSpeech
       {

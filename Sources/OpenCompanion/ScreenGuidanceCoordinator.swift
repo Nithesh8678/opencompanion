@@ -1,6 +1,65 @@
 import AppKit
 import Combine
 
+/// The observation requests fresh perception; neither case proves success.
+enum ScreenGuidanceContinuationObservation: String, Sendable {
+  case click
+  case explicitContinue
+}
+
+struct ManualGuidanceStep: Identifiable, Sendable, Equatable {
+  let id: UUID
+  let label: String
+  let instruction: String
+  let evidence: ScreenEvidenceIdentity
+  let generation: UInt64
+  let request: ScreenGuidanceRequest
+  let targetRect: CGRect
+  let expiresAt: TimeInterval
+}
+
+/// One manual lease carried across the deliberate start of a new voice-input
+/// generation. It never treats an arbitrary utterance as task completion.
+struct ManualGuidanceVoiceContinuation: Sendable {
+  let step: ManualGuidanceStep
+  let inputGeneration: UInt64
+
+  static func isContinueCommand(_ text: String) -> Bool {
+    guard !text.isEmpty, text.utf8.prefix(257).count <= 256 else { return false }
+    var command = text.lowercased().replacingOccurrences(of: "’", with: "'")
+      .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    // Speech transcription may add sentence punctuation, but quoted commands,
+    // negation, surrounding explanations and substring matches stay ordinary.
+    while let last = command.last, last == "." || last == "!" || last == "?" {
+      command.removeLast()
+    }
+    return [
+      "continue", "please continue", "continue please", "done", "all done", "i'm done",
+      "i am done", "next step", "the next step", "next step please",
+      "please continue to the next step",
+    ].contains(command)
+  }
+
+  func nextRequest(
+    transcript: String, generation: UInt64, evidence: ScreenEvidence?, foregroundPID: pid_t?,
+    now: TimeInterval
+  ) -> ScreenGuidanceRequest? {
+    guard Self.isContinueCommand(transcript), generation == inputGeneration,
+      step.evidence.matches(evidence), let foregroundPID, foregroundPID > 0,
+      foregroundPID == step.evidence.foregroundPID,
+      now.isFinite, now >= 0, step.expiresAt.isFinite, step.request.expires.isFinite,
+      now < step.expiresAt, step.expiresAt <= step.request.expires,
+      step.expiresAt - now <= ScreenGuidancePolicy.markedTargetLifetime,
+      step.request.expires > now,
+      step.request.expires - now <= ScreenGuidancePolicy.maximumRequestLifetime,
+      ScreenGuidancePolicy.permitsContinuation(step: step.request.step)
+    else { return nil }
+    return ScreenGuidanceRequest(
+      id: step.request.id, prompt: step.request.prompt, step: step.request.step + 1,
+      expires: step.request.expires, speakAloud: step.request.speakAloud)
+  }
+}
+
 /// Geometry and deadlines for passive click observation. A matching point is
 /// evidence of a user click, never proof that the intended action succeeded.
 enum ScreenGuidancePolicy {
@@ -62,6 +121,12 @@ enum ScreenGuidancePolicy {
       && now - admittedAt < markedTargetLifetime
   }
 
+  /// A final annotation may remain useful, but it cannot offer another step
+  /// after the request's six-step budget has been exhausted.
+  static func permitsContinuation(step: Int) -> Bool {
+    (0..<(maximumSteps - 1)).contains(step)
+  }
+
   private static func permitsRequest(
     step: Int, requestExpires: TimeInterval, began: TimeInterval, now: TimeInterval
   ) -> Bool {
@@ -71,10 +136,15 @@ enum ScreenGuidancePolicy {
   }
 }
 
-/// One deliberately admitted target, one observed user click, then one fresh
-/// continuation request. This controller never injects input, captures screens,
-/// performs AX work, stores pointer trails, or claims a click was successful.
-@MainActor final class ScreenGuidanceCoordinator {
+/// One deliberately admitted target, one observed click or explicit recheck,
+/// then one fresh continuation request. This controller never injects input,
+/// captures screens, performs AX work, or claims a user action was successful.
+@MainActor final class ScreenGuidanceCoordinator: ObservableObject {
+  typealias ContinuationHandler =
+    @MainActor (
+      ScreenGuidanceRequest, ScreenEvidenceIdentity, UInt64, ScreenGuidanceContinuationObservation
+    ) -> Void
+
   private struct Mark {
     let lease: UUID
     let rect: CGRect
@@ -82,10 +152,16 @@ enum ScreenGuidancePolicy {
     let generation: UInt64
     let request: ScreenGuidanceRequest
     let admittedAt: TimeInterval
+    let observation: ScreenGuidanceContinuationObservation
   }
 
+  @Published private(set) var manualStep: ManualGuidanceStep?
   private weak var model: AppModel?
   private let observesInput: Bool
+  private let now: @MainActor () -> TimeInterval
+  private let foregroundPID: @MainActor () -> pid_t?
+  private let settle: @MainActor () async throws -> Void
+  private let onContinue: ContinuationHandler?
   private var preferences: CursorCompanionPreferences
   private var mark: Mark?
   private var globalMouse: Any?
@@ -98,9 +174,23 @@ enum ScreenGuidancePolicy {
   private var sessionActive = true
   private var isShutdown = false
 
-  init(model: AppModel, observeInput: Bool = true) {
+  init(
+    model: AppModel, observeInput: Bool = true,
+    now: @escaping @MainActor () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+    foregroundPID: @escaping @MainActor () -> pid_t? = {
+      NSWorkspace.shared.frontmostApplication?.processIdentifier
+    },
+    settle: @escaping @MainActor () async throws -> Void = {
+      try await Task.sleep(for: .milliseconds(300))
+    },
+    onContinue: ContinuationHandler? = nil
+  ) {
     self.model = model
     observesInput = observeInput
+    self.now = now
+    self.foregroundPID = foregroundPID
+    self.settle = settle
+    self.onContinue = onContinue
     // Isolated acceptance fixtures do not consult saved preferences or observe
     // external application input/lifecycle events.
     preferences = observeInput ? .load() : .init()
@@ -114,37 +204,51 @@ enum ScreenGuidancePolicy {
     target: ProviderTarget, evidence: ScreenEvidence, generation: UInt64,
     request: ScreenGuidanceRequest
   ) {
+    let isManual = target.advanceOn == "manual" && target.awaitUser == true
     if target.advanceOn != "click" {
-      // A response may add explanatory/manual marks after its one advancing
-      // control. Those marks cannot replace click ownership on the same frame.
+      // Secondary annotations cannot replace the primary click/manual lease,
+      // including while that lease has already queued its continuation.
       if let owner = mark, owner.generation == generation, owner.request == request,
         owner.evidence == ScreenEvidenceIdentity(evidence), owns(owner)
       {
         return
       }
       cancel()
-      return
+      guard isManual, ScreenGuidancePolicy.permitsContinuation(step: request.step) else { return }
+    } else {
+      cancel()
     }
-    cancel()
-    let now = ProcessInfo.processInfo.systemUptime
+    let currentTime = now()
     guard !isShutdown, machineAwake, sessionActive, preferences.screenGuidanceEnabled,
       let model,
       generation == model.taskGeneration,
       evidence.foregroundPID > 0,
       evidence.foregroundPID != ProcessInfo.processInfo.processIdentifier,
       ScreenEvidenceIdentity(evidence).matches(model.evidence),
-      NSWorkspace.shared.frontmostApplication?.processIdentifier == evidence.foregroundPID,
+      foregroundPID() == evidence.foregroundPID,
       ScreenGuidancePolicy.permitsAdmission(
         step: request.step, requestExpires: request.expires, capturedAt: evidence.capturedAt,
-        now: now),
+        now: currentTime),
       let rect = ScreenGuidancePolicy.targetRect(target, in: evidence.screenRect)
     else { return }
     let owner = Mark(
       lease: UUID(), rect: rect, evidence: ScreenEvidenceIdentity(evidence),
-      generation: generation, request: request, admittedAt: now)
+      generation: generation, request: request, admittedAt: currentTime,
+      observation: isManual ? .explicitContinue : .click)
     mark = owner
-    model.record("guidance.clickObservation.armed")
-    guard observesInput else { return }
+    if isManual {
+      manualStep = ManualGuidanceStep(
+        id: owner.lease,
+        label: ScreenGrounding.firstNonemptyLabel([target.label, target.instruction]),
+        instruction: ScreenGrounding.firstNonemptyLabel([target.instruction], limit: 1_000),
+        evidence: owner.evidence, generation: generation, request: request, targetRect: rect,
+        expiresAt: min(request.expires, currentTime + ScreenGuidancePolicy.markedTargetLifetime))
+      model.record("guidance.manualContinuation.armed")
+    } else {
+      model.record("guidance.clickObservation.armed")
+    }
+    scheduleExpiry(for: owner)
+    guard !isManual, observesInput else { return }
     let lease = owner.lease
     globalMouse = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
       // Use the actual edge's recorded location. A later live pointer sample can
@@ -172,18 +276,51 @@ enum ScreenGuidancePolicy {
       cancel()
       return
     }
+  }
+
+  /// Consumes only the currently presented lease. Repeated button callbacks,
+  /// stale IDs and unrelated pointer events cannot queue another continuation.
+  func continueManualStep(id: UUID) {
+    guard continuationTask == nil, manualStep?.id == id, let owner = mark,
+      owner.lease == id, owner.observation == .explicitContinue
+    else { return }
+    guard owns(owner) else {
+      cancel()
+      return
+    }
+    model?.record("guidance.manualContinue.requested")
+    queueContinuation(owner)
+  }
+
+  /// Called before starting voice input cancels the current response generation.
+  /// The caller must bind the returned lease to its new voice-input generation.
+  func takeManualStepForVoice() -> ManualGuidanceStep? {
+    guard continuationTask == nil, let step = manualStep, let owner = mark,
+      step.id == owner.lease, owner.observation == .explicitContinue
+    else { return nil }
+    guard owns(owner) else {
+      cancel()
+      return nil
+    }
+    cancel()
+    return step
+  }
+
+  private func scheduleExpiry(for owner: Mark) {
+    let currentTime = now()
     let deadline = min(
-      request.expires, now + ScreenGuidancePolicy.markedTargetLifetime)
+      owner.request.expires, owner.admittedAt + ScreenGuidancePolicy.markedTargetLifetime)
     expiryTask = Task { @MainActor [weak self] in
-      do { try await Task.sleep(for: .seconds(max(0, deadline - now))) } catch { return }
-      guard let self, self.mark?.lease == lease else { return }
-      self.model?.record("guidance.clickObservation.expired")
+      do { try await Task.sleep(for: .seconds(max(0, deadline - currentTime))) } catch { return }
+      guard let self, self.mark?.lease == owner.lease else { return }
+      self.model?.record("guidance.continuation.expired")
       self.cancel()
     }
   }
 
   func cancel() {
     mark = nil
+    manualStep = nil
     removeClickMonitors()
     expiryTask?.cancel()
     expiryTask = nil
@@ -198,7 +335,9 @@ enum ScreenGuidancePolicy {
   }
 
   private func mouseUp(at point: CGPoint?, lease: UUID) {
-    guard continuationTask == nil, let owner = mark, owner.lease == lease else { return }
+    guard continuationTask == nil, let owner = mark, owner.lease == lease,
+      owner.observation == .click
+    else { return }
     model?.record("guidance.mouseUp.received")
     guard owns(owner) else {
       model?.record("guidance.clickObservation.ownershipLost")
@@ -206,25 +345,39 @@ enum ScreenGuidancePolicy {
       return
     }
     guard let point, point.x.isFinite, point.y.isFinite, owner.rect.contains(point) else { return }
-    // Remove observation synchronously before queuing work. Repeated clicks,
-    // queued old callbacks, or a subsequent target cannot schedule a second step.
+    model?.record("guidance.userClick.observed")
+    queueContinuation(owner)
+  }
+
+  private func queueContinuation(_ owner: Mark) {
+    // Clear presentation and observation before yielding. The retained private
+    // lease protects the settle interval against cancellation and replacement.
+    manualStep = nil
     removeClickMonitors()
     expiryTask?.cancel()
     expiryTask = nil
-    model?.record("guidance.userClick.observed")
     continuationTask = Task { @MainActor [weak self] in
-      do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
-      guard let self, self.mark?.lease == lease, !Task.isCancelled else { return }
+      guard let self else { return }
+      do { try await self.settle() } catch {
+        if self.mark?.lease == owner.lease { self.cancel() }
+        return
+      }
+      guard self.mark?.lease == owner.lease, !Task.isCancelled else { return }
       guard self.owns(owner), let model = self.model else {
         self.cancel()
         return
       }
       self.mark = nil
       self.continuationTask = nil
-      // A fresh capture and model verification belong to AppModel. This event
-      // reports only that the user clicked inside the admitted target bounds.
-      model.continueScreenGuidance(
-        request: owner.request, expectedEvidence: owner.evidence, generation: owner.generation)
+      // AppModel owns fresh capture and postcondition verification. Explicit
+      // Continue reports no click, typing, drag, or successful task completion.
+      if let onContinue = self.onContinue {
+        onContinue(owner.request, owner.evidence, owner.generation, owner.observation)
+      } else {
+        model.continueScreenGuidance(
+          request: owner.request, expectedEvidence: owner.evidence, generation: owner.generation,
+          observation: owner.observation)
+      }
     }
   }
 
@@ -232,11 +385,11 @@ enum ScreenGuidancePolicy {
     guard !isShutdown, machineAwake, sessionActive, preferences.screenGuidanceEnabled,
       let model, owner.generation == model.taskGeneration,
       owner.evidence.matches(model.evidence),
-      NSWorkspace.shared.frontmostApplication?.processIdentifier == owner.evidence.foregroundPID
+      foregroundPID() == owner.evidence.foregroundPID
     else { return false }
     return ScreenGuidancePolicy.permitsClick(
       step: owner.request.step, requestExpires: owner.request.expires,
-      admittedAt: owner.admittedAt, now: ProcessInfo.processInfo.systemUptime)
+      admittedAt: owner.admittedAt, now: now())
   }
 
   private func removeClickMonitors() {

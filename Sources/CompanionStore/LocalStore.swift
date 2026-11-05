@@ -5,7 +5,7 @@ import Foundation
 /// claim to schedule execution while the application is quit or the Mac sleeps.
 public actor LocalStore {
   private let database: SQLiteDatabase
-  public static let schemaVersion = 3
+  public static let schemaVersion = 4
 
   public init(url: URL) throws { database = try SQLiteDatabase(url: url) }
 
@@ -13,6 +13,42 @@ public actor LocalStore {
   public func saveRecord(
     id: String = UUID().uuidString, kind: String, title: String,
     body: String, payload: Data? = nil
+  ) throws -> StoredRecord {
+    if kind == "conversation" {
+      guard
+        let saved = try saveConversation(id: id, title: title, body: body, payload: payload)
+      else { throw StoreError.notFound(id) }
+      return saved
+    }
+    return try writeRecord(id: id, kind: kind, title: title, body: body, payload: payload)
+  }
+
+  /// Updates one conversation rather than retaining a snapshot for every turn.
+  /// A deleted identity can never be recreated by a delayed save, including a
+  /// save from another connection or process. Tombstones contain no transcript.
+  @discardableResult
+  public func saveConversation(
+    id: String, title: String, body: String, payload: Data? = nil
+  ) throws -> StoredRecord? {
+    try Task.checkCancellation()
+    guard !id.isEmpty else { throw StoreError.invalidValue("A conversation needs an ID.") }
+    return try database.transaction {
+      let deleted = try database.query(
+        "SELECT 1 FROM deleted_conversations WHERE id=?", [.text(id)], map: { _ in true })
+      guard deleted.isEmpty else { return nil }
+      let kind = try database.query(
+        "SELECT kind FROM records WHERE id=?", [.text(id)], map: { SQLColumn.text($0, 0) }
+      ).first
+      guard kind == nil || kind == "conversation" else {
+        throw StoreError.invalidValue("A conversation cannot replace a different saved item.")
+      }
+      return try writeRecord(
+        id: id, kind: "conversation", title: title, body: body, payload: payload)
+    }
+  }
+
+  private func writeRecord(
+    id: String, kind: String, title: String, body: String, payload: Data?
   ) throws -> StoredRecord {
     guard !id.isEmpty, !kind.isEmpty else {
       throw StoreError.invalidValue("Saved content needs an ID and kind.")
@@ -79,6 +115,15 @@ public actor LocalStore {
     }
   }
 
+  public func record(id: String) throws -> StoredRecord {
+    guard
+      let record = try database.query(
+        "SELECT * FROM records WHERE id=?", [.text(id)], map: Self.record
+      ).first
+    else { throw StoreError.notFound(id) }
+    return record
+  }
+
   public func records(kind: String? = nil, query: String = "") throws -> [StoredRecord] {
     var predicates: [String] = []
     var values: [SQLValue] = []
@@ -98,7 +143,37 @@ public actor LocalStore {
   }
 
   public func deleteRecord(id: String) throws {
-    try database.execute("DELETE FROM records WHERE id=?", [.text(id)])
+    try database.transaction {
+      let conversation = try database.query(
+        "SELECT 1 FROM records WHERE id=? AND kind='conversation'", [.text(id)],
+        map: { _ in true })
+      if !conversation.isEmpty {
+        try tombstoneConversation(id)
+      }
+      try database.execute("DELETE FROM records WHERE id=?", [.text(id)])
+    }
+  }
+
+  /// The active conversation may still have its first save queued. Its deletion
+  /// must be durable even when that save has not inserted a record yet.
+  public func deleteConversation(id: String) throws {
+    guard !id.isEmpty else { throw StoreError.invalidValue("A conversation needs an ID.") }
+    try database.transaction {
+      let kind = try database.query(
+        "SELECT kind FROM records WHERE id=?", [.text(id)], map: { SQLColumn.text($0, 0) }
+      ).first
+      guard kind == nil || kind == "conversation" else {
+        throw StoreError.invalidValue("A conversation cannot delete a different saved item.")
+      }
+      try tombstoneConversation(id)
+      try database.execute("DELETE FROM records WHERE id=? AND kind='conversation'", [.text(id)])
+    }
+  }
+
+  private func tombstoneConversation(_ id: String) throws {
+    try database.execute(
+      "INSERT OR IGNORE INTO deleted_conversations(id,deleted_at) VALUES(?,?)",
+      [.text(id), .real(Date().timeIntervalSince1970)])
   }
 
   /// A point-in-time JSON export; Keychain credentials and temporary screen

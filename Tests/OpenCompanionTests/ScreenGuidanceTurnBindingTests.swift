@@ -84,7 +84,9 @@ import Testing
     shape.shape = "shell-command"
     var condition = payload(source)
     condition.advanceOn = "drag"
-    for target in [stale, oversized, label, shape, condition] {
+    var contradictory = payload(source)
+    contradictory.awaitUser = true
+    for target in [stale, oversized, label, shape, condition, contradictory] {
       let binding = ScreenGuidanceTurnBinding(source: source)
       var captures = 0
       await #expect(throws: (any Error).self) {

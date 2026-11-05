@@ -69,6 +69,7 @@ struct ResponseInputPlan: Sendable {
   @Published var section = "Companion"
   @Published var input = ""
   @Published var messages: [ChatLine] = []
+  private(set) var conversationID = UUID().uuidString
   @Published var state = "Ready"
   @Published var error: String?
   @Published var notice: String?
@@ -132,6 +133,8 @@ struct ResponseInputPlan: Sendable {
   private var voiceSessionID: UUID?
   private var voiceMode: VoiceInputMode?
   private var voiceDraftGuard: VoiceDraftGuard?
+  private var voiceGuidanceContinuation: ManualGuidanceVoiceContinuation?
+  private let screenGuidanceEnabled: @MainActor () -> Bool
   private var turnSpeaksAloud = false
   private var generation: UInt64 = 0
   var taskGeneration: UInt64 { generation }
@@ -144,6 +147,7 @@ struct ResponseInputPlan: Sendable {
   var onScreenGuidanceTargetAccepted:
     ((ProviderTarget, ScreenEvidence, UInt64, ScreenGuidanceRequest) -> Void)?
   var onCursorCancelled: ((UInt64) -> Void)?
+  var onManualGuidanceVoiceStart: (() -> ManualGuidanceStep?)?
   var onPrepareScreenGuidance: ((UInt64, pid_t) async throws -> Void)?
   private(set) var responsePolicy = ResponsePolicy.resolve(text: "", screenGuidanceEnabled: false)
   private var outputSceneIncludesExistingNotebook = false
@@ -152,7 +156,7 @@ struct ResponseInputPlan: Sendable {
   private var narrationGate = TurnNarrationGate()
   private var guidanceTurnStage: GuidanceTurnStage?
   private(set) var cursorFailureGeneration: UInt64?
-  private var activeGuidanceRequest: ScreenGuidanceRequest?
+  private(set) var activeGuidanceRequest: ScreenGuidanceRequest?
   private var receivedTextPreview = false
   var capturePublicationRevision: UInt64 { captureGate.generation }
   var captureResultID: UUID? { evidence?.frameID }
@@ -174,16 +178,26 @@ struct ResponseInputPlan: Sendable {
   var onCompanionRequested: (() -> Void)?
   var onSceneReady: (() -> Void)?
   private var trace: [[String: String]] = []
-  init(acceptanceMode: Bool = false) {
+  init(
+    acceptanceMode: Bool = false, store: LocalStore? = nil,
+    screenGuidanceEnabled: @escaping @MainActor () -> Bool = {
+      CursorCompanionPreferences.load().screenGuidanceEnabled
+    }
+  ) {
+    self.store = store
+    self.screenGuidanceEnabled = screenGuidanceEnabled
     if !acceptanceMode {
-      do {
-        let url = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[
-          0
-        ]
-        .appendingPathComponent("OpenCompanion", isDirectory: true)
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        store = try LocalStore(url: url.appendingPathComponent("library.sqlite"))
-      } catch { self.error = "Local library could not open: \(error.localizedDescription)" }
+      if store == nil {
+        do {
+          let url = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask)[
+              0
+            ]
+            .appendingPathComponent("OpenCompanion", isDirectory: true)
+          try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+          self.store = try LocalStore(url: url.appendingPathComponent("library.sqlite"))
+        } catch { self.error = "Local library could not open: \(error.localizedDescription)" }
+      }
       apiKey =
         (try? credentials.load(
           service: "org.opencompanion.provider", account: configuration.endpoint))
@@ -321,12 +335,19 @@ struct ResponseInputPlan: Sendable {
   private func send(
     textOverride: String?, voiceOnly: Bool, speakAloud: Bool,
     guidanceRequest: ScreenGuidanceRequest? = nil,
-    expectedGuidanceForegroundPID: pid_t? = nil
+    expectedGuidanceForegroundPID: pid_t? = nil,
+    transcriptText: String? = nil
   ) {
     let text = (textOverride ?? input).trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty else { return }
+    let guidanceEnabled = screenGuidanceEnabled()
+    guard guidanceRequest == nil || guidanceEnabled else {
+      notice = "Screen guidance is disabled. Enable it before continuing this guide."
+      if voiceOnly { voiceNotice = notice }
+      return
+    }
     let policy = ResponsePolicy.resolve(
-      text: text, screenGuidanceEnabled: CursorCompanionPreferences.load().screenGuidanceEnabled,
+      text: text, screenGuidanceEnabled: guidanceEnabled,
       explicitGuidance: guidanceRequest != nil, inNotebook: notebookContextIsVisible,
       hasNotebook: scene != nil)
     let inputPlan = ResponseInputPlan.resolve(
@@ -362,7 +383,9 @@ struct ResponseInputPlan: Sendable {
     if voiceOnly { onVoiceResponseSubmitted?(sourceGeneration, current) }
     updateBadge()
     record("turn.declaredEnd.textSubmit")
-    messages.append(ChatLine(role: "user", text: text))
+    // Provider control instructions never become visible or persisted messages.
+    // Guidance history below still receives the full private continuation text.
+    messages.append(ChatLine(role: "user", text: transcriptText ?? text))
     // Guidance needs the current goal and preceding step, rather than unrelated
     // lesson/chat history that increases both latency and evidence ambiguity.
     let history: [ChatLine]
@@ -729,33 +752,47 @@ struct ResponseInputPlan: Sendable {
   /// An observed user click requests fresh perception, never an automatic click
   /// or an assumption that the previous instruction succeeded.
   func beginScreenGuidance(_ prompt: String, speakAloud: Bool = true) {
-    guard CursorCompanionPreferences.load().screenGuidanceEnabled else { return }
+    guard screenGuidanceEnabled() else { return }
     send(
       textOverride: prompt, voiceOnly: true, speakAloud: speakAloud,
       guidanceRequest: ScreenGuidanceRequest(prompt: prompt, speakAloud: speakAloud))
   }
 
   func continueScreenGuidance(
-    request: ScreenGuidanceRequest, expectedEvidence: ScreenEvidenceIdentity, generation: UInt64
+    request: ScreenGuidanceRequest, expectedEvidence: ScreenEvidenceIdentity, generation: UInt64,
+    observation: ScreenGuidanceContinuationObservation = .click
   ) {
     guard generation == self.generation, activeGuidanceRequest == request,
       (0..<5).contains(request.step), request.expires.isFinite,
       ProcessInfo.processInfo.systemUptime < request.expires,
-      CursorCompanionPreferences.load().screenGuidanceEnabled,
+      screenGuidanceEnabled(),
       expectedEvidence.matches(evidence)
     else { return }
     let next = ScreenGuidanceRequest(
       id: request.id, prompt: request.prompt, step: request.step + 1, expires: request.expires,
       speakAloud: request.speakAloud)
-    let instruction = """
-      The user clicked the highlighted control. Inspect the new screen capture to verify what changed; do not assume the click succeeded. If that revealed a menu or sidebar, guide its next distinct nested control rather than repeating the opener. Continue the original functional goal using actual current app labels, even if the user named the app colloquially. Copy candidate IDs only from this fresh frame. If the task is complete, say so without another target. If progress is unclear, explain the ambiguity rather than invent a control.
-      Original task: \(request.prompt)
-      Guidance step: \(next.step)
-      """
+    let instruction = guidanceContinuationText(
+      request: request, next: next, observation: observation)
     send(
       textOverride: instruction, voiceOnly: true, speakAloud: request.speakAloud,
       guidanceRequest: next,
-      expectedGuidanceForegroundPID: expectedEvidence.foregroundPID)
+      expectedGuidanceForegroundPID: expectedEvidence.foregroundPID,
+      transcriptText: "Continue")
+  }
+
+  private func guidanceContinuationText(
+    request: ScreenGuidanceRequest, next: ScreenGuidanceRequest,
+    observation: ScreenGuidanceContinuationObservation
+  ) -> String {
+    let observedAction =
+      observation == .click
+      ? "The user clicked the highlighted control. This is not proof that the click succeeded."
+      : "The user requested Continue after a manual step. This requests a fresh check; it is not proof that any typing, dragging or other action happened or succeeded."
+    return """
+      \(observedAction) Inspect the new screen capture to verify what changed. If that revealed a menu or sidebar, guide its next distinct nested control rather than repeating the opener. Continue the original functional goal using actual current app labels, even if the user named the app colloquially. Copy candidate IDs only from this fresh frame. If the task is complete, say so without another target. If progress is unclear, explain the ambiguity rather than invent a control.
+      Original task: \(request.prompt)
+      Guidance step: \(next.step)
+      """
   }
   private func acceptTextPreview(_ preview: ProviderTextPreview, generation: UInt64) async throws {
     guard generation == self.generation else { throw CancellationError() }
@@ -822,6 +859,7 @@ struct ResponseInputPlan: Sendable {
       }
       setGuidanceStage(.target, generation: generation)
       guard let payload = unit.target, payload.instruction.utf8.count <= 32_000,
+        payload.awaitUser != true || payload.advanceOn == "manual",
         (payload.label?.prefix(81).count ?? 0) <= 80
       else { throw ProviderError.message("Invalid or oversized screen guidance target.") }
       guard let evidence, let expectedEvidence, expectedEvidence.matches(evidence)
@@ -878,6 +916,7 @@ struct ResponseInputPlan: Sendable {
     voiceSessionID = nil
     voiceMode = nil
     voiceDraftGuard = nil
+    voiceGuidanceContinuation = nil
     turnSpeaksAloud = false
     voice.stop()
     narrationGate.reset()
@@ -924,7 +963,12 @@ struct ResponseInputPlan: Sendable {
   }
 
   private func beginVoiceInput(mode: VoiceInputMode) {
+    let manualStep = mode == .pushToTalk ? onManualGuidanceVoiceStart?() : nil
     stop()
+    if let manualStep {
+      voiceGuidanceContinuation = ManualGuidanceVoiceContinuation(
+        step: manualStep, inputGeneration: generation)
+    }
     error = nil
     voiceTranscript = ""
     voiceNotice = nil
@@ -981,6 +1025,8 @@ struct ResponseInputPlan: Sendable {
 
   private func completeVoiceInput(_ completion: VoiceInputCompletion) {
     guard voiceSessionID == completion.sessionID else { return }
+    let continuation = voiceGuidanceContinuation
+    voiceGuidanceContinuation = nil
     voiceSessionID = nil
     voiceMode = nil
     voiceStartTask = nil
@@ -998,6 +1044,14 @@ struct ResponseInputPlan: Sendable {
     }
     if completion.mode.submitsOnCompletion {
       record(completion.isFinal ? "ptt.finalTranscript" : "ptt.recognizedTailDeadline")
+      if let continuation,
+        continueManualGuidanceVoice(
+          continuation, transcript: completion.transcript,
+          foregroundPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+          now: ProcessInfo.processInfo.systemUptime)
+      {
+        return
+      }
       // Keep the typed draft and ordinary conversation. Screen help uses one
       // fresh capture; ordinary voice questions omit selected file/memory/image evidence.
       send(
@@ -1006,6 +1060,39 @@ struct ResponseInputPlan: Sendable {
       notice = "Transcript ready. Review the draft and send when ready."
       updateBadge()
     }
+  }
+
+  /// Returns true when an exact spoken continuation was handled, including a
+  /// disabled/stale refusal. Such a refusal must never become a new chat turn.
+  @discardableResult func continueManualGuidanceVoice(
+    _ continuation: ManualGuidanceVoiceContinuation, transcript: String,
+    foregroundPID: pid_t?, now: TimeInterval
+  ) -> Bool {
+    guard ManualGuidanceVoiceContinuation.isContinueCommand(transcript) else { return false }
+    guard screenGuidanceEnabled() else {
+      notice = "Screen guidance is disabled. Enable it before continuing this guide."
+      voiceNotice = notice
+      updateBadge()
+      return true
+    }
+    guard
+      let next = continuation.nextRequest(
+        transcript: transcript, generation: generation, evidence: evidence,
+        foregroundPID: foregroundPID, now: now)
+    else {
+      notice = "That guidance step changed or expired. Ask for a fresh guide on this screen."
+      voiceNotice = notice
+      updateBadge()
+      return true
+    }
+    record("guidance.voiceContinue.requested")
+    send(
+      textOverride: guidanceContinuationText(
+        request: continuation.step.request, next: next, observation: .explicitContinue),
+      voiceOnly: true, speakAloud: next.speakAloud, guidanceRequest: next,
+      expectedGuidanceForegroundPID: continuation.step.evidence.foregroundPID,
+      transcriptText: transcript)
+    return true
   }
   private func invalidateCapture() {
     captureGate.invalidate()
@@ -1185,7 +1272,36 @@ struct ResponseInputPlan: Sendable {
       } catch { showError(error) }
     }
   }
-  func openRecord(_ record: StoredRecord) {
+  @discardableResult func openRecord(_ record: StoredRecord) -> Task<Void, Never>? {
+    if record.kind == "conversation" {
+      newConversation()
+      let expectedGeneration = generation
+      let emptyConversationID = conversationID
+      return Task {
+        do {
+          // Library rows are snapshots. Read the latest payload and reject a
+          // deleted item instead of restoring transcript bytes from a stale row.
+          var latest = record
+          if let store { latest = try await store.record(id: record.id) }
+          try Task.checkCancellation()
+          guard generation == expectedGeneration, conversationID == emptyConversationID else {
+            return
+          }
+          guard latest.kind == "conversation", let data = latest.payload else {
+            throw StoreError.invalidValue("The saved conversation has no readable transcript.")
+          }
+          let lines = try JSONDecoder().decode([ChatLine].self, from: data)
+          conversationID = latest.id
+          messages = lines
+          section = "Companion"
+        } catch {
+          guard generation == expectedGeneration, conversationID == emptyConversationID,
+            !(error is CancellationError)
+          else { return }
+          showError(error)
+        }
+      }
+    }
     if record.kind == "notebook", let data = record.payload {
       do {
         let document = try JSONDecoder().decode(SceneDocument.self, from: data).validated()
@@ -1196,23 +1312,27 @@ struct ResponseInputPlan: Sendable {
         seekRevision += 1
         onOpen?()
       } catch { showError(error) }
-    } else if record.kind == "conversation", let data = record.payload,
-      let lines = try? JSONDecoder().decode([ChatLine].self, from: data)
-    {
-      stop()
-      messages = lines
-      section = "Companion"
     } else {
       memoryTitle = record.title
       memoryBody = record.body
       section = "Memory"
     }
+    return nil
   }
-  func deleteRecord(_ id: String) {
-    guard let store else { return }
-    Task {
+  @discardableResult func deleteRecord(_ id: String) -> Task<Void, Never>? {
+    guard let store else { return nil }
+    let isConversation =
+      id == conversationID || records.contains(where: { $0.id == id && $0.kind == "conversation" })
+    // Detach the active transcript before yielding. Any already queued save is
+    // either removed by this deletion or rejected by its durable tombstone.
+    if id == conversationID { newConversation() }
+    return Task {
       do {
-        try await store.deleteRecord(id: id)
+        if isConversation {
+          try await store.deleteConversation(id: id)
+        } else {
+          try await store.deleteRecord(id: id)
+        }
         await reload()
       } catch { showError(error) }
     }
@@ -1236,13 +1356,35 @@ struct ResponseInputPlan: Sendable {
     section = "Companion"
   }
   func persistConversation() async {
-    guard let store else { return }
+    guard let store, !messages.isEmpty else { return }
+    // Capture one immutable transcript before the actor hop. Reopening another
+    // conversation while this save completes cannot change its destination ID.
+    let id = conversationID
+    let lines = messages
     do {
-      _ = try await store.saveRecord(
-        kind: "conversation", title: String(messages.first?.text.prefix(90) ?? "Conversation"),
-        body: messages.map(\.text).joined(separator: "\n"), payload: JSONEncoder().encode(messages))
+      let saved = try await store.saveConversation(
+        id: id, title: String(lines.first?.text.prefix(90) ?? "Conversation"),
+        body: lines.map(\.text).joined(separator: "\n"), payload: JSONEncoder().encode(lines))
+      if saved == nil, conversationID == id {
+        notice = "This conversation was deleted. Start a new chat to save another conversation."
+      }
       await reload()
-    } catch { showError(error) }
+    } catch {
+      if conversationID == id { showError(error) }
+    }
+  }
+
+  /// A new chat has a new persistence identity. Independent notebook content
+  /// remains available, while the previous chat's attachments lose authority.
+  func newConversation() {
+    stop()
+    clearContext()
+    conversationID = UUID().uuidString
+    messages = []
+    input = ""
+    error = nil
+    notice = nil
+    section = "Companion"
   }
   func importFile() {
     let panel = NSOpenPanel()

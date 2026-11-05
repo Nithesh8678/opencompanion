@@ -1,0 +1,163 @@
+# HeyClicky public feature and parity checklist
+
+Public sources checked **4 November 2026** against official pages and creator-authored posts; separately labeled shared runtime observations were appended **5 November 2026**. This is a research inventory, not a claim that OpenCompanion implements the whole reference product. The public-research lane performed no reference app interaction, account change, remote-media download or product-source edit. The subsequent shared runtime check included one generic typed question, as documented below. No proprietary assets or source are included.
+
+The objective of broad product parity is substantially larger than the current screen-guidance slice. A passing synthetic target test proves neither a complete assistant nor a successful external task. Use the checklist below to choose and verify independent end-to-end flows.
+
+## Evidence rules
+
+| Label | Meaning |
+|---|---|
+| **PUBLIC CLAIM** | An official page or creator says the capability exists. This is not an independent runtime test. |
+| **RECORDED VISUAL** | A previously streamed official recording contains the stated visible behavior at the recorded player time. Its build and editing are not independently established. |
+| **CREATOR TRANSCRIPT** | The primary post exposes the creator's narration. The narration was read; that is distinct from watching and verifying the task. |
+| **LOCAL OBSERVATION** | A prior dated installed-app inspection observed a particular account/state. It does not establish every release or account. |
+| **PROPOSED ACCEPTANCE** | An authored OpenCompanion verification task. These rows describe work to do, not recovered HeyClicky implementation details. |
+
+Public release labels: **Mac 1.1.2 (2026-10-30); Windows 1.1.4 (2026-11-01)**. GitHub displays Mac 1.1.2 as **31 Oct, 02:13**, timezone unresolved. [Official changelog][changelog], [official Mac release][release]
+
+The historical public repository explicitly says newer work became private in its 27 April 2026 update. Community ports and that historical code cannot prove current official behavior. [Creator repository][repository]
+
+## Version ledger: compact vendor inventory
+
+All rows below are **PUBLIC CLAIM**, condensed from the [official changelog][changelog]. Dates are in 2026; Mac unless marked Windows. This is a capability index rather than a reproduction of release notes.
+
+| ID | Version / date | Capability index |
+|---|---|---|
+| R01 | 1.0 · 2026-04-06 | Screen-aware voice |
+| R02 | 1.0.10 · 2026-04-27 | Background agents |
+| R03 | 1.0.11 · 2026-04-30 | Connectors; customizable shortcuts |
+| R04 | 1.0.15 · 2026-05-13 | Notch |
+| R05 | 1.0.21 · 2026-05-30 | Realtime voice; guidance; Notes removed |
+| R06 | 1.0.23 · 2026-06-08 | File drop; selectable replies |
+| R07 | 1.0.26 · 2026-06-19 | Click continuation; computer use |
+| R08 | 1.0.28 · 2026-06-23 | App skills |
+| R09 | 1.0.33 · 2026-07-06 | Spatial context; memory; skill library |
+| R10 | 1.0.37 · 2026-07-14 | Dictation; dictionary |
+| R11 | 1.0.40 · 2026-07-17 | Tutorial; sketched marks |
+| R12 | 1.0.44 · 2026-07-23 | Teams |
+| R13 | 1.0.46 · 2026-08-01 | Warmup; tracking removed |
+| R14 | 1.0.47 · 2026-08-13 | Whole-document context |
+| R15 | 1.0.48 · 2026-08-25 | 15-step walkthroughs |
+| R16 | 1.0.49 · 2026-09-12 | Persistent Clickys; previews; MCP; routines; Skills paused |
+| R17 | 1.0.51 · 2026-09-18 | Resizable Home |
+| R18 | 1.0.52 · 2026-09-24 | Peek; referrals; announcements |
+| R19 | 1.0.53 · 2026-10-02 | Multiple accounts |
+| R20 | 1.1.1 · 2026-10-23 | 2D/3D; Drive; Chrome; captions; unified notch; Suggestions paused |
+| R21 | 1.1.2 · 2026-10-30 | Workspace; 130+ spoken languages; 83 dictation languages; 30 voices; automatic updates |
+| R22 | 1.1.4 · 2026-11-01 · Windows | Corresponding workspace/language update |
+
+**Current versus historical:** Skills (R16) and Suggestions (R20) were paused. Earlier demonstrations remain historical.
+
+## Core product, privacy and commercial boundaries
+
+The [homepage][home] advertises hotkey-invoked screen-aware conversation, teaching and task agents. Its broad any-visible-app claim is marketing, not a measured compatibility matrix. It lists macOS Sonoma 14.2+, Windows 10/11 and one account across platforms. Monthly published plans are Free (25 talk and 25 agent messages), Pro ($20; unlimited talk/dictation and 150 agent messages), and Max ($100; unlimited talk/dictation and 1,000 agent messages). These are time-sensitive vendor terms, not OpenCompanion entitlements or a proposed billing implementation.
+
+The [trust page][trust] says screen analysis is hotkey-triggered, raw screenshots are discarded after processing, and prompts/AI screenshot analyses can be retained. It describes cloud AI processing and identifies a separate once-daily, read-only check of connected integrations while the app is open; that check can be disabled. It says quitting stops local activity and makes no SOC 2/ISO 27001 certification claim. These are policy statements, not independently audited retention or infrastructure facts.
+
+The [privacy policy][privacy] also names Anthropic, OpenAI, Deepgram and Cerebras as providers. It describes browser tasks reading page content and acting through Chrome native messaging, including signed-in sites. It says the extension does not fill password, verification-code or payment-card fields, excludes incognito windows, and exposes Stop; stopping does not undo prior effects. Do not infer a specific current model, provider route or local perception algorithm from these general statements.
+
+Screen-question support without an integration and browser task execution through an extension are different workflows. A vision answer does not establish browser-control capability. Hosted accounts, billing, referrals and teams are a separate service scope from a local/BYOK or subscription-adapter desktop build.
+
+## Demos: what is actually supported by the evidence
+
+| Source | Specific evidence | Limit |
+|---|---|---|
+| [Official FL Studio clip][fl-video] | **RECORDED VISUAL, observed 3 Nov:** approximately 3.100 s shows a black real pointer, separate gold assistant triangle, ring and short target label. | A recorded example, not broad application accuracy or proof of the latest installed build. |
+| [Official spatial clip][spatial-video] | **RECORDED VISUAL, observed 3 Nov:** approximately 6.037 s shows `del`; 6.245 s shows `deltoid`; 9.782 s shows a second anatomical label while the real pointer remains elsewhere. | Supports visible prefix reveal in a short guidance label. It does not establish full conversational reply cadence, exact easing, FPS or speech synchronization. |
+| [Creator spatial-context post][spatial-post] | **CREATOR TRANSCRIPT, rechecked 4 Nov:** describes indicating a region during invocation, asking about anatomy and passing a circled website area to an agent. | This is user-to-model context, distinct from model-to-user targeting. Exact post date is not exposed by the rendered primary page. |
+| [Creator dictation post][dictation-post] | **CREATOR TRANSCRIPT, rechecked 4 Nov:** describes speech streaming into the focused field, a screen-aware Gmail draft, a terminal follow-up prompt and skill-assisted drafting. | The creator's roughly 450 ms transcription and roughly five-second drafting examples measure different workflows. Neither is an independently measured current answer-latency distribution. Exact post date unresolved. |
+| [Creator collaborators post][collaborators-post] | **CREATOR TRANSCRIPT, rechecked 4 Nov:** an interview produces three role-specific collaborators; suggestions are approved; voice follow-ups steer the intended worker; results include Gmail drafts and research. | Edited demonstration/narration, not a repeatability result. Suggestions here are historical relative to R20's pause. Exact post date unresolved. |
+| [Creator agents post][agents-post] | **CREATOR TRANSCRIPT, rechecked 4 Nov:** desktop cleanup, a native reminder, influencer CSV research and creation of a Spotify-control Mac app are narrated. | This does not prove arbitrary agent success, permissions, execution reliability or current task duration. |
+| [Official About timeline][about] | Lists an earlier cursor companion, screen drawing and hands-free milestones. | Its 2025 chronology differs from the changelog's April 2026 v1.0 framing. Preserve the inconsistency; do not invent a reconciliation. |
+
+The [official YouTube channel][youtube] and [creator X demo][x-demo] are linked primary sources, but usable playback/transcripts were not obtained through this research fetch path. No visual, latency or feature conclusion is added from inaccessible playback. Homepage montage filenames alone are not behavioral proof; editorial subtitles are not native captions.
+
+Prior local inspection of installed **1.1.2 (69), 3 November** observed attached Home/Chat/Settings, voice/dictation/cursor preference controls and a separate expanded chat window. It did not connect services, execute jobs or exercise 3D. It observed the current account without populated pins/files on Home. That absence must not be generalized to every account or earlier release. The public [1.1.2 release][release] corroborates the release identity, not those local runtime details. Private captures and account contents remain outside this repository.
+
+## Shared reference runtime follow-up — 5 November 2026
+
+These observations were supplied by the shared native-UI inspection lane. They are separate from the public web check and the earlier version-identified inspection; this research lane did not operate the reference app or re-establish its binary identity.
+
+| Evidence | Observation | What remains unverified |
+|---|---|---|
+| **LOCAL OBSERVATION — settings** | Shortcut settings, dictation's auto-detect control and Integrations were observed. | Visible controls do not establish shortcut delivery, successful dictation, connected-service authorization or completed integration tasks. No account identities, private history or dictionary contents are recorded here. |
+| **LOCAL OBSERVATION — generic answer** | A new generic water-cycle question completed a text answer. The invocation was typed; microphone input was not exercised. | Text completion does not independently verify the drawing, its contents, speech playback or task-wide latency. |
+| **USER REPORT — visual answer** | The user reported an additional diagram in a separate window/display surface. | Native CUA returned only a transparent host, so the diagram's pixels, location and composition were not independently inspected. Its visual output is **unknown, not absent**. Do not label this result text-only or infer that diagram generation failed. |
+
+No FPS, exact animation curve, speech/audio synchronization, acoustic latency or 3D interaction parity is established by this follow-up. The user-reported separate visual surface also needs to be located and observed before making a screenshot comparison or deciding whether OpenCompanion should use a matching presentation flow.
+
+## Proposed acceptance checklist for the whole parity goal
+
+Every checkbox is intentionally **open**. The current implementation or a test under a similar name is insufficient to close a whole-product row. These are our original acceptance proposals; the release IDs identify the relevant vendor inventory, not proof the proposed test has been run.
+
+| Priority / scope | Proposed observable acceptance | Current OpenCompanion boundary |
+|---|---|---|
+| **P0 — full guidance loop** · R01/R07/R15 | [ ] On unfamiliar public fixture apps, ask by speech and text, reveal a hidden destination, click the real intended control, capture the changed scene, then reach and verify the requested result. Include profile, settings, export, menus, keyboard/manual steps, slow loading and genuine ambiguity. | Thirteen authored-image provider cases cover target selection or clarification envelopes. Physical continuation and a general unfamiliar-app success rate remain separate. |
+| **P0 — input and permission continuity** · R01/R03 | [ ] Repeated physical hold/release, brief-tap cancellation, Stop, sleep/wake, revoked permissions and a signed upgrade preserve a correct observable status and never revive an old turn. | Input/generation code and targeted installed observations exist. Full audio-route and permission lifecycle coverage remains open. |
+| **P0 — no false task success** · R02/R07 | [ ] A visible click, a provider completion and a changed application result each receive separate evidence. Failed or ambiguous effects retain an unknown/failed outcome. | Guidance is advisory; explicit native actions and jobs are separate implementations. A target PNG is not a completed task. |
+| **P1 — conceptual explanation** · R20 | [ ] Explain two unfamiliar mechanisms with useful native diagrams, readable math/labels, locally smooth reveals and a follow-up that edits only the intended part. Answer a simple fact without opening a notebook. | Retained primitives and ownership tests exist; general composition, math layout and full speech/reveal integration need acceptance. |
+| **P1 — interactive objects** · R20 | [ ] Generate two materially different 3D explanations, orbit each, select a meaningful part, ask about it, change a parameter and export/reopen without losing meaning. | SceneKit primitives and playback controls do not establish arbitrary meaningful 3D lessons. |
+| **P1 — dictation** · R10/R21 | [ ] Dictate into public native, browser and Electron text fields; exercise hands-free mode, corrections, vocabulary, punctuation and mixed languages. Preserve the target field, never send a message implicitly, and keep terminal insertion nonexecuting. | Dictation is still a specified gap in the feature ledger; microphone-to-chat transcription is not focused-app dictation. |
+| **P1 — contextual drafting** · creator dictation demo | [ ] From an authored email/task screen, ask for a draft with an explicit destination; inspect the text before committing; keep user edits and make failed insertion visible. | Needs a complete focused-field insertion and review flow, not a clipboard-only or chat-only demo. |
+| **P1 — spatial input** · creator spatial demo | [ ] Circle one object among several public diagram parts, ask a deictic question, and verify the answer concerns that exact region. Test a scribble, cancelled stroke, replaced image and scaled/negative-origin display. | Region/stroke selection is implemented; installed capture-to-answer acceptance remains open. User-drawn context must not become an automatic desktop action. |
+| **P1 — durable workers** · R02/R16 | [ ] Create two distinctly scoped workers, run real bounded tasks concurrently, steer one, stop another, inspect artifacts and continue the intended worker after restart. Test crash-after-effect reconciliation. | Jobs, storage and transport scaffolding exist. A polished persistent worker experience and live end-to-end task evidence remain incomplete. |
+| **P1 — consented desktop control** · R20 | [ ] In an authored canary app, grant a precise temporary scope, observe a real effect, interrupt it with the supported user gesture, and verify no further input occurs. | Explicit per-action AX controls do not establish an independently accepted autonomous Drive workflow. Never silently broaden advisory guidance into control. |
+| **P2 — connected services** · R03/R16/R19 | [ ] Connect a sandbox service, distinguish two accounts, inspect reported tools, reject expired credentials, reconnect and complete a real read/write task with the right account and receipt. | Generic MCP transport tests do not prove a built-in service catalog, OAuth registration or working account-specific task flow. |
+| **P2 — browser execution** · R20/R21 | [ ] Pair the installed extension with the canonical app; navigate an authored signed-in-like fixture, resolve fresh document references, act, stop and verify the changed DOM. | MV3/native-host tests exist. Installed Chromium pairing and user-facing distribution remain separate gates. |
+| **P2 — files and context** · R06/R14/R16 | [ ] Drop, paste and attach public files; ask a question whose answer is beyond the visible first page; verify citations; preview generated documents beside chat; reopen and export correctly. | Scoped extraction and storage exist. Visual image answers, rich preview and folder retrieval are not all accepted. |
+| **P2 — memory** · R09/R16 | [ ] Explicitly save a preference, use it in a later relevant task, inspect/edit/delete it and prove an unrelated/private context never leaks into a new turn. | Explicit local memory is implemented. It is a different scope from automatic inferred personal profiles. |
+| **P2 — scheduling** · R16/R20 | [ ] Create, pause, resume and delete a routine; sleep through two deadlines; wake offline; recover once after reconnection without duplicate external effects or misleading completion. | App-running routines/checkpoints exist. No background-after-quit capability is claimed. |
+| **P2 — complete shell** · R04/R17/R20/R21 | [ ] Traverse Home, chat, Settings and a deliberate large window with one shared draft/history. Test resized surfaces, keyboard navigation, scroll retention, every disclosure, multiple displays and invisible-area click-through. | The notch and cursor have native acceptance. Exact reference curves/FPS and complete navigation/state coverage remain open. |
+| **P2 — audio/readability** · R05/R21 | [ ] Distinguish follower replies, attached target labels, bottom captions and the full transcript. Test long answers, interruption, voice speed, headphones, route changes, muted output and text fallback. | Paced text and real mic levels exist. Several audio surfaces/routes remain only partly verified. |
+| **P2 — preferences and identity** · prior local inspection | [ ] Every visible cursor, voice, language, microphone, shortcut, Dock/exposure and accessibility preference changes real behavior, persists across restart and has a safe unsupported-state fallback. Use original characters and assets. | Native settings exist; a visible selector is not evidence that the advertised capability works. Configuration must remain consistent across shell, activity strip, follower and full workspace. |
+| **P2 — usable onboarding** · R11/R20 | [ ] A fresh user completes one talk, one capture/mark, one contextual question and one safe task, with denial and text-only alternatives and a replay path. | Native permission controls exist; a complete first-run teaching tour is a separate product task. |
+| **P3 — distribution and maintenance** · R21/R22 | [ ] Independently verify supported OS/architecture coverage, stable signing/privacy identity, one canonical installation, recoverable upgrades, update signatures and uninstall/data preservation. | The local signed installer is tested. Developer ID/notarization, an update feed, Intel/oldest macOS and Windows are not a completed release scope. |
+| **Separate hosted scope** · R12/R18/homepage | [ ] If hosted parity is chosen, specify and test account lifecycle, plan limits, billing/refunds, teams, referrals and server-side data deletion before exposing those controls. | Hosted billing/referral infrastructure is unsupported. Do not display copied account/upgrade controls that have no real service behind them. |
+
+## What the 333-test checkpoint actually proves
+
+[FEATURE-STATUS.md](FEATURE-STATUS.md) reports **333 Swift tests** (293 app, 15 store, 25 core), **29 Python installer/signing tests**, a signed app build and installed native checks. The latest real-provider authored-image run reports 13 passing cases: 11 target cases and two bounded clarification envelopes; seven image-only targets used native pixel conversion. Reported first valid target callbacks took 4.507–9.049 seconds, median 5.164, with the exact profile request at 4.507 seconds. These are existing project records, not rerun by this research pass.
+
+The provider fixture supplies authored images/candidates and uses the real provider and native final-layer renderer. It bypasses capture permissions, actual AX harvest, foreground preparation, AppModel admission, displayed animation, physical input and notebook mutation. Its clarification and instruction meanings are not automatically judged. One sweep is not a latency distribution or reliability claim. [Guidance evidence and limits](CURSOR-UI.md)
+
+The next meaningful quality gain is to close the first three P0 rows with physical, trace-correlated workflows and then finish complete explanation, dictation and worker slices. Adding more isolated primitives or sample screenshots cannot close the remaining rows by itself.
+
+## Unresolved facts and research limits
+
+- Current reference model routing, prompt construction, perception algorithm, capture schema, timing distributions, failure rates and exact animation curves are not established by the public sources. Static component names are a different evidence class.
+- A prefix appearing in an edited short label does not prove a full reply uses per-character rather than word/mask reveal. No exact FPS or fixed interval is claimed.
+- Historical default microphone, shortcut, menu-bar, cursor, skill, suggestion and approval behavior can change. Verify the active version and exposed settings before recreating a remembered demo.
+- The [trust page][trust] and [privacy policy][privacy] describe data practices at different levels of detail. This research cannot independently audit retention, training exclusions, deletion completion, backend security or provider configuration.
+- A policy permitting a daily integration read does not establish whether a suggestion job currently runs. The current release pause and older collaborator demos must remain distinct.
+- This is a comprehensive capability-family checklist of the inspected public product, not a promise that every minor bug fix, account-specific experiment or unpublished feature has been discovered.
+
+## Primary source directory
+
+- [Homepage and current pricing][home] — checked 4 Nov 2026.
+- [Official changelog][changelog] — checked 4 Nov 2026; version/date labels above.
+- [Official Mac release][release] and [release list][releases] — checked 4 Nov 2026.
+- [Trust][trust] and [privacy policy][privacy] — checked 4 Nov 2026; no explicit policy effective date established here.
+- [Creator's historical repository][repository] — checked 4 Nov 2026; private-development notice dated 27 Apr 2026.
+- [Creator spatial-context post][spatial-post], [dictation post][dictation-post], [collaborators post][collaborators-post], [agents post][agents-post] — checked 4 Nov 2026; relative ages only, exact publication dates not established.
+- [Official About timeline][about], [Mac installation page][mac], [Windows installation page][windows] — checked 4 Nov 2026.
+- [Official FL Studio video][fl-video] and [spatial video][spatial-video] — earlier browser-stream observations dated 3 Nov 2026; not downloaded or replayed in this pass.
+
+[home]: https://www.heyclicky.com/
+[changelog]: https://www.heyclicky.com/changelog
+[release]: https://github.com/farzaa/clicky-releases/releases/tag/v1.1.2
+[releases]: https://github.com/farzaa/clicky-releases/releases
+[repository]: https://github.com/farzaa/clicky
+[trust]: https://www.heyclicky.com/trust
+[privacy]: https://www.heyclicky.com/privacy-policy
+[about]: https://www.heyclicky.com/about
+[mac]: https://www.heyclicky.com/mac
+[windows]: https://www.heyclicky.com/windows
+[fl-video]: https://www.heyclicky.com/assets/clicky-fl.mp4
+[spatial-video]: https://www.heyclicky.com/assets/clicky-spatial.mp4
+[spatial-post]: https://www.linkedin.com/posts/farza-majeed-76685612a_today-were-shipping-spatial-context-this-activity-7480718045032665088-nY9f
+[dictation-post]: https://www.linkedin.com/posts/farza-majeed-76685612a_today-were-shipping-screen-aware-dictation-activity-7482887327762030592-nCC3
+[collaborators-post]: https://www.linkedin.com/posts/farza-majeed-76685612a_today-were-shipping-collaborators-each-activity-7510433420842319872-L4mk
+[agents-post]: https://www.linkedin.com/posts/farza-majeed-76685612a_introducing-clicky-agents-this-is-the-simplest-activity-7454552863227285504-vQrQ
+[youtube]: https://www.youtube.com/@HeyClicky
+[x-demo]: https://x.com/FarzaTV/status/2041314633978659092

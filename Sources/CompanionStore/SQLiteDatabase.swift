@@ -122,7 +122,7 @@ final class SQLiteDatabase: @unchecked Sendable {
 
   private func migrate() throws {
     let version = try query("PRAGMA user_version") { Int(sqlite3_column_int($0, 0)) }.first ?? 0
-    guard version <= 3 else { throw StoreError.unsupportedSchema(version) }
+    guard version <= LocalStore.schemaVersion else { throw StoreError.unsupportedSchema(version) }
     if version < 1 {
       try transaction {
         try execute(
@@ -173,6 +173,17 @@ final class SQLiteDatabase: @unchecked Sendable {
           )
           """)
         try execute("PRAGMA user_version = 3")
+      }
+    }
+    if version < 4 {
+      try transaction {
+        try execute(
+          """
+          CREATE TABLE deleted_conversations (
+              id TEXT PRIMARY KEY NOT NULL, deleted_at REAL NOT NULL
+          )
+          """)
+        try execute("PRAGMA user_version = 4")
       }
     }
   }

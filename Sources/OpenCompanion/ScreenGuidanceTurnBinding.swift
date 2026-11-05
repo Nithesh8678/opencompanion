@@ -57,6 +57,7 @@ import Foundation
     guard target.instruction.utf8.count <= 32_000,
       (target.label?.prefix(81).count ?? 0) <= 80,
       [nil, "click", "manual"].contains(target.advanceOn),
+      target.awaitUser != true || target.advanceOn == "manual",
       [nil, "ellipse", "roundedRectangle"].contains(styled.shape),
       ScreenGuidancePolicy.targetRect(target, in: source.screenRect) != nil
     else { throw ProviderError.message("Invalid or oversized screen guidance target.") }

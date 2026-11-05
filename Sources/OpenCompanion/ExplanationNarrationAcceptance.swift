@@ -209,6 +209,7 @@ enum ExplanationNarrationAcceptance {
               throw ProviderError.message(
                 "Real speech ranges did not drive the owned cursor prefix.")
             }
+            let captionGap = try verifyCaptionAttachment(snapshot: caption)
             let bitmap = try canvas.explanationSnapshot()
             guard let data = bitmap.representation(using: .png, properties: [:]) else {
               throw ProviderError.message("Could not encode the authored explanation snapshot.")
@@ -251,6 +252,7 @@ enum ExplanationNarrationAcceptance {
             }
             let surfaceID = try verifyNativeSurface(
               authority: authority, projection: currentProjection, canvas: canvas)
+            let afterCaptureCaptionGap = try verifyCaptionAttachment(snapshot: afterCapture)
             observation.focusArrivalStages.insert(stage)
             observation.focusSurfaceIDs[stage] = surfaceID
             observation.focusArrivalReceipts[stage] = [
@@ -261,6 +263,8 @@ enum ExplanationNarrationAcceptance {
               "renderSerial": currentProjection.renderSerial,
               "tipErrorLogicalPoints": error,
               "afterCaptureTipErrorLogicalPoints": finalError,
+              "captionBodyGapLogicalPoints": captionGap,
+              "afterCaptureCaptionBodyGapLogicalPoints": afterCaptureCaptionGap,
               "nativePoint": [
                 "x": currentProjection.globalPoint.x, "y": currentProjection.globalPoint.y,
               ],
@@ -482,6 +486,29 @@ enum ExplanationNarrationAcceptance {
     else {
       throw ProviderError.message("The passive cursor window is not stacked above its explanation.")
     }
+  }
+
+  @MainActor private static func verifyCaptionAttachment(
+    snapshot: CursorCompanionSnapshot
+  ) throws -> Double {
+    guard
+      let window = NSApp.windows.first(where: {
+        $0.isVisible && $0.identifier?.rawValue == "org.opencompanion.cursor"
+      }), let view = window.contentView as? CursorCompanionView,
+      let local = view.visibleCaptionFrame, local.width > 0, local.height > 0
+    else { throw ProviderError.message("The owned cursor has no visible native caption.") }
+    let caption = window.convertToScreen(view.convert(local, to: nil))
+    let body = CGRect(
+      x: snapshot.bodyCenter.x - CursorCompanionLayout.bodySize.width / 2,
+      y: snapshot.bodyCenter.y - CursorCompanionLayout.bodySize.height / 2,
+      width: CursorCompanionLayout.bodySize.width, height: CursorCompanionLayout.bodySize.height)
+    let gap = hypot(
+      max(0, caption.minX - body.maxX, body.minX - caption.maxX),
+      max(0, caption.minY - body.maxY, body.minY - caption.maxY))
+    guard gap.isFinite, gap <= 24.01 else {
+      throw ProviderError.message("The native caption detached from its scene cursor.")
+    }
+    return gap
   }
 
   @MainActor private static func writeResult(

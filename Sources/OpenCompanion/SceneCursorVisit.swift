@@ -13,6 +13,8 @@ struct SceneCursorVisit: Sendable {
   /// Scene targets identify the rendered glyph tip; flights animate its center.
   static let bodyTipOffset = CursorCompanionGlyph.tipOffset
   static let retargetTolerance: CGFloat = 0.1
+  /// Authored attachment limit, not a recovered reference layout constant.
+  static let maximumCaptionBodyGap: CGFloat = 24
   private(set) var authority: SceneFocusAuthority
   private(set) var target: CGPoint
   private var flight: CursorFlight
@@ -101,8 +103,8 @@ struct SceneCursorVisit: Sendable {
           width: bubble.width, height: bubble.height))
   }
 
-  /// Keep the body at its projected surface. Only the caption moves, and only
-  /// when a complete caption fits outside the own-scene panel's painted bounds.
+  /// Prefer nearby space outside the own-scene panel, but never detach the
+  /// caption just to avoid its transparent host. The attached layout is fallback.
   static func avoidingScene(
     _ placement: CursorCompanionPlacement, bounds: CGRect, display: CGRect, visible: CGRect
   ) -> CursorCompanionPlacement {
@@ -123,6 +125,10 @@ struct SceneCursorVisit: Sendable {
     let center = CGPoint(
       x: placement.frame.minX + placement.bodyPoint.x,
       y: placement.frame.maxY - placement.bodyPoint.y)
+    let body = CGRect(
+      x: center.x - CursorCompanionLayout.bodySize.width / 2,
+      y: center.y - CursorCompanionLayout.bodySize.height / 2,
+      width: CursorCompanionLayout.bodySize.width, height: CursorCompanionLayout.bodySize.height)
     let width = original.width
     let height = original.height
     func clampedX(_ value: CGFloat) -> CGFloat {
@@ -138,16 +144,15 @@ struct SceneCursorVisit: Sendable {
       CGRect(x: obstacle.maxX, y: clampedY(original.minY), width: width, height: height),
     ]
     guard
-      let bubble = candidates.filter({ safe.contains($0) && !$0.intersects(obstacle) })
-        .min(by: {
-          hypot($0.midX - original.midX, $0.midY - original.midY)
-            < hypot($1.midX - original.midX, $1.midY - original.midY)
-        })
+      let bubble = candidates.filter({
+        safe.contains($0) && !$0.intersects(obstacle)
+          && rectangleGap(body, $0) <= maximumCaptionBodyGap
+      })
+      .min(by: {
+        hypot($0.midX - original.midX, $0.midY - original.midY)
+          < hypot($1.midX - original.midX, $1.midY - original.midY)
+      })
     else { return placement }
-    let body = CGRect(
-      x: center.x - CursorCompanionLayout.bodySize.width / 2,
-      y: center.y - CursorCompanionLayout.bodySize.height / 2,
-      width: CursorCompanionLayout.bodySize.width, height: CursorCompanionLayout.bodySize.height)
     let frame = body.insetBy(dx: -18, dy: -18)
       .union(bubble.insetBy(dx: -12, dy: -12).intersection(safe))
     return CursorCompanionPlacement(
@@ -156,6 +161,12 @@ struct SceneCursorVisit: Sendable {
       bubbleFrame: CGRect(
         x: bubble.minX - frame.minX, y: frame.maxY - bubble.maxY,
         width: bubble.width, height: bubble.height))
+  }
+
+  private static func rectangleGap(_ first: CGRect, _ second: CGRect) -> CGFloat {
+    let dx = max(0, first.minX - second.maxX, second.minX - first.maxX)
+    let dy = max(0, first.minY - second.maxY, second.minY - first.maxY)
+    return hypot(dx, dy)
   }
 
   private static func finite(_ point: CGPoint) -> Bool {

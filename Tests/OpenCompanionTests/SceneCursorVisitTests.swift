@@ -144,21 +144,63 @@ struct SceneCursorVisitTests {
       visit.pose(at: 10.1, reduceMotion: true)?.point == SceneCursorVisit.bodyCenter(for: moved))
   }
 
-  @Test func captionMovesOutsideSceneWhenItFitsWithoutMovingTheTriangle() {
+  @Test func centerCaptionKeepsAttachedFallbackInsteadOfJumpingToTransparentPanelEdge() {
     let display = CGRect(x: -1_000, y: -500, width: 1_600, height: 1_000)
     let scene = CGRect(x: -600, y: -250, width: 620, height: 420)
+    for size in [CGSize(width: 44, height: 29), CGSize(width: 280, height: 60)] {
+      let placement = CursorCompanionLayout.placement(
+        anchor: CGPoint(x: -300, y: 0), bubbleSize: size,
+        display: display, visible: display)
+      let adjusted = SceneCursorVisit.avoidingScene(
+        placement, bounds: scene, display: display, visible: display)
+      #expect(adjusted == placement)
+      #expect(captionBodyGap(adjusted) <= SceneCursorVisit.maximumCaptionBodyGap)
+      #expect(globalBubble(adjusted).intersects(scene))
+    }
+  }
+
+  @Test func nearPanelEdgeCanUseOutsideSpaceWhileKeepingCaptionCloseAndTipExact() {
+    let display = CGRect(x: -1_000, y: -500, width: 1_600, height: 1_000)
+    let scene = CGRect(x: -600, y: -250, width: 620, height: 420)
+    let desired = CGPoint(x: -300, y: 155)
+    let surface = CGPoint(x: desired.x + SceneCursorVisit.bodyTipOffset.x, y: desired.y)
     let placement = CursorCompanionLayout.placement(
-      anchor: CGPoint(x: -300, y: 0), bubbleSize: CGSize(width: 280, height: 60),
+      anchor: desired, bubbleSize: CGSize(width: 280, height: 60),
       display: display, visible: display)
+    #expect(globalBubble(placement).intersects(scene))
     let adjusted = SceneCursorVisit.avoidingScene(
       placement, bounds: scene, display: display, visible: display)
-    let originalBody = bodyCenter(placement)
-    let adjustedBody = bodyCenter(adjusted)
-    let bubble = globalBubble(adjusted)
-    #expect(originalBody == adjustedBody)
-    #expect(!bubble.intersects(scene.insetBy(dx: -6, dy: -6)))
-    #expect(display.contains(bubble))
-    #expect(bubble.size == placement.bubbleFrame.size)
+    #expect(!globalBubble(adjusted).intersects(scene.insetBy(dx: -6, dy: -6)))
+    #expect(captionBodyGap(adjusted) <= SceneCursorVisit.maximumCaptionBodyGap)
+    #expect(bodyCenter(adjusted).x + SceneCursorVisit.bodyTipOffset.x == surface.x)
+    #expect(bodyCenter(adjusted).y == surface.y)
+    #expect(adjusted.bubbleFrame.size == placement.bubbleFrame.size)
+  }
+
+  @Test func growingCaptionRemainsOnItsAttachedSideWithoutPanelPerimeterJumps() {
+    let display = CGRect(x: 0, y: 0, width: 1_600, height: 1_000)
+    let scene = CGRect(x: 500, y: 250, width: 620, height: 420)
+    let desired = CGPoint(x: 800, y: 460)
+    var previous: CursorCompanionPlacement?
+    var previousTop: CGFloat?
+    for size in [
+      CGSize(width: 44, height: 29), CGSize(width: 160, height: 60),
+      CGSize(width: 280, height: 110),
+    ] {
+      let placement = CursorCompanionLayout.placement(
+        anchor: desired, bubbleSize: size, display: display, visible: display,
+        previous: previous)
+      let adjusted = SceneCursorVisit.avoidingScene(
+        placement, bounds: scene, display: display, visible: display)
+      let bubble = globalBubble(adjusted)
+      #expect(adjusted == placement)
+      #expect(bodyCenter(adjusted) == desired)
+      #expect(captionBodyGap(adjusted) <= SceneCursorVisit.maximumCaptionBodyGap)
+      #expect(bubble.maxY < desired.y && bubble.minX > desired.x)
+      if let previousTop { #expect(bubble.maxY == previousTop) }
+      previous = adjusted
+      previousTop = bubble.maxY
+    }
   }
 
   @Test func noOutsideRoomKeepsReadableOriginalPlacementAndEmptyCaptionStaysEmpty() {
@@ -226,5 +268,15 @@ struct SceneCursorVisitTests {
       x: placement.frame.minX + placement.bubbleFrame.minX,
       y: placement.frame.maxY - placement.bubbleFrame.maxY,
       width: placement.bubbleFrame.width, height: placement.bubbleFrame.height)
+  }
+
+  private func captionBodyGap(_ placement: CursorCompanionPlacement) -> CGFloat {
+    let center = bodyCenter(placement)
+    let bubble = globalBubble(placement)
+    let half = CGSize(
+      width: CursorCompanionGlyph.size.width / 2, height: CursorCompanionGlyph.size.height / 2)
+    let horizontal = max(0, abs(bubble.midX - center.x) - bubble.width / 2 - half.width)
+    let vertical = max(0, abs(bubble.midY - center.y) - bubble.height / 2 - half.height)
+    return hypot(horizontal, vertical)
   }
 }

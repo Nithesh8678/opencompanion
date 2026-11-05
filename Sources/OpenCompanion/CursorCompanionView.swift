@@ -51,6 +51,13 @@ struct CursorCaptionWord: Equatable, Sendable {
 
   override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
+  /// Current painted caption bounds in this flipped view, for own-window QA.
+  /// Hidden status geometry must not count as an attached visible caption.
+  var visibleCaptionFrame: CGRect? {
+    guard !bubbleView.isHidden, !bubbleLayer.isHidden, bubbleLayer.opacity > 0 else { return nil }
+    return bubbleView.frame
+  }
+
   /// `maxWidth` includes the bubble's horizontal insets. Empty status pills
   /// reserve room for the real-level meter or three work-in-progress dots.
   func measure(text: String, maxWidth: CGFloat = 300) -> CGSize {

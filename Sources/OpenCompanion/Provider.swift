@@ -244,14 +244,26 @@ actor ReasoningProvider {
     }
     return "Live request succeeded for \(configuration.model): \(text.prefix(100))"
   }
-  static func baseInstructions(for policy: ResponsePolicy) -> String {
+  static func baseInstructions(
+    for policy: ResponsePolicy, sceneStart: CodexSceneStartMode = .introductionFirst
+  ) -> String {
+    let geometryFirst = sceneStart.usesGeometryFirstPrompt(for: policy)
     let base: String
     switch policy.route {
     case .conversation: base = instructions
     case .screenGuidance: base = screenGuidanceInstructions
-    case .notebook: base = notebookInstructions + "\n" + spatialInstructions
+    case .notebook:
+      base =
+        geometryFirst
+        ? geometryFirstNotebookInstructions + "\n" + geometryFirstSpatialInstructions
+        : notebookInstructions + "\n" + spatialInstructions
     }
-    return base + "\n" + policy.instructions
+    let policyInstructions =
+      geometryFirst
+      ? policy.instructions.replacingOccurrences(
+        of: "Use text to answer.", with: "Answer the request concisely.")
+      : policy.instructions
+    return base + "\n" + policyInstructions
   }
 
   static func standaloneStructuredSceneInstructions(for policy: ResponsePolicy) -> String {
@@ -283,6 +295,30 @@ actor ReasoningProvider {
     Ordinary 2D diagrams use a 900x560 logical canvas. Nodes use stable id and kind: rectangle,ellipse,line,arrow,text,path,mesh,group. The 2D fields are x,y,width,height,text,color,fill,strokeWidth,fontSize,points,rotation,opacity,bindings ({}), plus optional parentID. Dimensions are nonnegative; opacity is 0–1. Only kind=text draws text: use separate text nodes for labels. New diagrams need at least two useful concept labels and causal connectors; avoid overlap and fit text inside its bounds. Arrow/line points are [{"x":x1,"y":y1},{"x":x2,"y":y2}]; upward/leftward direction uses endpoints, never negative width/height. For requested 3D use the typed world-space contract below, not the legacy mesh fallback.
     Each scene unit is an atomic valid transaction. Existing IDs update retained parts; preserve unrelated user edits. Changing a retained kind, parent or 2D/3D representation requires explicit removal and creation in that transaction. Removing a part must also remove dependent anchored labels in the same transaction; removeIDs removes descendants. For a new response with no supplied document, omit baseDocumentRevision on every progressive unit: the host advances it. For an existing-document edit, use the supplied current revision and advance once per scene unit. Keep referenced parents and label targets in the same or an earlier unit. Optional operations, animations and parameters must follow the existing bounded scene schema; no new capability is implied by narration. All output belongs to the current generation.
     """
+
+  // This explicit ablation substitutes startup clauses rather than appending
+  // a conflicting instruction. The original defaults and all native protocol,
+  // quality and permission rules remain shared and byte-for-byte unchanged.
+  private static let geometryFirstNotebookInstructions =
+    notebookInstructions
+    .replacingOccurrences(
+      of:
+        "Start with one brief useful text unit in canonical type-then-text order. Follow with a small coherent visual relationship, then add useful detail progressively in separate complete scene units. A scene is permitted only when useful for the current requested explanation; it is never mandatory. Empty pages and generic titles are insufficient.",
+      with:
+        "When a scene materially helps the user's requested visual or mechanism explanation, make the FIRST complete output unit a small scene with actual useful visible geometry, brief attached narration, and focusID for an actual introduced typed mesh or filled 2D shape. Do not emit a standalone text introduction before that first useful scene. Empty groups, labels alone, title-only pages, and placeholder geometry do not satisfy this. Emit complete compact JSON and omit unused optional fields. Then add useful detail progressively in separate complete scene units. A scene remains permitted only when useful for the current requested explanation; it is never mandatory. If no useful scene is appropriate, answer using text units only rather than inventing geometry."
+    )
+    .replacingOccurrences(
+      of: "Standalone text units remain useful for the short introduction or conclusion.",
+      with:
+        "After the first useful scene, standalone text units may supply concise context or a conclusion."
+    )
+
+  private static let geometryFirstSpatialInstructions = spatialInstructions.replacingOccurrences(
+    of:
+      "Start with one brief text unit, then immediately emit a small first scene unit containing an assembly group and ONE physical part (at most two meshes).",
+    with:
+      "For a useful 3D explanation, emit a small first scene unit immediately, containing an assembly group and ONE physical part (at most two meshes)."
+  )
 
   private static let spatialInstructions = """
     For requested 3D explanations, use typed spatial3D nodes, not a flat diagram pretending to be 3D. The host renders native geometry over the desktop; it owns the camera, projection, materials, reveal and cancellation. Do not draw an enclosing card, page, title bar, border or background rectangle. Ordinary 2D diagrams still use the canvas protocol above. Start with one brief text unit, then immediately emit a small first scene unit containing an assembly group and ONE physical part (at most two meshes). Do not put the finished object or all parts in that first unit. Add one to three NEW physical parts per subsequent scene unit, with concise narration in each scene's narration field and short anchored labels. A multipart lesson must grow across at least three scene units. Avoid delaying the first useful geometry for a large plan or JSON object. Keep every referenced parent/label target in the same or an earlier scene unit. A unit must remain a valid standalone transaction. For a new scene response with no supplied document, omit baseDocumentRevision on progressive units; the host owns revision increments. For an existing document edit, use its supplied current revision and advance once per scene unit. Use stable IDs for all later edits. Never output renderer code, textures, URLs or screenshot coordinates for 3D parts.

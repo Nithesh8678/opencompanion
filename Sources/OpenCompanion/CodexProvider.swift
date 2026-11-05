@@ -80,6 +80,8 @@ actor CodexProvider {
     onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil,
     responsePolicy: ResponsePolicy? = nil,
     outputMode: CodexOutputMode = .ndjson,
+    sceneStart: CodexSceneStartMode = .introductionFirst,
+    measureSceneLatency: Bool = false,
     onRejectedLine: (@Sendable (Data) async -> Void)? = nil
   ) async throws {
     let requestPolicy =
@@ -88,6 +90,8 @@ actor CodexProvider {
         text: messages.last(where: { $0.role == "user" })?.text ?? "",
         screenGuidanceEnabled: image != nil, inNotebook: scene != nil, hasNotebook: scene != nil)
     try outputMode.validate(policy: requestPolicy, hasImage: image != nil, hasScene: scene != nil)
+    try sceneStart.validate(
+      policy: requestPolicy, hasImage: image != nil, hasScene: scene != nil, outputMode: outputMode)
     guard activeSession == nil else {
       throw ProviderError.message(
         "A Codex request is already active. Stop it before starting another.")
@@ -164,7 +168,8 @@ actor CodexProvider {
       let developerInstructions: String
       switch outputMode {
       case .ndjson:
-        instructions = ReasoningProvider.baseInstructions(for: requestPolicy)
+        instructions = ReasoningProvider.baseInstructions(
+          for: requestPolicy, sceneStart: sceneStart)
         developerInstructions =
           "Emit only the permitted NDJSON assistant units for the current response policy. No tools are authorized for this thread."
       case .structuredScene, .structuredUnifiedScene:
@@ -176,16 +181,16 @@ actor CodexProvider {
         developerInstructions =
           "Emit one schema-constrained final answer object with a progressive steps array. Each step requires actual typed parts and its narration. Do not emit interim commentary. No tools are authorized for this thread."
       }
+      let providerInstructions =
+        instructions
+        + "\nYou are a native assistant response provider. Do not call any tools, inspect files, use shell, or follow local project instructions. All needed context is supplied in the user input."
       try session.send(
         method: "thread/start", id: 4,
         params: .object([
           "model": .string(selectedModel), "ephemeral": .bool(true),
           "approvalPolicy": .string("never"), "sandbox": .string("read-only"),
           "cwd": .string(session.workingDirectory.path),
-          "baseInstructions": .string(
-            instructions
-              + "\nYou are a native assistant response provider. Do not call any tools, inspect files, use shell, or follow local project instructions. All needed context is supplied in the user input."
-          ),
+          "baseInstructions": .string(providerInstructions),
           "developerInstructions": .string(developerInstructions),
           "dynamicTools": .array([]), "config": config, "serviceName": .string("opencompanion"),
         ]))
@@ -224,11 +229,31 @@ actor CodexProvider {
       ]
       if let effort = routing.effort { turnParams["effort"] = .string(effort) }
       if let schema = outputMode.schema { turnParams["outputSchema"] = schema }
+      if measureSceneLatency {
+        // Explicit diagnostic profile only. Count bytes without retaining any
+        // prompt content in timing events. The input count covers the serialized
+        // input array, excluding outer RPC/turn parameters and line framing.
+        await timing.recordRequestPayload(
+          instructionUTF8Bytes: providerInstructions.utf8.count + developerInstructions.utf8.count,
+          conversationUTF8Bytes: text.utf8.count,
+          turnInputUTF8Bytes: try JSONEncoder().encode(JSONValue.array(input)).count)
+      }
+      try Task.checkCancellation()
       try session.send(method: "turn/start", id: 5, params: .object(turnParams))
       await timing.mark(.turnSubmitted)
       let deliverUnit: @Sendable (ProviderUnit) async throws -> Void = { unit in
         try Task.checkCancellation()
-        try await onUnit(unit)
+        let measureFirstHandler =
+          measureSceneLatency && unit.type == "scene"
+          ? await timing.beginFirstSceneHandler() : false
+        try Task.checkCancellation()
+        do {
+          try await onUnit(unit)
+        } catch {
+          if measureFirstHandler { await timing.finishFirstSceneHandler(success: false) }
+          throw error
+        }
+        if measureFirstHandler { await timing.finishFirstSceneHandler(success: true) }
         // The steps decoder records a successful scene callback before checking
         // cancellation between scene and narration. Do not turn that known
         // admission into an uncounted callback failure in this wrapper.
@@ -237,6 +262,12 @@ actor CodexProvider {
         if unit.type == "scene" { await timing.mark(.firstSceneAccepted) }
       }
       var decoder = ProviderTextStreamDecoder()
+      let onSceneLineDecoded: (@Sendable (ProviderLineWireSample) async -> Void)?
+      if measureSceneLatency {
+        onSceneLineDecoded = { sample in await timing.recordSceneLine(sample) }
+      } else {
+        onSceneLineDecoded = nil
+      }
       var structured = CodexStructuredOutput(threadID: threadID, outputMode: outputMode)
       var lastSpatialProgress: StructuredSpatialStageProgress?
       var totalBytes = 0
@@ -278,7 +309,8 @@ actor CodexProvider {
           }
           if outputMode == .ndjson {
             try await decoder.append(
-              delta, onUnit: deliverUnit, onText: onText, onRejectedLine: onRejectedLine)
+              delta, onUnit: deliverUnit, onText: onText, onRejectedLine: onRejectedLine,
+              onSceneLineDecoded: onSceneLineDecoded)
           }
         }
         if outputMode.isStructured {
@@ -330,7 +362,8 @@ actor CodexProvider {
         }
       } else {
         try await decoder.finish(
-          onUnit: deliverUnit, onText: onText, onRejectedLine: onRejectedLine)
+          onUnit: deliverUnit, onText: onText, onRejectedLine: onRejectedLine,
+          onSceneLineDecoded: onSceneLineDecoded)
       }
       let acceptedUnits =
         outputMode.isStructured ? structured.acceptedUnits : decoder.acceptedUnits

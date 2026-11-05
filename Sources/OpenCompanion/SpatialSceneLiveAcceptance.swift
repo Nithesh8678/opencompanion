@@ -17,6 +17,8 @@ enum SpatialSceneLiveAcceptance {
     try Task.checkCancellation()
     let outputMode = try SpatialSceneOutputSelection.select(
       arguments: ProcessInfo.processInfo.arguments)
+    let sceneStart = try SpatialSceneStartSelection.select(
+      arguments: ProcessInfo.processInfo.arguments, outputMode: outputMode)
     let cases = [
       Case(
         id: "brushed-dc-motor",
@@ -50,6 +52,8 @@ enum SpatialSceneLiveAcceptance {
       else {
         throw ProviderError.message("The public 3D request did not acquire new-scene capability.")
       }
+      try sceneStart.validate(
+        policy: policy, hasImage: false, hasScene: false, outputMode: outputMode)
       let started = ProcessInfo.processInfo.systemUptime
       let collector = SpatialSceneAcceptanceCollector(started: started)
       var failure: String?
@@ -61,7 +65,7 @@ enum SpatialSceneLiveAcceptance {
           onTiming: { await collector.timing($0) },
           onStructuredProgress: { await collector.structuredProgress($0) },
           onUnit: { try await collector.receive($0) }, responsePolicy: policy,
-          outputMode: outputMode,
+          outputMode: outputMode, sceneStart: sceneStart, measureSceneLatency: true,
           onRejectedLine: { await collector.recordRejectedLine($0) })
       } catch {
         failure = error.localizedDescription
@@ -76,6 +80,9 @@ enum SpatialSceneLiveAcceptance {
       let concepts = fixture.concepts.filter { labelText.contains($0) }
       let schemaPassed = (try? document.validated()) != nil
       var unmet: [String] = []
+      unmet += SpatialSceneStartSelection.unmetChecks(
+        mode: sceneStart, firstAdmission: snapshot.firstAdmission,
+        firstSceneAdmission: snapshot.firstSceneAdmission)
       if !schemaPassed { unmet.append("schema-validation") }
       if snapshot.progressiveGeometryUnits < 2 { unmet.append("progressive-geometry") }
       if snapshot.textUnits == 0 { unmet.append("narration") }
@@ -100,6 +107,9 @@ enum SpatialSceneLiveAcceptance {
         "id": fixture.id, "result": passed ? "passed" : "failed",
         "failure": failure ?? "", "unmetChecks": unmet, "publicPromptOnly": true,
         "outputMode": outputMode.rawValue,
+        "sceneStart": sceneStart.rawValue,
+        "measureSceneLatency": true,
+        "firstAdmission": NSNull(), "firstSceneAdmission": NSNull(),
         "model": snapshot.routing?.model ?? "unreported",
         "effort": snapshot.routing?.effort ?? "provider-default",
         "routingReason": snapshot.routing?.reason.rawValue ?? "unreported",
@@ -124,9 +134,8 @@ enum SpatialSceneLiveAcceptance {
         "firstSceneUnitMS": snapshot.firstSceneMS ?? -1,
         "firstTypedGeometryMS": snapshot.firstTypedMS ?? -1,
         "providerFinishedMS": providerFinishedMS, "providerCompletedSuccessfully": failure == nil,
-        "providerTimingEvents": snapshot.timings.map {
-          ["stage": $0.stage.rawValue, "elapsedMS": $0.elapsedMS] as [String: Any]
-        },
+        "providerTimingEvents": try JSONSerialization.jsonObject(
+          with: encoder.encode(snapshot.timings)),
         "desktopCaptured": false, "microphoneUsed": false,
         "nativeRenderVerified": false, "acousticTimingVerified": false,
         "physicalAccuracyVerified": false,
@@ -134,6 +143,13 @@ enum SpatialSceneLiveAcceptance {
       if let rejection = snapshot.lastRejectedScene {
         result["lastRejectedScene"] = try JSONSerialization.jsonObject(
           with: encoder.encode(rejection))
+      }
+      if let first = snapshot.firstAdmission {
+        result["firstAdmission"] = try JSONSerialization.jsonObject(with: encoder.encode(first))
+      }
+      if let firstScene = snapshot.firstSceneAdmission {
+        result["firstSceneAdmission"] = try JSONSerialization.jsonObject(
+          with: encoder.encode(firstScene))
       }
       if let progress = snapshot.structuredStageProgress {
         result["structuredStageProgress"] = try JSONSerialization.jsonObject(
@@ -149,6 +165,8 @@ enum SpatialSceneLiveAcceptance {
       [
         "result": passed ? "passed" : "failed", "cases": results,
         "outputMode": outputMode.rawValue,
+        "sceneStart": sceneStart.rawValue,
+        "measureSceneLatency": true,
         "selectedCases": selectedIDs,
         "scope":
           "Real provider units and strict native semantic admission; no rendering, capture, audio or physical-task proof.",
@@ -204,6 +222,43 @@ enum SpatialSceneOutputSelection {
     case stepsFlag: return .structuredSpatialSteps
     default: return .ndjson
     }
+  }
+}
+
+/// A public-fixture ablation only. Neither an unrecognized value nor a structured
+/// format may silently select the candidate or alter the normal default.
+enum SpatialSceneStartSelection {
+  static func select(arguments: [String], outputMode: CodexOutputMode) throws -> CodexSceneStartMode
+  {
+    let flag = "--geometry-first"
+    guard !arguments.contains(where: { $0.hasPrefix(flag) && $0 != flag }) else {
+      throw ProviderError.message("--geometry-first is a flag and does not accept a value.")
+    }
+    let indices = arguments.indices.filter { arguments[$0] == flag }
+    guard indices.count <= 1 else {
+      throw ProviderError.message("Specify --geometry-first at most once.")
+    }
+    guard let index = indices.first else { return .introductionFirst }
+    guard index + 1 == arguments.count || arguments[index + 1].hasPrefix("--") else {
+      throw ProviderError.message("--geometry-first is a flag and does not accept a value.")
+    }
+    guard outputMode == .ndjson else {
+      throw ProviderError.message("--geometry-first requires normal NDJSON output.")
+    }
+    return .geometryFirst
+  }
+
+  static func unmetChecks(
+    mode: CodexSceneStartMode, firstAdmission: SpatialSceneAdmissionSummary?,
+    firstSceneAdmission: SpatialSceneAdmissionSummary?
+  ) -> [String] {
+    guard mode == .geometryFirst else { return [] }
+    var unmet: [String] = []
+    if firstAdmission?.unitType != "scene" { unmet.append("geometry-first-unit") }
+    if (firstSceneAdmission?.drawableTypedMeshCount ?? 0) == 0 {
+      unmet.append("geometry-first-drawable-mesh")
+    }
+    return unmet
   }
 }
 
@@ -562,6 +617,37 @@ struct SpatialSceneAcceptanceSnapshot: Sendable {
   let firstTypedMS: Double?
   let routing: CodexRoutingSelection?
   let timings: [CodexTimingEvent]
+  let firstAdmission: SpatialSceneAdmissionSummary?
+  let firstSceneAdmission: SpatialSceneAdmissionSummary?
+}
+
+/// Counts from a successfully admitted public-fixture unit, without narration,
+/// IDs or raw proposal fields. Drawable is a static graph/material check, not
+/// native pixels, camera visibility or scientific usefulness.
+struct SpatialSceneAdmissionSummary: Codable, Sendable, Equatable {
+  let unitType: String
+  let nodeCount: Int
+  let groupCount: Int
+  let typedMeshCount: Int
+  let drawableTypedMeshCount: Int
+
+  init(unitType: String, document: SceneDocument? = nil) {
+    self.unitType = unitType
+    let nodes = document?.nodes ?? []
+    nodeCount = nodes.count
+    groupCount = nodes.filter { $0.kind == .group }.count
+    typedMeshCount = nodes.filter { $0.kind == .mesh && $0.spatial3D?.geometry != nil }.count
+    let poses = (try? document?.spatialWorldPoses(at: 0)) ?? []
+    drawableTypedMeshCount =
+      poses.filter { pose in
+        let node = pose.node
+        let material = node.fill == "transparent" ? node.color : node.fill
+        let zeroAlpha =
+          material == "transparent" || (material.count == 9 && material.hasSuffix("00"))
+        return node.kind == .mesh && node.spatial3D?.geometry != nil
+          && pose.effectiveOpacity > 0 && !zeroAlpha
+      }.count
+  }
 }
 
 /// A public-fixture failure graph, not raw scene/narration persistence. Counts
@@ -632,6 +718,8 @@ actor SpatialSceneAcceptanceCollector {
   private var firstTypedMS: Double?
   private var routing: CodexRoutingSelection?
   private var timings: [CodexTimingEvent] = []
+  private var firstAdmission: SpatialSceneAdmissionSummary?
+  private var firstSceneAdmission: SpatialSceneAdmissionSummary?
   private let started: TimeInterval
 
   init(started: TimeInterval) { self.started = started }
@@ -657,6 +745,7 @@ actor SpatialSceneAcceptanceCollector {
         throw ProviderError.message("Missing public narration.")
       }
       try receiveNarration(text)
+      if firstAdmission == nil { firstAdmission = .init(unitType: "text") }
     case "scene":
       guard sceneUnits < 96 else { throw ProviderError.message("Excessive public scene units.") }
       let accepted: SceneDocument
@@ -697,6 +786,10 @@ actor SpatialSceneAcceptanceCollector {
         firstTypedMS = elapsed
       }
       sceneUnits += 1
+      if firstSceneAdmission == nil {
+        firstSceneAdmission = .init(unitType: "scene", document: document)
+      }
+      if firstAdmission == nil { firstAdmission = firstSceneAdmission }
     default:
       throw ProviderError.message("The 3D response emitted a non-scene capability.")
     }
@@ -714,7 +807,8 @@ actor SpatialSceneAcceptanceCollector {
       connectorUnits: connectorUnits, compiledConnectorCount: compiledConnectorCount,
       rejectedLine: rejectedLine,
       progressiveGeometryUnits: progressiveGeometryUnits,
-      firstSceneMS: firstSceneMS, firstTypedMS: firstTypedMS, routing: routing, timings: timings)
+      firstSceneMS: firstSceneMS, firstTypedMS: firstTypedMS, routing: routing, timings: timings,
+      firstAdmission: firstAdmission, firstSceneAdmission: firstSceneAdmission)
   }
 
   private func receiveNarration(_ text: String) throws {

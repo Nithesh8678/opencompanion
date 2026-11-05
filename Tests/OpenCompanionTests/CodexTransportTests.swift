@@ -530,11 +530,190 @@ import Testing
     #expect(!stages.contains(.responseCompleted))
   }
 
+  @Test(arguments: [0, 1, 2])
+  func explicitSceneDiagnosticsSeparateDecodeAndOnlyTheFirstHandlerOutcome(
+    rejectAt: Int
+  ) async throws {
+    let line =
+      ##"{"type":"scene","nodes":[{"id":"PUBLIC_PART_NAME_CANARY","kind":"rectangle","width":100,"height":50,"fill":"#112233"}],"narration":"PUBLIC_NARRATION_CANARY"}"##
+    let fixture = try makeFixture(completeTurn: true, responseText: line + "\n" + line + "\n")
+    defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+    let receiver = TransportTimingReceiver()
+    let handler = TransportSceneHandler(rejectAt: rejectAt)
+    let provider = CodexProvider()
+    let timeout = Task {
+      try await Task.sleep(for: .seconds(5))
+      await provider.stop()
+    }
+    defer { timeout.cancel() }
+    var failed = false
+    do {
+      try await provider.stream(
+        executable: fixture.path, model: "fixture-default",
+        messages: [.init(role: "user", text: "PUBLIC_REQUEST_CANARY")],
+        context: "PUBLIC_CONTEXT_CANARY", image: nil, scene: nil,
+        onTiming: { await receiver.append($0) },
+        onUnit: { _ in
+          let observed = await receiver.events.map(\.stage)
+          try await handler.accept(observedStages: observed)
+        },
+        responsePolicy: .init(route: .notebook, includesExistingNotebook: false),
+        sceneStart: .geometryFirst, measureSceneLatency: true)
+    } catch { failed = true }
+    #expect(failed == (rejectAt != 0))
+    let events = await receiver.events
+    let stages = events.map(\.stage)
+    #expect(stages.filter { $0 == .firstSceneLineDecoded }.count == 1)
+    #expect(stages.filter { $0 == .firstSceneHandlerStarted }.count == 1)
+    #expect(stages.contains(.firstSceneHandlerFailed) == (rejectAt == 1))
+    #expect(stages.contains(.firstSceneHandlerCompleted) == (rejectAt != 1))
+    #expect(stages.contains(.firstSceneAccepted) == (rejectAt != 1))
+    #expect(stages.contains(.responseCompleted) == (rejectAt == 0))
+    #expect(await handler.firstCallSawStartedWithoutCompletion)
+    let decoded = try #require(events.first { $0.stage == .firstSceneLineDecoded })
+    #expect(decoded.lineUTF8Bytes == line.utf8.count)
+    #expect(decoded.lineTermination == .newline)
+    let start = try #require(decoded.lineStartMS)
+    let end = try #require(decoded.lineEndMS)
+    #expect(start >= 0 && start <= end && end <= decoded.elapsedMS)
+    let handlerStart = try #require(events.first { $0.stage == .firstSceneHandlerStarted })
+    #expect(decoded.elapsedMS <= handlerStart.elapsedMS)
+
+    let requests = try String(
+      contentsOf: URL(fileURLWithPath: fixture.path + ".requests"), encoding: .utf8
+    ).split(separator: "\n").map { line in
+      try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+    }
+    let thread = try #require(requests.first { $0["method"] as? String == "thread/start" })
+    let threadParams = try #require(thread["params"] as? [String: Any])
+    let base = try #require(threadParams["baseInstructions"] as? String)
+    let developer = try #require(threadParams["developerInstructions"] as? String)
+    #expect(!base.contains("Start with one brief text unit"))
+    #expect(!base.contains("Start with one brief useful text unit"))
+    let turn = try #require(requests.first { $0["method"] as? String == "turn/start" })
+    let params = try #require(turn["params"] as? [String: Any])
+    let input = try #require(params["input"] as? [[String: Any]])
+    let text = try #require(input.first?["text"] as? String)
+    let inputValue = try JSONDecoder().decode(
+      JSONValue.self, from: JSONSerialization.data(withJSONObject: input))
+    let sizes = try #require(events.first { $0.stage == .requestPayloadPrepared })
+    #expect(sizes.instructionUTF8Bytes == base.utf8.count + developer.utf8.count)
+    #expect(sizes.conversationUTF8Bytes == text.utf8.count)
+    let encodedInputBytes = try JSONEncoder().encode(inputValue).count
+    #expect(sizes.turnInputUTF8Bytes == encodedInputBytes)
+    let encoded = try JSONEncoder().encode(events)
+    #expect(!String(decoding: encoded, as: UTF8.self).contains("CANARY"))
+    #expect(events.allSatisfy { $0.elapsedMS.isFinite && $0.elapsedMS >= 0 })
+  }
+
+  @Test func geometryFirstUnsupportedScopeRejectsBeforeStartingTheFixture() async throws {
+    let fixture = try makeFixture(completeTurn: true)
+    defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+    do {
+      try await CodexProvider().stream(
+        executable: fixture.path, model: "fixture-default",
+        messages: [.init(role: "user", text: "Hello")], context: "", image: nil, scene: nil,
+        onUnit: { _ in },
+        responsePolicy: .init(route: .conversation, includesExistingNotebook: false),
+        sceneStart: .geometryFirst, measureSceneLatency: true)
+      Issue.record("Unsupported geometry-first request unexpectedly started.")
+    } catch {
+      #expect(error.localizedDescription.contains("Geometry-first output supports only"))
+    }
+    #expect(!FileManager.default.fileExists(atPath: fixture.path + ".requests"))
+  }
+
+  @Test func cancellationAtPayloadObserverPreventsTurnSubmission() async throws {
+    try await assertDiagnosticObserverCancellation(at: .requestPayloadPrepared)
+  }
+
+  @Test func cancellationAtHandlerStartObserverPreventsSemanticDelivery() async throws {
+    try await assertDiagnosticObserverCancellation(at: .firstSceneHandlerStarted)
+  }
+
+  private func assertDiagnosticObserverCancellation(at cancelledStage: CodexTimingEvent.Stage)
+    async throws
+  {
+    let fixture = try makeFixture(
+      completeTurn: true, responseText: "{\"type\":\"scene\",\"nodes\":[]}\n")
+    defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+    let provider = CodexProvider()
+    let receiver = TransportTimingReceiver()
+    let delivery = TransportUnitReceiver()
+    let request = Task {
+      try await provider.stream(
+        executable: fixture.path, model: "fixture-default",
+        messages: [.init(role: "user", text: "Public diagnostic cancellation fixture")],
+        context: "", image: nil, scene: nil,
+        onTiming: { event in
+          await receiver.append(event)
+          if event.stage == cancelledStage {
+            // The observer shares this request's Task across actor hops. Cancel
+            // that nested request, never the surrounding Swift Testing task.
+            withUnsafeCurrentTask { task in
+              guard let task else {
+                Issue.record("A diagnostic observer had no current request task.")
+                return
+              }
+              task.cancel()
+            }
+          }
+        },
+        onUnit: { _ in await delivery.append("SEMANTIC_HANDLER_CALLED") },
+        responsePolicy: .init(route: .notebook, includesExistingNotebook: false),
+        sceneStart: .geometryFirst, measureSceneLatency: true)
+    }
+    let timeout = Task {
+      try await Task.sleep(for: .seconds(5))
+      await delivery.markWatchdogFired()
+      request.cancel()
+      await provider.stop()
+    }
+    defer {
+      timeout.cancel()
+      request.cancel()
+    }
+    do {
+      try await request.value
+      Issue.record("A request cancelled by its diagnostic observer unexpectedly succeeded.")
+    } catch {
+      #expect(error is CancellationError)
+    }
+    #expect(await delivery.watchdogFired == false)
+    #expect(await delivery.text.isEmpty)
+    let stages = await receiver.events.map(\.stage)
+    #expect(stages.contains(cancelledStage))
+    #expect(!stages.contains(.firstSceneHandlerFailed))
+    #expect(!stages.contains(.firstSceneHandlerCompleted))
+    #expect(!stages.contains(.firstSceneAccepted))
+    #expect(!stages.contains(.firstUnitAccepted))
+    #expect(!stages.contains(.responseCompleted))
+    let methods = try String(
+      contentsOf: URL(fileURLWithPath: fixture.path + ".requests"), encoding: .utf8
+    ).split(separator: "\n").map { line in
+      let request = try #require(
+        JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+      return try #require(request["method"] as? String)
+    }
+    #expect(methods.contains("thread/start"))
+    if cancelledStage == .requestPayloadPrepared {
+      #expect(!methods.contains("turn/start"))
+      #expect(!stages.contains(.firstSceneLineDecoded))
+      #expect(!stages.contains(.firstSceneHandlerStarted))
+    } else {
+      #expect(methods.contains("turn/start"))
+      #expect(stages.contains(.firstSceneLineDecoded))
+    }
+    // These are decoder/wrapper observation points. Awaited timing observers
+    // remain part of wall elapsed time; they are not isolated model-work clocks.
+  }
+
   private func makeFixture(
     completeTurn: Bool, selectedModel: String = "fixture-default",
     supportedEfforts: [String]? = ["medium", "low"], catalogIncludesSelected: Bool = true,
     selectedModelVisible: Bool = true, modelCatalog: [[String: Any]]? = nil,
-    expectedRequestModel: String? = nil
+    expectedRequestModel: String? = nil,
+    responseText: String = "{\"type\":\"text\",\"text\":\"ready\"}\n"
   ) throws -> URL {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
       "OpenCompanionTransportFixture-\(UUID().uuidString)", isDirectory: true)
@@ -580,7 +759,7 @@ import Testing
     let turn = try encoded(["id": 5, "result": ["turn": ["id": "fixture-turn"]]])
     let delta = try encoded([
       "method": "item/agentMessage/delta",
-      "params": ["delta": "{\"type\":\"text\",\"text\":\"ready\"}\n"],
+      "params": ["delta": responseText],
     ])
     let completed = try encoded([
       "method": "turn/completed", "params": ["turn": ["status": "completed"]],
@@ -627,6 +806,27 @@ private actor TransportUnitReceiver {
   var watchdogFired = false
   func append(_ value: String) { text += value }
   func markWatchdogFired() { watchdogFired = true }
+}
+
+private actor TransportSceneHandler {
+  let rejectAt: Int
+  private var calls = 0
+  private(set) var firstCallSawStartedWithoutCompletion = false
+
+  init(rejectAt: Int) { self.rejectAt = rejectAt }
+
+  func accept(observedStages: [CodexTimingEvent.Stage]) throws {
+    calls += 1
+    if calls == 1 {
+      firstCallSawStartedWithoutCompletion =
+        observedStages.contains(.firstSceneHandlerStarted)
+        && !observedStages.contains(.firstSceneHandlerCompleted)
+        && !observedStages.contains(.firstSceneHandlerFailed)
+    }
+    if calls == rejectAt {
+      throw ProviderError.message("Public fixture refused the decoded scene.")
+    }
+  }
 }
 
 private actor TransportRoutingReceiver {

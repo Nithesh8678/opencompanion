@@ -7,6 +7,155 @@ import Testing
 struct SpatialSceneLiveDiagnosticsTests {
   private let known = ["brushed-dc-motor", "water-molecule", "simple-pendulum"]
 
+  @Test func geometryFirstIsExplicitAndCannotMixWithStructuredFormats() throws {
+    #expect(
+      try SpatialSceneStartSelection.select(arguments: ["app"], outputMode: .ndjson)
+        == .introductionFirst)
+    #expect(
+      try SpatialSceneStartSelection.select(
+        arguments: ["app", "geometryFirst"], outputMode: .ndjson) == .introductionFirst)
+    #expect(
+      try SpatialSceneStartSelection.select(
+        arguments: ["app", "--geometry-first"], outputMode: .ndjson) == .geometryFirst)
+    #expect(
+      try SpatialSceneStartSelection.select(
+        arguments: ["app", "--geometry-first", "--spatial-scene-case", "water-molecule"],
+        outputMode: .ndjson) == .geometryFirst)
+    for mode in [CodexOutputMode.structuredScene, .structuredUnifiedScene, .structuredSpatialSteps]
+    {
+      #expect(
+        try SpatialSceneStartSelection.select(arguments: ["app"], outputMode: mode)
+          == .introductionFirst)
+      #expect(throws: ProviderError.self) {
+        try SpatialSceneStartSelection.select(
+          arguments: ["app", "--geometry-first"], outputMode: mode)
+      }
+    }
+  }
+
+  @Test(arguments: [
+    ["app", "--geometry-first", "--geometry-first"],
+    ["app", "--geometry-first=true"], ["app", "--geometry-first="],
+    ["app", "--geometry-first", "true"], ["app", "--geometry-first", "false"],
+    ["app", "--geometry-first", "introductionFirst"],
+    ["app", "--geometry-first", "water-molecule"], ["app", "--geometry-first-unsafe"],
+  ])
+  func malformedGeometryFirstFlagCannotSelectACandidate(_ arguments: [String]) {
+    #expect(throws: ProviderError.self) {
+      try SpatialSceneStartSelection.select(arguments: arguments, outputMode: .ndjson)
+    }
+  }
+
+  @Test func firstAcceptedMetadataDistinguishesIntroductionFromLaterRealGeometry() async throws {
+    let collector = SpatialSceneAcceptanceCollector(started: ProcessInfo.processInfo.systemUptime)
+    try await collector.receive(text("A public introduction."))
+    try await collector.receive(
+      .init(
+        type: "scene",
+        nodes: [
+          .init(id: "assembly", kind: .group, spatial3D: .init()),
+          .init(
+            id: "ball", kind: .mesh, parentID: "assembly",
+            spatial3D: .init(geometry: .sphere(radius: 1))),
+        ]))
+    let snapshot = await collector.snapshot()
+    let first = try #require(snapshot.firstAdmission)
+    let scene = try #require(snapshot.firstSceneAdmission)
+    #expect(first.unitType == "text" && first.nodeCount == 0 && first.typedMeshCount == 0)
+    #expect(scene.unitType == "scene" && scene.nodeCount == 2 && scene.groupCount == 1)
+    #expect(scene.typedMeshCount == 1 && scene.drawableTypedMeshCount == 1)
+    #expect(
+      SpatialSceneStartSelection.unmetChecks(
+        mode: .geometryFirst, firstAdmission: first, firstSceneAdmission: scene) == [
+          "geometry-first-unit"
+        ])
+    #expect(
+      SpatialSceneStartSelection.unmetChecks(
+        mode: .introductionFirst, firstAdmission: first, firstSceneAdmission: scene
+      ).isEmpty)
+  }
+
+  @Test func geometryFirstRequiresActualDrawableGeometryRatherThanAnEmptyGroupOrTransparentMesh()
+    async throws
+  {
+    for style in ["group", "opacity", "material"] {
+      let collector = SpatialSceneAcceptanceCollector(started: ProcessInfo.processInfo.systemUptime)
+      var nodes = [SceneNode(id: "assembly", kind: .group, spatial3D: .init())]
+      if style != "group" {
+        nodes.append(
+          .init(
+            id: "ball", kind: .mesh,
+            fill: style == "material" ? "#4488CC00" : "#4488CC",
+            opacity: style == "opacity" ? 0 : 1,
+            parentID: "assembly", spatial3D: .init(geometry: .sphere(radius: 1))))
+      }
+      try await collector.receive(.init(type: "scene", nodes: nodes))
+      let snapshot = await collector.snapshot()
+      let first = try #require(snapshot.firstAdmission)
+      #expect(first.unitType == "scene" && first.drawableTypedMeshCount == 0)
+      #expect(first.typedMeshCount == (style == "group" ? 0 : 1))
+      #expect(
+        SpatialSceneStartSelection.unmetChecks(
+          mode: .geometryFirst, firstAdmission: first,
+          firstSceneAdmission: snapshot.firstSceneAdmission)
+          == ["geometry-first-drawable-mesh"])
+    }
+  }
+
+  @Test func successfulFirstSceneCountsStayImmutableAcrossARejectedLaterProposal() async throws {
+    let collector = SpatialSceneAcceptanceCollector(started: ProcessInfo.processInfo.systemUptime)
+    try await collector.receive(
+      .init(
+        type: "scene",
+        nodes: [
+          .init(id: "public-ball", kind: .mesh, spatial3D: .init(geometry: .sphere(radius: 1)))
+        ]))
+    let before = await collector.snapshot()
+    #expect(
+      SpatialSceneStartSelection.unmetChecks(
+        mode: .geometryFirst, firstAdmission: before.firstAdmission,
+        firstSceneAdmission: before.firstSceneAdmission
+      ).isEmpty)
+    do {
+      try await collector.receive(
+        .init(
+          type: "scene",
+          nodes: [
+            .init(
+              id: "invalid", kind: .text, spatial3D: .init(labelAnchor: .init(targetID: "missing")))
+          ]))
+      Issue.record("A missing label target was accepted.")
+    } catch {}
+    let after = await collector.snapshot()
+    #expect(after.document == before.document && after.sceneUnits == before.sceneUnits)
+    #expect(
+      after.firstAdmission == before.firstAdmission
+        && after.firstSceneAdmission == before.firstSceneAdmission)
+    let encoded = try JSONEncoder().encode(try #require(after.firstSceneAdmission))
+    let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+    #expect(
+      Set(object.keys) == [
+        "unitType", "nodeCount", "groupCount", "typedMeshCount", "drawableTypedMeshCount",
+      ])
+    #expect(!String(decoding: encoded, as: UTF8.self).contains("public-ball"))
+  }
+
+  @Test func rejectedFirstProposalCannotClaimAnyAdmittedUnit() async throws {
+    let collector = SpatialSceneAcceptanceCollector(started: ProcessInfo.processInfo.systemUptime)
+    do {
+      try await collector.receive(
+        .init(
+          type: "scene",
+          nodes: [
+            .init(id: "invalid", kind: .mesh, spatial3D: .init(geometry: .sphere(radius: -1)))
+          ]))
+      Issue.record("An invalid primitive was accepted.")
+    } catch {}
+    let snapshot = await collector.snapshot()
+    #expect(snapshot.firstAdmission == nil && snapshot.firstSceneAdmission == nil)
+    #expect(snapshot.document.nodes.isEmpty && snapshot.sceneUnits == 0)
+  }
+
   @Test func formatSelectionIsExplicitAndConflictsNeverPromoteAnExperiment() throws {
     #expect(try SpatialSceneOutputSelection.select(arguments: ["app"]) == .ndjson)
     #expect(

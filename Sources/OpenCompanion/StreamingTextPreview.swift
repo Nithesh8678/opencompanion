@@ -18,18 +18,27 @@ struct ProviderTextStreamDecoder: Sendable {
   private var line: [UInt8] = []
   private var prefix = TextJSONPrefix()
   private var lastPreviewBytes = 0
+  private var wireClock = ProviderLineWireClock()
   private(set) var acceptedUnits = 0
 
   mutating func append(
     _ delta: String,
     onUnit: @Sendable (ProviderUnit) async throws -> Void,
     onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil,
-    onRejectedLine: (@Sendable (Data) async -> Void)? = nil
+    onRejectedLine: (@Sendable (Data) async -> Void)? = nil,
+    onSceneLineDecoded: (@Sendable (ProviderLineWireSample) async -> Void)? = nil
   ) async throws {
+    let observedAt = onSceneLineDecoded == nil ? nil : ProcessInfo.processInfo.systemUptime
+    if observedAt == nil { wireClock.reset() }
     try Task.checkCancellation()
     for byte in delta.utf8 {
       if byte == 10 {
-        if let unit = try await finishLine(onRejectedLine: onRejectedLine) {
+        let sample = observedAt.flatMap {
+          wireClock.finishLine(observedAt: $0, termination: .newline)
+        }
+        if let unit = try await finishLine(
+          sample: sample, onRejectedLine: onRejectedLine, onSceneLineDecoded: onSceneLineDecoded)
+        {
           try await deliver(unit, onUnit: onUnit, onText: onText)
         }
       } else {
@@ -37,6 +46,7 @@ struct ProviderTextStreamDecoder: Sendable {
           throw ProviderError.message("A response unit exceeded 256 KiB.")
         }
         line.append(byte)
+        if let observedAt { wireClock.appendByte(observedAt: observedAt) }
         prefix.append(byte)
       }
     }
@@ -50,20 +60,31 @@ struct ProviderTextStreamDecoder: Sendable {
   mutating func finish(
     onUnit: @Sendable (ProviderUnit) async throws -> Void,
     onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil,
-    onRejectedLine: (@Sendable (Data) async -> Void)? = nil
+    onRejectedLine: (@Sendable (Data) async -> Void)? = nil,
+    onSceneLineDecoded: (@Sendable (ProviderLineWireSample) async -> Void)? = nil
   ) async throws {
+    let observedAt = onSceneLineDecoded == nil ? nil : ProcessInfo.processInfo.systemUptime
+    if observedAt == nil { wireClock.reset() }
     try Task.checkCancellation()
-    if let unit = try await finishLine(onRejectedLine: onRejectedLine) {
+    let sample = observedAt.flatMap {
+      wireClock.finishLine(observedAt: $0, termination: .endOfStream)
+    }
+    if let unit = try await finishLine(
+      sample: sample, onRejectedLine: onRejectedLine, onSceneLineDecoded: onSceneLineDecoded)
+    {
       try await deliver(unit, onUnit: onUnit, onText: onText)
     }
   }
 
   private mutating func finishLine(
-    onRejectedLine: (@Sendable (Data) async -> Void)?
+    sample: ProviderLineWireSample?,
+    onRejectedLine: (@Sendable (Data) async -> Void)?,
+    onSceneLineDecoded: (@Sendable (ProviderLineWireSample) async -> Void)?
   ) async throws -> ProviderUnit? {
     // Explicit public-fixture diagnostics only. Normal traffic has no callback
     // and does not retain a rejected response outside this bounded decoder.
     let diagnosticLine = onRejectedLine == nil ? nil : Data(line)
+    let rawByteCount = line.count
     let value = String(decoding: line, as: UTF8.self)
       .trimmingCharacters(in: .whitespacesAndNewlines)
     line.removeAll(keepingCapacity: true)
@@ -82,6 +103,9 @@ struct ProviderTextStreamDecoder: Sendable {
       guard let text = unit.text, text.utf8.count <= Self.maximumTextBytes else {
         throw ProviderError.message("Invalid or oversized text unit.")
       }
+    }
+    if unit.type == "scene", let sample, sample.utf8Bytes == rawByteCount, let onSceneLineDecoded {
+      await onSceneLineDecoded(sample)
     }
     return unit
   }
@@ -130,7 +154,10 @@ private struct TextJSONPrefix: Sendable {
     case .token:
       if tokenOffset == 0 && Self.isWhitespace(byte) { return }
       let expected = Self.tokens[token]
-      guard byte == expected[tokenOffset] else { disable(); return }
+      guard byte == expected[tokenOffset] else {
+        disable()
+        return
+      }
       tokenOffset += 1
       if tokenOffset == expected.count {
         token += 1
@@ -150,12 +177,24 @@ private struct TextJSONPrefix: Sendable {
       }
     case .escape:
       switch byte {
-      case 34, 47, 92: appendScalar(UInt32(byte)); resumeString()
-      case 98: appendScalar(8); resumeString()
-      case 102: appendScalar(12); resumeString()
-      case 110: appendScalar(10); resumeString()
-      case 114: appendScalar(13); resumeString()
-      case 116: appendScalar(9); resumeString()
+      case 34, 47, 92:
+        appendScalar(UInt32(byte))
+        resumeString()
+      case 98:
+        appendScalar(8)
+        resumeString()
+      case 102:
+        appendScalar(12)
+        resumeString()
+      case 110:
+        appendScalar(10)
+        resumeString()
+      case 114:
+        appendScalar(13)
+        resumeString()
+      case 116:
+        appendScalar(9)
+        resumeString()
       case 117:
         unicodeValue = 0
         unicodeDigits = 0
@@ -163,32 +202,50 @@ private struct TextJSONPrefix: Sendable {
       default: disable()
       }
     case .unicode:
-      guard let hex = Self.hex(byte) else { disable(); return }
+      guard let hex = Self.hex(byte) else {
+        disable()
+        return
+      }
       unicodeValue = unicodeValue * 16 + hex
       unicodeDigits += 1
       if unicodeDigits == 4 { finishUnicode() }
     case .surrogateSlash:
-      guard byte == 92 else { disable(); return }
+      guard byte == 92 else {
+        disable()
+        return
+      }
       state = .surrogateU
     case .surrogateU:
-      guard byte == 117 else { disable(); return }
+      guard byte == 117 else {
+        disable()
+        return
+      }
       unicodeValue = 0
       unicodeDigits = 0
       state = .unicode
     case .utf8:
-      guard (0x80...0xBF).contains(byte) else { disable(); return }
+      guard (0x80...0xBF).contains(byte) else {
+        disable()
+        return
+      }
       utf8Bytes.append(byte)
       if utf8Bytes.count == expectedUTF8Bytes {
         guard let decoded = String(bytes: utf8Bytes, encoding: .utf8),
           decoded.unicodeScalars.count == 1, let scalar = decoded.unicodeScalars.first
-        else { disable(); return }
+        else {
+          disable()
+          return
+        }
         appendScalar(scalar.value)
         utf8Bytes.removeAll(keepingCapacity: true)
         resumeString()
       }
     case .tail:
       if Self.isWhitespace(byte) { return }
-      guard byte == 125 else { disable(); return }
+      guard byte == 125 else {
+        disable()
+        return
+      }
       state = .done
     case .done:
       if !Self.isWhitespace(byte) { disable() }
@@ -204,7 +261,10 @@ private struct TextJSONPrefix: Sendable {
 
   private mutating func finishUnicode() {
     if let highSurrogate {
-      guard (0xDC00...0xDFFF).contains(unicodeValue) else { disable(); return }
+      guard (0xDC00...0xDFFF).contains(unicodeValue) else {
+        disable()
+        return
+      }
       let scalar = 0x10000 + (highSurrogate - 0xD800) * 0x400 + unicodeValue - 0xDC00
       self.highSurrogate = nil
       appendScalar(scalar)
@@ -221,7 +281,10 @@ private struct TextJSONPrefix: Sendable {
   }
 
   private mutating func appendScalar(_ value: UInt32) {
-    guard let scalar = UnicodeScalar(value) else { disable(); return }
+    guard let scalar = UnicodeScalar(value) else {
+      disable()
+      return
+    }
     let amount = scalar.utf8.count
     guard textBytes <= ProviderTextStreamDecoder.maximumTextBytes - amount else {
       disable()

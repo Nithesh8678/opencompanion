@@ -152,7 +152,8 @@ enum ExplanationNarrationAcceptance {
               throw ProviderError.message("The spoken scene changed before its own-view snapshot.")
             }
             let arrivalDeadline = ProcessInfo.processInfo.systemUptime + 3
-            var arrival: (SceneFocusAuthority, SceneFocusProjection, RetainedCanvasView, Double)?
+            var arrival:
+              (SceneFocusAuthority, SceneFocusProjection, RetainedCanvasView, Double, Double)?
             while arrival == nil {
               try Task.checkCancellation()
               guard model.taskGeneration == generation,
@@ -183,15 +184,45 @@ enum ExplanationNarrationAcceptance {
                 let snapshot = cursor.snapshot
                 let tip = CGPoint(x: snapshot.bodyCenter.x + 7.5, y: snapshot.bodyCenter.y)
                 let error = distance(tip, projection.globalPoint)
-                if snapshot.visible, snapshot.ignoresMouseEvents, !snapshot.canBecomeKey, error <= 1
+                if snapshot.visible, snapshot.ignoresMouseEvents, !snapshot.canBecomeKey,
+                  error <= 1,
+                  let nativeTip = submittedNativeCursorTip()
                 {
-                  _ = try verifyNativeSurface(
-                    authority: authority, projection: projection, canvas: canvas)
-                  arrival = (authority, projection, canvas, error)
+                  let nativeError = distance(nativeTip, projection.globalPoint)
+                  if nativeError <= 1 {
+                    _ = try verifyNativeSurface(
+                      authority: authority, projection: projection, canvas: canvas)
+                    arrival = (authority, projection, canvas, error, nativeError)
+                  }
                 }
               }
               if arrival == nil {
-                guard ProcessInfo.processInfo.systemUptime < arrivalDeadline else {
+                if ProcessInfo.processInfo.systemUptime >= arrivalDeadline {
+                  let projection = canvas.currentSceneFocusProjection
+                  let authority = cursor.sceneNodeVisitAuthority
+                  let nativeTip = submittedNativeCursorTip()
+                  observation.focusWaitTimeouts[stage] = [
+                    "cursor": try JSONSerialization.jsonObject(
+                      with: JSONEncoder().encode(cursor.snapshot)),
+                    "visitFocusID": authority?.focusID ?? "",
+                    "visitBeatID": authority?.beatID.uuidString ?? "",
+                    "modelFocusIsCurrent": authority.map(model.explanationFocusIsCurrent) ?? false,
+                    "overlayBoundsAvailable": authority.flatMap {
+                      overlay.sceneNodeVisitBounds(authority: $0)
+                    } != nil,
+                    "targetPoint": cursor.sceneNodeVisitTargetPoint.map {
+                      ["x": $0.x, "y": $0.y]
+                    } ?? [:],
+                    "projectionTargetID": projection?.targetID ?? "",
+                    "projectionRevision": projection?.documentRevision ?? -1,
+                    "projectionPoint": projection.map {
+                      ["x": $0.globalPoint.x, "y": $0.globalPoint.y]
+                    } ?? [:],
+                    "nativeLayerTipPoint": nativeTip.map { ["x": $0.x, "y": $0.y] } ?? [:],
+                    "nativeLayerTipErrorLogicalPoints": nativeTip.flatMap { tip in
+                      projection.map { distance(tip, $0.globalPoint) }
+                    }.map { $0 as Any } ?? NSNull(),
+                  ]
                   throw ProviderError.message(
                     "The cursor did not reach the current native focus surface within three seconds."
                   )
@@ -199,7 +230,7 @@ enum ExplanationNarrationAcceptance {
                 try await Task.sleep(for: .milliseconds(20))
               }
             }
-            let (authority, projection, canvas, error) = try require(arrival)
+            let (authority, projection, canvas, error, nativeError) = try require(arrival)
             try verifyCursorStacking(canvas: canvas)
             let caption = cursor.snapshot
             let text = stage == 1 ? firstNarration : secondNarration
@@ -209,7 +240,7 @@ enum ExplanationNarrationAcceptance {
               throw ProviderError.message(
                 "Real speech ranges did not drive the owned cursor prefix.")
             }
-            let captionGap = try verifyCaptionAttachment(snapshot: caption)
+            let captionGap = try verifyCaptionAttachment()
             let bitmap = try canvas.explanationSnapshot()
             guard let data = bitmap.representation(using: .png, properties: [:]) else {
               throw ProviderError.message("Could not encode the authored explanation snapshot.")
@@ -245,14 +276,16 @@ enum ExplanationNarrationAcceptance {
               x: afterCapture.bodyCenter.x + 7.5, y: afterCapture.bodyCenter.y)
             let finalError = distance(currentTip, currentProjection.globalPoint)
             guard afterCapture.visible, afterCapture.ignoresMouseEvents, !afterCapture.canBecomeKey,
-              finalError <= 1
+              finalError <= 1, let nativeTip = submittedNativeCursorTip(),
+              distance(nativeTip, currentProjection.globalPoint) <= 1
             else {
               throw ProviderError.message(
                 "The cursor no longer points to the captured native focus surface.")
             }
             let surfaceID = try verifyNativeSurface(
               authority: authority, projection: currentProjection, canvas: canvas)
-            let afterCaptureCaptionGap = try verifyCaptionAttachment(snapshot: afterCapture)
+            let afterCaptureNativeError = distance(nativeTip, currentProjection.globalPoint)
+            let afterCaptureCaptionGap = try verifyCaptionAttachment()
             observation.focusArrivalStages.insert(stage)
             observation.focusSurfaceIDs[stage] = surfaceID
             observation.focusArrivalReceipts[stage] = [
@@ -263,6 +296,8 @@ enum ExplanationNarrationAcceptance {
               "renderSerial": currentProjection.renderSerial,
               "tipErrorLogicalPoints": error,
               "afterCaptureTipErrorLogicalPoints": finalError,
+              "nativeLayerTipErrorLogicalPoints": nativeError,
+              "afterCaptureNativeLayerTipErrorLogicalPoints": afterCaptureNativeError,
               "captionBodyGapLogicalPoints": captionGap,
               "afterCaptureCaptionBodyGapLogicalPoints": afterCaptureCaptionGap,
               "nativePoint": [
@@ -488,20 +523,27 @@ enum ExplanationNarrationAcceptance {
     }
   }
 
-  @MainActor private static func verifyCaptionAttachment(
-    snapshot: CursorCompanionSnapshot
-  ) throws -> Double {
+  @MainActor private static func submittedNativeCursorTip() -> CGPoint? {
     guard
       let window = NSApp.windows.first(where: {
         $0.isVisible && $0.identifier?.rawValue == "org.opencompanion.cursor"
       }), let view = window.contentView as? CursorCompanionView,
-      let local = view.visibleCaptionFrame, local.width > 0, local.height > 0
+      let local = view.submittedBodyTip
+    else { return nil }
+    let point = window.convertPoint(toScreen: view.convert(local, to: nil))
+    return point.x.isFinite && point.y.isFinite ? point : nil
+  }
+
+  @MainActor private static func verifyCaptionAttachment() throws -> Double {
+    guard
+      let window = NSApp.windows.first(where: {
+        $0.isVisible && $0.identifier?.rawValue == "org.opencompanion.cursor"
+      }), let view = window.contentView as? CursorCompanionView,
+      let local = view.visibleCaptionFrame, local.width > 0, local.height > 0,
+      let localBody = view.submittedBodyFrame
     else { throw ProviderError.message("The owned cursor has no visible native caption.") }
     let caption = window.convertToScreen(view.convert(local, to: nil))
-    let body = CGRect(
-      x: snapshot.bodyCenter.x - CursorCompanionLayout.bodySize.width / 2,
-      y: snapshot.bodyCenter.y - CursorCompanionLayout.bodySize.height / 2,
-      width: CursorCompanionLayout.bodySize.width, height: CursorCompanionLayout.bodySize.height)
+    let body = window.convertToScreen(view.convert(localBody, to: nil))
     let gap = hypot(
       max(0, caption.minX - body.maxX, body.minX - caption.maxX),
       max(0, caption.minY - body.maxY, body.minY - caption.maxY))
@@ -529,6 +571,8 @@ enum ExplanationNarrationAcceptance {
       "focusVisitStages": observation.focusVisitStages.sorted(),
       "focusArrivalStages": observation.focusArrivalStages.sorted(),
       "focusPointCounts": observation.focusPointCounts.mapKeysToStrings(),
+      "focusWaitTimeouts": Dictionary(
+        uniqueKeysWithValues: observation.focusWaitTimeouts.map { (String($0.key), $0.value) }),
       "focusArrivals": observation.focusArrivalReceipts.keys.sorted().compactMap {
         observation.focusArrivalReceipts[$0]
       },
@@ -567,6 +611,7 @@ enum ExplanationNarrationAcceptance {
     var ownCursorCaptureStages = Set<Int>()
     var cursorAboveExplanationStages = Set<Int>()
     var focusArrivalReceipts: [Int: [String: Any]] = [:]
+    var focusWaitTimeouts: [Int: [String: Any]] = [:]
     var staleFocusAfterStopRejected = false
     var canonicalTipAhead = false
     var failure: String?

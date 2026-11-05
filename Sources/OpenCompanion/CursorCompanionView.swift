@@ -58,6 +58,31 @@ struct CursorCaptionWord: Equatable, Sendable {
     return bubbleView.frame
   }
 
+  /// Submitted model-layer geometry in this flipped view. This includes the
+  /// body's actual position, anchor and rotation; it is not a scanout receipt.
+  var submittedBodyTip: CGPoint? {
+    guard let layer = visibleBodyOwner else { return nil }
+    let point = layer.convert(CursorCompanionGlyph.tip, from: bodyLayer)
+    return point.x.isFinite && point.y.isFinite ? point : nil
+  }
+
+  var submittedBodyFrame: CGRect? {
+    guard let layer = visibleBodyOwner else { return nil }
+    let frame = layer.convert(bodyLayer.bounds, from: bodyLayer)
+    guard frame.origin.x.isFinite, frame.origin.y.isFinite,
+      frame.width.isFinite, frame.height.isFinite, frame.width > 0, frame.height > 0
+    else { return nil }
+    return frame
+  }
+
+  private var visibleBodyOwner: CALayer? {
+    guard !isHiddenOrHasHiddenAncestor, alphaValue > 0,
+      let layer, !layer.isHidden, layer.opacity > 0,
+      bodyLayer.superlayer === layer, !bodyLayer.isHidden, bodyLayer.opacity > 0
+    else { return nil }
+    return layer
+  }
+
   /// `maxWidth` includes the bubble's horizontal insets. Empty status pills
   /// reserve room for the real-level meter or three work-in-progress dots.
   func measure(text: String, maxWidth: CGFloat = 300) -> CGSize {

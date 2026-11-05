@@ -1,8 +1,8 @@
 # HeyClicky public feature and parity checklist
 
-Public sources checked **4 November 2026** against official pages and creator-authored posts; separately labeled shared runtime observations were appended **5 November 2026**. This is a research inventory, not a claim that OpenCompanion implements the whole reference product. The public-research lane performed no reference app interaction, account change, remote-media download or product-source edit. The subsequent shared runtime check included one generic typed question, as documented below. No proprietary assets or source are included.
+Official changelog, homepage/pricing, latest Mac release, trust and privacy pages rechecked **5 November 2026**; creator-authored posts and other sources retain their separately stated **4 November** checks. Shared runtime observations and the user's **5 November** recording are labeled independently. This is a research inventory, not a claim that OpenCompanion implements the whole reference product. This refresh performed no reference app interaction, account change, remote-media download or product-source edit. No proprietary assets or source are included.
 
-The objective of broad product parity is substantially larger than the current screen-guidance slice. A passing synthetic target test proves neither a complete assistant nor a successful external task. Use the checklist below to choose and verify independent end-to-end flows.
+The objective of broad product parity is substantially larger than the current guidance and explanation slices. A passing target or scene test proves neither a complete assistant nor a successful external task. Use the checklist below to choose and verify independent end-to-end flows.
 
 ## Evidence rules
 
@@ -10,11 +10,14 @@ The objective of broad product parity is substantially larger than the current s
 |---|---|
 | **PUBLIC CLAIM** | An official page or creator says the capability exists. This is not an independent runtime test. |
 | **RECORDED VISUAL** | A previously streamed official recording contains the stated visible behavior at the recorded player time. Its build and editing are not independently established. |
+| **USER RECORDING** | A dated user-supplied recording was inspected locally. It establishes the stated visible sequence, not unrecorded input, acoustic timing or the reference's internal architecture. |
 | **CREATOR TRANSCRIPT** | The primary post exposes the creator's narration. The narration was read; that is distinct from watching and verifying the task. |
 | **LOCAL OBSERVATION** | A prior dated installed-app inspection observed a particular account/state. It does not establish every release or account. |
 | **PROPOSED ACCEPTANCE** | An authored OpenCompanion verification task. These rows describe work to do, not recovered HeyClicky implementation details. |
 
 Public release labels: **Mac 1.1.2 (2026-10-30); Windows 1.1.4 (2026-11-01)**. GitHub displays Mac 1.1.2 as **31 Oct, 02:13**, timezone unresolved. [Official changelog][changelog], [official Mac release][release]
+
+**5 November refresh:** no later release or newly dated feature entry was observed on the inspected official pages; GitHub's latest-release link still resolves to Mac 1.1.2. The workspace, language, browser-store distribution and automatic-update claims remain vendor claims, not new runtime acceptance. Existing Skills/Suggestions pauses remain the relevant historical boundary. [Official changelog][changelog], [latest Mac release][latest-release]
 
 The historical public repository explicitly says newer work became private in its 27 April 2026 update. Community ports and that historical code cannot prove current official behavior. [Creator repository][repository]
 
@@ -84,8 +87,9 @@ These observations were supplied by the shared native-UI inspection lane. They a
 | **LOCAL OBSERVATION — settings** | Shortcut settings, dictation's auto-detect control and Integrations were observed. | Visible controls do not establish shortcut delivery, successful dictation, connected-service authorization or completed integration tasks. No account identities, private history or dictionary contents are recorded here. |
 | **LOCAL OBSERVATION — generic answer** | A new generic water-cycle question completed a text answer. The invocation was typed; microphone input was not exercised. | Text completion does not independently verify the drawing, its contents, speech playback or task-wide latency. |
 | **USER REPORT — visual answer** | The user reported an additional diagram in a separate window/display surface. | Native CUA returned only a transparent host, so the diagram's pixels, location and composition were not independently inspected. Its visual output is **unknown, not absent**. Do not label this result text-only or infer that diagram generation failed. |
+| **USER RECORDING — motor explanation** | In the 5 November recording, no housing is visible at 17.400 s; a small housing appears at 17.600 s, followed by staged motor parts and anchored-looking label prefixes. The model persists after Speaking disappears by 46.750 s; hand-pointer/view changes at 51–58 s support an orbit interpretation. The visible control is **× Clear**, not Close. | No conventional paper/window chrome is visible, but actual alpha/window ownership is unproven on the uniform background. Input events, audible content and exact speech alignment were not established. Raw media and private background content remain outside the repository. [Detailed recording evidence and reconstruction boundary](EXPLANATION-OVERLAY.md). |
 
-No FPS, exact animation curve, speech/audio synchronization, acoustic latency or 3D interaction parity is established by this follow-up. The user-reported separate visual surface also needs to be located and observed before making a screenshot comparison or deciding whether OpenCompanion should use a matching presentation flow.
+The motor recording resolves the visible motor-presentation gap; it does not establish the contents of the separately reported water-cycle diagram. No FPS, exact animation curve, speech/audio synchronization, acoustic latency or complete 3D interaction parity is established by this follow-up.
 
 ## Proposed acceptance checklist for the whole parity goal
 
@@ -96,8 +100,8 @@ Every checkbox is intentionally **open**. The current implementation or a test u
 | **P0 — full guidance loop** · R01/R07/R15 | [ ] On unfamiliar public fixture apps, ask by speech and text, reveal a hidden destination, click the real intended control, capture the changed scene, then reach and verify the requested result. Include profile, settings, export, menus, keyboard/manual steps, slow loading and genuine ambiguity. | Thirteen authored-image provider cases cover target selection or clarification envelopes. Physical continuation and a general unfamiliar-app success rate remain separate. |
 | **P0 — input and permission continuity** · R01/R03 | [ ] Repeated physical hold/release, brief-tap cancellation, Stop, sleep/wake, revoked permissions and a signed upgrade preserve a correct observable status and never revive an old turn. | Input/generation code and targeted installed observations exist. Full audio-route and permission lifecycle coverage remains open. |
 | **P0 — no false task success** · R02/R07 | [ ] A visible click, a provider completion and a changed application result each receive separate evidence. Failed or ambiguous effects retain an unknown/failed outcome. | Guidance is advisory; explicit native actions and jobs are separate implementations. A target PNG is not a completed task. |
-| **P1 — conceptual explanation** · R20 | [ ] Explain two unfamiliar mechanisms with useful native diagrams, readable math/labels, locally smooth reveals and a follow-up that edits only the intended part. Answer a simple fact without opening a notebook. | Retained primitives and ownership tests exist; general composition, math layout and full speech/reveal integration need acceptance. |
-| **P1 — interactive objects** · R20 | [ ] Generate two materially different 3D explanations, orbit each, select a meaningful part, ask about it, change a parameter and export/reopen without losing meaning. | SceneKit primitives and playback controls do not establish arbitrary meaningful 3D lessons. |
+| **P1 — conceptual explanation** · R20 | [ ] Explain two unfamiliar mechanisms with useful native diagrams, readable math/labels, locally smooth reveals and a follow-up that edits only the intended part. Answer a simple fact without opening a notebook. | Corrected motor/molecule provider and bounded native visible-surface attachment checks pass. Independent label meaning, more held-out concepts including 2D, math layout, follow-up editing and full speech/reveal integration remain open. |
+| **P1 — interactive objects** · R20 | [ ] Generate two materially different 3D explanations, orbit each, select a meaningful part, ask about it, change a parameter and export/reopen without losing meaning. | Typed primitives, projected leaders and passive explanation presentation exist. The floating overlay cannot orbit; Notebook can. Physical part selection/follow-up and general meaningful-object accuracy are not established. |
 | **P1 — dictation** · R10/R21 | [ ] Dictate into public native, browser and Electron text fields; exercise hands-free mode, corrections, vocabulary, punctuation and mixed languages. Preserve the target field, never send a message implicitly, and keep terminal insertion nonexecuting. | Dictation is still a specified gap in the feature ledger; microphone-to-chat transcription is not focused-app dictation. |
 | **P1 — contextual drafting** · creator dictation demo | [ ] From an authored email/task screen, ask for a draft with an explicit destination; inspect the text before committing; keep user edits and make failed insertion visible. | Needs a complete focused-field insertion and review flow, not a clipboard-only or chat-only demo. |
 | **P1 — spatial input** · creator spatial demo | [ ] Circle one object among several public diagram parts, ask a deictic question, and verify the answer concerns that exact region. Test a scribble, cancelled stroke, replaced image and scaled/negative-origin display. | Region/stroke selection is implemented; installed capture-to-answer acceptance remains open. User-drawn context must not become an automatic desktop action. |
@@ -117,9 +121,15 @@ Every checkbox is intentionally **open**. The current implementation or a test u
 
 ## What the 333-test checkpoint actually proves
 
-[FEATURE-STATUS.md](FEATURE-STATUS.md) reports **333 Swift tests** (293 app, 15 store, 25 core), **29 Python installer/signing tests**, a signed app build and installed native checks. The latest real-provider authored-image run reports 13 passing cases: 11 target cases and two bounded clarification envelopes; seven image-only targets used native pixel conversion. Reported first valid target callbacks took 4.507–9.049 seconds, median 5.164, with the exact profile request at 4.507 seconds. These are existing project records, not rerun by this research pass.
+At the historical `cf443ec` checkpoint, [FEATURE-STATUS.md](FEATURE-STATUS.md) recorded **333 Swift tests** (293 app, 15 store, 25 core), **29 Python installer/signing tests**, a signed app build and installed native checks. That checkpoint's real-provider authored-image run reports 13 passing cases: 11 target cases and two bounded clarification envelopes; seven image-only targets used native pixel conversion. Reported first valid target callbacks took 4.507–9.049 seconds, median 5.164, with the exact profile request at 4.507 seconds. These are existing project records, not rerun by this research pass.
 
 The provider fixture supplies authored images/candidates and uses the real provider and native final-layer renderer. It bypasses capture permissions, actual AX harvest, foreground preparation, AppModel admission, displayed animation, physical input and notebook mutation. Its clarification and instruction meanings are not automatically judged. One sweep is not a latency distribution or reliability claim. [Guidance evidence and limits](CURSOR-UI.md)
+
+## Current 457-test checkpoint: additional, bounded evidence
+
+[FEATURE-STATUS.md](FEATURE-STATUS.md) now records **457 Swift tests** (395 app, 21 store, 41 core), a signed build and installed native acceptance on modified source; clean committed-source build/installation remains forthcoming. Public-prompt Terra lessons passed typed admission, progressive new-part checks and fixture-specific world-geometry checks. Four final own-view runs checked all 20 leaders across earlier/fresh motor and molecule documents against independent full-scene closest visible target/descendant triangles before and after camera movement, preserving canonical hints. Complete labels, zero overlap, local native clocks, alpha pixels, foreground and Clear teardown passed; the corrected housing dot was visually inspected. These native checks did not call the provider, capture the desktop, use audio or physically orbit/click Clear. [Explanation checkpoint](EXPLANATION-OVERLAY.md)
+
+The host's bounded surface resolution fixes the specific housing-cavity attachment defect while retaining the requested hint, but does not prove that a model chose the correct semantic target or explanation. The latest Terra timing run took approximately **20–30 seconds** to first accepted geometry, with less than one second of measured setup; very low answer latency remains unmet. A process-only Luna comparison failed one of two lessons, so the Terra default is unchanged. Local label-settlement intervals must not substitute for provider or acoustic latency. Direct floating orbit, speech alignment and broader concept/follow-up coverage remain open. No whole-feature checkbox closes on this checkpoint; the 333-test header above remains historical.
 
 The next meaningful quality gain is to close the first three P0 rows with physical, trace-correlated workflows and then finish complete explanation, dictation and worker slices. Adding more isolated primitives or sample screenshots cannot close the remaining rows by itself.
 
@@ -134,10 +144,10 @@ The next meaningful quality gain is to close the first three P0 rows with physic
 
 ## Primary source directory
 
-- [Homepage and current pricing][home] — checked 4 Nov 2026.
-- [Official changelog][changelog] — checked 4 Nov 2026; version/date labels above.
-- [Official Mac release][release] and [release list][releases] — checked 4 Nov 2026.
-- [Trust][trust] and [privacy policy][privacy] — checked 4 Nov 2026; no explicit policy effective date established here.
+- [Homepage and current pricing][home] — rechecked 5 Nov 2026.
+- [Official changelog][changelog] — rechecked 5 Nov 2026; no later entry observed, version/date labels above.
+- [Official Mac release][release] and [latest-release redirect][latest-release] — rechecked 5 Nov 2026; [release list][releases] last checked 4 Nov 2026.
+- [Trust][trust] and [privacy policy][privacy] — rechecked 5 Nov 2026; no explicit policy effective date established here.
 - [Creator's historical repository][repository] — checked 4 Nov 2026; private-development notice dated 27 Apr 2026.
 - [Creator spatial-context post][spatial-post], [dictation post][dictation-post], [collaborators post][collaborators-post], [agents post][agents-post] — checked 4 Nov 2026; relative ages only, exact publication dates not established.
 - [Official About timeline][about], [Mac installation page][mac], [Windows installation page][windows] — checked 4 Nov 2026.
@@ -146,6 +156,7 @@ The next meaningful quality gain is to close the first three P0 rows with physic
 [home]: https://www.heyclicky.com/
 [changelog]: https://www.heyclicky.com/changelog
 [release]: https://github.com/farzaa/clicky-releases/releases/tag/v1.1.2
+[latest-release]: https://github.com/farzaa/clicky-releases/releases/latest
 [releases]: https://github.com/farzaa/clicky-releases/releases
 [repository]: https://github.com/farzaa/clicky
 [trust]: https://www.heyclicky.com/trust

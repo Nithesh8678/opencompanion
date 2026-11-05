@@ -473,6 +473,63 @@ import Testing
     #expect(await receiver.text.isEmpty)
   }
 
+  @Test func timingsSeparateHandshakeFromAcceptedContentAndContainNoRequestData() async throws {
+    let fixture = try makeFixture(completeTurn: true)
+    defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+    let receiver = TransportTimingReceiver()
+    let provider = CodexProvider()
+    let timeout = Task {
+      try await Task.sleep(for: .seconds(5))
+      await provider.stop()
+    }
+    defer { timeout.cancel() }
+    try await provider.stream(
+      executable: fixture.path, model: "fixture-default",
+      messages: [.init(role: "user", text: "PUBLIC_TIMING_CONTENT_CANARY")],
+      context: "PUBLIC_CONTEXT_CANARY", image: nil, scene: nil,
+      onTiming: { await receiver.append($0) }, onUnit: { _ in },
+      responsePolicy: .init(route: .conversation, includesExistingNotebook: false))
+    let events = await receiver.events
+    #expect(
+      events.map(\.stage) == [
+        .requestStarted, .sessionStarted, .initialized, .accountVerified, .routingSelected,
+        .configurationReady, .threadReady, .turnSubmitted, .turnAccepted,
+        .firstTextDelta, .firstUnitAccepted, .responseCompleted,
+      ])
+    #expect(events.first?.elapsedMS == 0)
+    #expect(events.allSatisfy { $0.elapsedMS.isFinite && $0.elapsedMS >= 0 })
+    #expect(zip(events, events.dropFirst()).allSatisfy { $0.elapsedMS <= $1.elapsedMS })
+    let data = try JSONEncoder().encode(events)
+    let rows = try #require(JSONSerialization.jsonObject(with: data) as? [[String: Any]])
+    #expect(rows.allSatisfy { Set($0.keys) == ["stage", "elapsedMS"] })
+    #expect(!String(decoding: data, as: UTF8.self).contains("CANARY"))
+  }
+
+  @Test func rejectedUnitsDoNotReportAcceptanceOrResponseCompletion() async throws {
+    let fixture = try makeFixture(completeTurn: true)
+    defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+    let receiver = TransportTimingReceiver()
+    let provider = CodexProvider()
+    let timeout = Task {
+      try await Task.sleep(for: .seconds(5))
+      await provider.stop()
+    }
+    defer { timeout.cancel() }
+    do {
+      try await provider.stream(
+        executable: fixture.path, model: "fixture-default",
+        messages: [.init(role: "user", text: "Public rejected-unit fixture")],
+        context: "", image: nil, scene: nil, onTiming: { await receiver.append($0) },
+        onUnit: { _ in throw ProviderError.message("Public fixture rejected the decoded unit.") },
+        responsePolicy: .init(route: .conversation, includesExistingNotebook: false))
+      Issue.record("Rejected content unexpectedly completed")
+    } catch {}
+    let stages = await receiver.events.map(\.stage)
+    #expect(stages.contains(.firstTextDelta))
+    #expect(!stages.contains(.firstUnitAccepted))
+    #expect(!stages.contains(.responseCompleted))
+  }
+
   private func makeFixture(
     completeTurn: Bool, selectedModel: String = "fixture-default",
     supportedEfforts: [String]? = ["medium", "low"], catalogIncludesSelected: Bool = true,
@@ -575,4 +632,9 @@ private actor TransportUnitReceiver {
 private actor TransportRoutingReceiver {
   var selections: [CodexRoutingSelection] = []
   func append(_ selection: CodexRoutingSelection) { selections.append(selection) }
+}
+
+private actor TransportTimingReceiver {
+  var events: [CodexTimingEvent] = []
+  func append(_ value: CodexTimingEvent) { events.append(value) }
 }

@@ -74,6 +74,7 @@ actor CodexProvider {
     scene: SceneDocument?,
     guidanceModel: GuidanceModelPreference = .terra,
     onRouting: (@Sendable (CodexRoutingSelection) async -> Void)? = nil,
+    onTiming: (@Sendable (CodexTimingEvent) async -> Void)? = nil,
     onUnit: @escaping @Sendable (ProviderUnit) async throws -> Void,
     onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil,
     responsePolicy: ResponsePolicy? = nil
@@ -87,6 +88,7 @@ actor CodexProvider {
       throw ProviderError.message(
         "A Codex request is already active. Stop it before starting another.")
     }
+    let timing = CodexTimingReporter(onEvent: onTiming)
     let session = try CodexRPCSession(executable: executable)
     activeSession = session
     defer {
@@ -94,10 +96,13 @@ actor CodexProvider {
       activeSession = nil
     }
     try await withTaskCancellationHandler {
+      await timing.mark(.requestStarted)
+      await timing.mark(.sessionStarted)
       var iterator = session.messages.makeAsyncIterator()
       try session.send(method: "initialize", id: 1, params: Self.clientInfo)
       _ = try await Self.response(id: 1, iterator: &iterator)
       try session.send(method: "initialized", params: .object([:]))
+      await timing.mark(.initialized)
       try session.send(
         method: "account/read", id: 2, params: .object(["refreshToken": .bool(false)]))
       let account = try await Self.response(id: 2, iterator: &iterator)
@@ -105,6 +110,7 @@ actor CodexProvider {
         throw ProviderError.message(
           "Sign in to the Codex CLI with ChatGPT before using subscription mode.")
       }
+      await timing.mark(.accountVerified)
       var catalogModels: [CodexRoutingModel] = []
       if model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         || requestPolicy.route == .screenGuidance || requestPolicy.route == .notebook
@@ -119,6 +125,7 @@ actor CodexProvider {
         configuredModel: model, policy: requestPolicy, preference: guidanceModel,
         catalog: catalogModels)
       let selectedModel = routing.model
+      await timing.mark(.routingSelected)
       try Task.checkCancellation()
       if let onRouting { await onRouting(routing) }
       try Task.checkCancellation()
@@ -148,6 +155,7 @@ actor CodexProvider {
         ]),
         "apps": .object(["_default": .object(["enabled": .bool(false)])]),
       ])
+      await timing.mark(.configurationReady)
       try session.send(
         method: "thread/start", id: 4,
         params: .object([
@@ -167,6 +175,7 @@ actor CodexProvider {
       guard let threadID = started["thread"]?["id"]?.string else {
         throw ProviderError.message("Codex did not create a teaching thread.")
       }
+      await timing.mark(.threadReady)
       var text = "Conversation (data):\n"
       for message in messages.suffix(16) {
         text += "\n\(message.role): \(message.text.prefix(18_000))\n"
@@ -197,6 +206,14 @@ actor CodexProvider {
       ]
       if let effort = routing.effort { turnParams["effort"] = .string(effort) }
       try session.send(method: "turn/start", id: 5, params: .object(turnParams))
+      await timing.mark(.turnSubmitted)
+      let deliverUnit: @Sendable (ProviderUnit) async throws -> Void = { unit in
+        try Task.checkCancellation()
+        try await onUnit(unit)
+        try Task.checkCancellation()
+        await timing.mark(.firstUnitAccepted)
+        if unit.type == "scene" { await timing.mark(.firstSceneAccepted) }
+      }
       var decoder = ProviderTextStreamDecoder()
       var totalBytes = 0
       var sawCompleted = false
@@ -208,6 +225,7 @@ actor CodexProvider {
         }
         if message["id"]?.integer == 5, let turnID = message["result"]?["turn"]?["id"]?.string {
           session.setTurn(threadID: threadID, turnID: turnID)
+          await timing.mark(.turnAccepted)
         }
         guard let method = message["method"]?.string else { continue }
         let params = message["params"]
@@ -226,11 +244,12 @@ actor CodexProvider {
             "Codex attempted a tool call outside the teaching response scope.")
         }
         if method == "item/agentMessage/delta", let delta = params?["delta"]?.string {
+          if !delta.isEmpty { await timing.mark(.firstTextDelta) }
           totalBytes += delta.utf8.count
           guard totalBytes <= 2_000_000 else {
             throw ProviderError.message("Codex output exceeded the bounded response budget.")
           }
-          try await decoder.append(delta, onUnit: onUnit, onText: onText)
+          try await decoder.append(delta, onUnit: deliverUnit, onText: onText)
         }
         if method == "turn/completed" {
           guard params?["turn"]?["status"]?.string == "completed" else {
@@ -242,10 +261,12 @@ actor CodexProvider {
           break
         }
       }
-      try await decoder.finish(onUnit: onUnit, onText: onText)
+      try await decoder.finish(onUnit: deliverUnit, onText: onText)
       guard sawCompleted, decoder.acceptedUnits > 0 else {
         throw ProviderError.message("Codex ended before a complete teaching response was accepted.")
       }
+      try Task.checkCancellation()
+      await timing.mark(.responseCompleted)
     } onCancel: {
       session.close()
     }

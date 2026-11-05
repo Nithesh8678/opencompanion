@@ -137,6 +137,12 @@ struct SceneCanvas: NSViewRepresentable {
   private var spatialGeometryKeys: [String: Geometry3D] = [:]
   private var materialKeys: [String: String] = [:]
   private var spatialPoses: [String: ScenePose3D] = [:]
+  private let attachmentResolver = SpatialLabelAttachmentResolver()
+  private var attachmentWorkEnabled = true
+  private(set) var projectedLabelAttachments: [String: SpatialLabelAttachment] = [:]
+  var labelAttachmentDiagnostics: SpatialLabelAttachmentDiagnostics {
+    attachmentResolver.diagnostics
+  }
   private var cameraFitKeys: [CameraFitKey] = []
   private var cameraFitDocumentID: String?
   private var cameraFitSize: CGSize = .zero
@@ -328,8 +334,9 @@ struct SceneCanvas: NSViewRepresentable {
     if reduceMotion, labelReveal.hasRevealableText {
       advanceSpatialLabels(by: 0, reduceMotion: true)
     }
-    guard nativePlaying || labelReveal.hasRevealableText,
-      let window, window.isVisible, !isHiddenOrHasHiddenAncestor, !reduceMotion
+    guard nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork,
+      let window, window.isVisible, !isHiddenOrHasHiddenAncestor,
+      !reduceMotion || attachmentResolver.hasPendingWork
     else {
       nativeDisplayLink?.isPaused = true
       lastDisplayTime = nil
@@ -357,6 +364,9 @@ struct SceneCanvas: NSViewRepresentable {
     displayStopCount = min(1_000_000, displayStopCount + 1)
     lastDisplayTime = nil
     labelReveal.reset()
+    attachmentResolver.reset()
+    attachmentWorkEnabled = false
+    projectedLabelAttachments.removeAll(keepingCapacity: true)
     stage?.isPlaying = false
   }
   @objc private func displayFrame(_ sender: CADisplayLink) {
@@ -364,9 +374,9 @@ struct SceneCanvas: NSViewRepresentable {
     displayCallbackCount = min(1_000_000, displayCallbackCount + 1)
     lastObservedDisplayCallback = now
     guard sender === nativeDisplayLink else { return }
-    guard nativePlaying || labelReveal.hasRevealableText,
+    guard nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork,
       !isHiddenOrHasHiddenAncestor, window?.isVisible == true,
-      !shouldReduceMotion
+      !shouldReduceMotion || attachmentResolver.hasPendingWork
     else {
       sender.isPaused = true
       lastDisplayTime = nil
@@ -376,12 +386,12 @@ struct SceneCanvas: NSViewRepresentable {
     let delta = max(0, now - (lastDisplayTime ?? now))
     lastDisplayTime = now
     displayAccumulatedDelta = min(1_000_000, displayAccumulatedDelta + delta)
-    let labelChanged = labelReveal.advance(by: delta)
+    let labelChanged = labelReveal.advance(by: delta, reduceMotion: shouldReduceMotion)
     if labelChanged { displayLabelAdvanceCount = min(1_000_000, displayLabelAdvanceCount + 1) }
-    if nativePlaying, let time = try? clock?.value(at: now) {
+    if nativePlaying, !shouldReduceMotion, let time = try? clock?.value(at: now) {
       currentTime = time
       render(document, time: time, selectedID: selection)
-    } else if labelChanged {
+    } else if labelChanged || attachmentResolver.hasPendingWork {
       updateProjectedLabels()
     }
     updateDisplayLink()
@@ -409,11 +419,13 @@ struct SceneCanvas: NSViewRepresentable {
       }
     }
     updateProjectedLabels()
+    updateDisplayLink()
   }
   func render(
     _ document: SceneDocument, time: Double, selectedID: String?,
     presentationGeneration: UInt64? = nil
   ) {
+    attachmentWorkEnabled = true
     displayRenderCount = min(1_000_000, displayRenderCount + 1)
     let documentChanged = self.document != document
     self.document = document
@@ -889,7 +901,21 @@ struct SceneCanvas: NSViewRepresentable {
   /// Project each retained label's actual world anchor through the current
   /// camera. No screen-fixed approximation is used for orbiting geometry.
   private func updateProjectedLabels() {
-    guard let stage else { return }
+    guard attachmentWorkEnabled else { return }
+    guard let stage else {
+      attachmentResolver.reset()
+      projectedLabelAttachments.removeAll(keepingCapacity: true)
+      return
+    }
+    var opacity = Dictionary(uniqueKeysWithValues: poses.map { ($0.node.id, $0.effectiveOpacity) })
+    for (id, pose) in spatialPoses { opacity[id] = pose.effectiveOpacity }
+    let requests = poses.compactMap { pose -> SpatialLabelAttachmentResolver.Request? in
+      guard let anchor = pose.node.spatial3D?.labelAnchor else { return nil }
+      return .init(labelID: pose.node.id, anchor: anchor)
+    }
+    projectedLabelAttachments = attachmentResolver.resolve(
+      requests, documentID: document.id, generation: labelGeneration, stage: stage,
+      nodes: meshNodes, geometries: spatialGeometryKeys, effectiveOpacities: opacity)
     var visible: [(SceneNode, LabelAnchor3D, CATextLayer, CGPoint)] = []
     var items: [SpatialLabelLayout.Item] = []
     CATransaction.begin()
@@ -919,7 +945,9 @@ struct SceneCanvas: NSViewRepresentable {
         leaderLayers[source.id]?.isHidden = true
         continue
       }
-      let world = target.transform.applying(to: anchor.point)
+      let world =
+        projectedLabelAttachments[source.id]?.resolvedWorld
+        ?? target.transform.applying(to: anchor.point)
       let projected = stage.projectPoint(SCNVector3(Float(world.x), Float(world.y), Float(world.z)))
       guard projected.x.isFinite, projected.y.isFinite, projected.z.isFinite,
         projected.z >= 0, projected.z <= 1,
@@ -967,7 +995,7 @@ struct SceneCanvas: NSViewRepresentable {
         leaderLayers[source.id] = leader
         spatialLabels.addSublayer(leader)
       }
-      leader.isHidden = !anchor.leader
+      leader.isHidden = !anchor.leader || projectedLabelAttachments[source.id]?.isResolved != true
       leader.fillColor = NSColor(sceneHex: source.color).cgColor
       leader.strokeColor = NSColor(sceneHex: source.color).cgColor
       leader.lineWidth = 1.2 / ratio
@@ -1040,6 +1068,7 @@ struct SceneCanvas: NSViewRepresentable {
   func updateCameraProjection() {
     SCNTransaction.flush()
     updateProjectedLabels()
+    updateDisplayLink()
   }
 
   func projectedLeaderPath(id: String) -> CGPath? {
@@ -1048,7 +1077,15 @@ struct SceneCanvas: NSViewRepresentable {
   }
 
   var hasPendingSpatialLabels: Bool { labelReveal.hasRevealableText }
-  var needsDisplayClock: Bool { nativePlaying || labelReveal.hasRevealableText }
+  var needsDisplayClock: Bool {
+    nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork
+  }
+  var hasPendingLabelAttachments: Bool { attachmentResolver.hasPendingWork }
+  func resolvePendingLabelAttachments() {
+    guard attachmentResolver.hasPendingWork else { return }
+    updateProjectedLabels()
+    updateDisplayLink()
+  }
   var isDisplayClockRunning: Bool { nativeDisplayLink?.isPaused == false }
   var displayClockDiagnostics: CanvasDisplayClockDiagnostics {
     let frames = projectedLabelFrames

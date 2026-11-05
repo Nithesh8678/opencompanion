@@ -48,6 +48,7 @@ enum SpatialSceneLiveAcceptance {
           executable: executable, model: model,
           messages: [.init(role: "user", text: fixture.prompt)], context: "", image: nil,
           scene: nil, onRouting: { await collector.route($0) },
+          onTiming: { await collector.timing($0) },
           onUnit: { try await collector.receive($0) }, responsePolicy: policy)
       } catch {
         failure = error.localizedDescription
@@ -91,6 +92,9 @@ enum SpatialSceneLiveAcceptance {
         "firstSceneUnitMS": snapshot.firstSceneMS ?? -1,
         "firstTypedGeometryMS": snapshot.firstTypedMS ?? -1,
         "providerFinishedMS": providerFinishedMS, "providerCompletedSuccessfully": failure == nil,
+        "providerTimingEvents": snapshot.timings.map {
+          ["stage": $0.stage.rawValue, "elapsedMS": $0.elapsedMS] as [String: Any]
+        },
         "desktopCaptured": false, "microphoneUsed": false,
         "nativeRenderVerified": false, "acousticTimingVerified": false,
         "physicalAccuracyVerified": false,
@@ -386,6 +390,7 @@ struct SpatialSceneAcceptanceSnapshot: Sendable {
   let firstSceneMS: Double?
   let firstTypedMS: Double?
   let routing: CodexRoutingSelection?
+  let timings: [CodexTimingEvent]
 }
 
 actor SpatialSceneAcceptanceCollector {
@@ -397,10 +402,15 @@ actor SpatialSceneAcceptanceCollector {
   private var firstSceneMS: Double?
   private var firstTypedMS: Double?
   private var routing: CodexRoutingSelection?
+  private var timings: [CodexTimingEvent] = []
   private let started: TimeInterval
 
   init(started: TimeInterval) { self.started = started }
   func route(_ value: CodexRoutingSelection) { routing = value }
+  func timing(_ event: CodexTimingEvent) {
+    guard timings.count < CodexTimingEvent.Stage.allCases.count else { return }
+    timings.append(event)
+  }
   func receive(_ unit: ProviderUnit) throws {
     try Task.checkCancellation()
     switch unit.type {
@@ -436,6 +446,6 @@ actor SpatialSceneAcceptanceCollector {
     .init(
       document: document, textUnits: textUnits, sceneUnits: sceneUnits,
       progressiveGeometryUnits: progressiveGeometryUnits,
-      firstSceneMS: firstSceneMS, firstTypedMS: firstTypedMS, routing: routing)
+      firstSceneMS: firstSceneMS, firstTypedMS: firstTypedMS, routing: routing, timings: timings)
   }
 }

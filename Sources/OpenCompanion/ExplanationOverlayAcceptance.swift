@@ -86,11 +86,12 @@ import SceneKit
     // A synchronous diagnostic snapshot cannot deliver MainActor callbacks;
     // measure that cost separately from the bounded asynchronous settle wait.
     let settleWaitStarted = ProcessInfo.processInfo.systemUptime
-    while canvas.hasPendingSpatialLabels {
+    while canvas.hasPendingSpatialLabels || canvas.hasPendingLabelAttachments {
       try Task.checkCancellation()
       guard ProcessInfo.processInfo.systemUptime - settleWaitStarted < 12 else {
         try saveClockDiagnostics("timeout")
-        throw ProviderError.message("The native label reveal failed to settle within 12 seconds.")
+        throw ProviderError.message(
+          "The native label reveal or surface attachment failed to settle within 12 seconds.")
       }
       try await Task.sleep(for: .milliseconds(20))
     }
@@ -101,6 +102,10 @@ import SceneKit
       throw ProviderError.message("A paused explanation kept its settled label clock running.")
     }
     let labelClockSettledMS = (ProcessInfo.processInfo.systemUptime - labelClockStarted) * 1_000
+    let stage = try require(canvas.spatialStage, "No native SceneKit stage was mounted.")
+    let originalLeaderStarts = try verifyLeaderAttachments(
+      document: document, currentDocument: model.scene, canvas: canvas, stage: stage,
+      phase: "initial", output: output)
     let targetOpacity = Dictionary(
       uniqueKeysWithValues: try document.spatialWorldPoses(at: 0).map {
         ($0.node.id, $0.effectiveOpacity)
@@ -131,13 +136,9 @@ import SceneKit
       }
     }
     let label = try require(
-      document.nodes.first(where: {
-        $0.spatial3D?.labelAnchor?.leader == true
-          && canvas.projectedLeaderPath(id: $0.id) != nil
-          && canvas.projectedLabelFrame(id: $0.id) != nil
-      }), "No leader-enabled label was visible in the native viewport.")
+      document.nodes.first(where: { $0.spatial3D?.labelAnchor?.leader == true }),
+      "No leader-enabled label was requested in the native viewport.")
     let initial = try requireFrame(canvas.projectedLabelFrame(id: label.id))
-    let stage = try require(canvas.spatialStage, "No native SceneKit stage was mounted.")
     let meshSnapshot = try require(
       stage.snapshot().tiffRepresentation.flatMap(NSBitmapImageRep.init(data:)),
       "Native SceneKit did not produce a snapshot.")
@@ -171,42 +172,31 @@ import SceneKit
       )
     }
     let camera = try require(stage.pointOfView, "The native stage has no camera.")
-    let originalLeaderStarts = Dictionary(
-      uniqueKeysWithValues: document.nodes.compactMap { node -> (String, CGPoint)? in
-        guard node.spatial3D?.labelAnchor?.leader == true,
-          let path = canvas.projectedLeaderPath(id: node.id), let point = pathStart(path)
-        else { return nil }
-        return (node.id, point)
-      })
     let before = camera.position
     camera.position = SCNVector3(before.x + 1.5, before.y + 0.7, before.z)
     camera.look(at: stage.defaultCameraController.target)
     canvas.updateCameraProjection()
-    var movedLeaderCount = 0
-    var verifiedLeaderCount = 0
-    for node in document.nodes {
-      guard let anchor = node.spatial3D?.labelAnchor, anchor.leader,
-        let old = originalLeaderStarts[node.id],
-        let path = canvas.projectedLeaderPath(id: node.id), let point = pathStart(path),
-        let target = canvas.spatialNode(id: anchor.targetID)
-      else { continue }
-      // Packed text may remain in a stable slot. Its leader must still start at
-      // the actual target-local point projected by the native scene/camera.
-      let world = target.convertPosition(
-        SCNVector3(Float(anchor.point.x), Float(anchor.point.y), Float(anchor.point.z)), to: nil)
-      let projected = stage.projectPoint(world)
-      let expected = stage.convert(
-        CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y)), to: canvas)
-      let actual = canvas.canvasFrame(
-        forDocumentRect: CGRect(origin: point, size: .zero)
-      ).origin
-      guard hypot(expected.x - actual.x, expected.y - actual.y) <= 0.5 else {
+    let cameraSurfaceWaitStarted = ProcessInfo.processInfo.systemUptime
+    while canvas.hasPendingLabelAttachments {
+      try Task.checkCancellation()
+      guard ProcessInfo.processInfo.systemUptime - cameraSurfaceWaitStarted < 4 else {
         throw ProviderError.message(
-          "A leader lost its actual native part anchor after camera motion.")
+          "Surface attachments did not settle after native camera motion.")
       }
-      verifiedLeaderCount += 1
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    let cameraSurfaceSettleWaitMS =
+      (ProcessInfo.processInfo.systemUptime - cameraSurfaceWaitStarted) * 1_000
+    let movedLeaderStarts = try verifyLeaderAttachments(
+      document: document, currentDocument: model.scene, canvas: canvas, stage: stage,
+      phase: "after-camera", output: output)
+    var movedLeaderCount = 0
+    for (id, old) in originalLeaderStarts {
+      let point = try require(
+        movedLeaderStarts[id], "A requested leader disappeared after native camera motion.")
       if hypot(old.x - point.x, old.y - point.y) > 0.05 { movedLeaderCount += 1 }
     }
+    let verifiedLeaderCount = movedLeaderStarts.count
     guard verifiedLeaderCount > 0, movedLeaderCount > 0 else {
       throw ProviderError.message(
         "No visible leader followed the changed native camera projection.")
@@ -264,7 +254,13 @@ import SceneKit
       "nativeLabelsSettledWithScenePaused": true,
       "manualLabelClockAdvanceUsed": false,
       "cameraProjectionProgrammaticallyChanged": true, "physicalOrbitTested": false,
+      "cameraSurfaceSettleWaitMS": cameraSurfaceSettleWaitMS,
       "nativeLeaderAnchorsVerifiedAfterCameraMotion": verifiedLeaderCount,
+      "nativeLeaderSurfacesVerifiedBeforeCameraMotion": originalLeaderStarts.count,
+      "allRequestedLeadersResolved": true,
+      "canonicalRequestedAnchorsUnchanged": true,
+      "wholeSceneClosestTriangleOwnershipVerified": true,
+      "surfaceAttachmentReceipts": ["attachments-initial.json", "attachments-after-camera.json"],
       "movedLeaderAnchorCount": movedLeaderCount, "movedLabelFrameCount": movedLabelFrames,
       "staleClearIgnored": true, "retainedSceneAfterClear": true,
       "renewedWindowsHiddenAndUnmountedAfterClear": true,
@@ -275,6 +271,218 @@ import SceneKit
     ]
     try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
       .write(to: output.appendingPathComponent("explanation-acceptance.json"))
+  }
+
+  private struct AttachmentCheck: Encodable {
+    let labelID: String
+    let targetID: String
+    let attachment: SpatialLabelAttachment?
+    var errors: [String] = []
+    var isResolved = false
+    var canonicalRequestedPointPreserved = false
+    var leaderStartDocument: Point2D?
+    var leaderStartCanvas: Point2D?
+    var resolvedProjectionCanvas: Point2D?
+    var endpointCanvasError: Double?
+    var closestHitSurfaceNodeID: String?
+    var closestHitWorld: Vector3D?
+    var closestHitFaceIndex: Int?
+    var surfaceWorldError: Double?
+    var wholeSceneClosestTriangleVerified = false
+  }
+
+  private struct AttachmentPhaseReceipt: Encodable {
+    let phase: String
+    let canonicalSceneUnchanged: Bool
+    let requestedLeaderCount: Int
+    let verifiedLeaderCount: Int
+    let diagnostics: SpatialLabelAttachmentDiagnostics
+    let attachments: [AttachmentCheck]
+  }
+
+  /// This acceptance oracle does its own whole-scene triangle query. Merely
+  /// projecting either the requested point or a target-only intersection would
+  /// allow a leader to point through a cavity or through an occluding part.
+  private static func verifyLeaderAttachments(
+    document: SceneDocument, currentDocument: SceneDocument?, canvas: RetainedCanvasView,
+    stage: SCNView, phase: String, output: URL
+  ) throws -> [String: CGPoint] {
+    let requested = document.nodes.filter { $0.spatial3D?.labelAnchor?.leader == true }
+    guard !requested.isEmpty, requested.count <= 128 else {
+      throw ProviderError.message("The requested leader count exceeds the native acceptance bound.")
+    }
+    var checks: [AttachmentCheck] = []
+    var starts: [String: CGPoint] = [:]
+    for node in requested {
+      try Task.checkCancellation()
+      let check = checkLeaderAttachment(
+        node: node, document: document, canvas: canvas, stage: stage)
+      checks.append(check)
+      if check.errors.isEmpty, let start = check.leaderStartDocument {
+        starts[node.id] = CGPoint(x: start.x, y: start.y)
+      }
+    }
+    let canonicalSceneUnchanged = currentDocument == document
+    let receipt = AttachmentPhaseReceipt(
+      phase: phase, canonicalSceneUnchanged: canonicalSceneUnchanged,
+      requestedLeaderCount: requested.count, verifiedLeaderCount: starts.count,
+      diagnostics: canvas.labelAttachmentDiagnostics, attachments: checks)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    let bytes = try encoder.encode(receipt)
+    guard bytes.count <= 1_000_000 else {
+      throw ProviderError.message("The native attachment receipt exceeds its diagnostic bound.")
+    }
+    try bytes.write(
+      to: output.appendingPathComponent("attachments-\(phase).json"), options: .atomic)
+    guard canonicalSceneUnchanged, starts.count == requested.count else {
+      throw ProviderError.message(
+        "A requested leader lacks a preserved canonical anchor or a visible target surface; see attachments-\(phase).json."
+      )
+    }
+    return starts
+  }
+
+  private static func checkLeaderAttachment(
+    node: SceneNode, document: SceneDocument, canvas: RetainedCanvasView, stage: SCNView
+  ) -> AttachmentCheck {
+    guard let anchor = node.spatial3D?.labelAnchor else {
+      return AttachmentCheck(
+        labelID: node.id, targetID: "", attachment: nil, errors: ["missingAnchor"])
+    }
+    let attachment = canvas.projectedLabelAttachments[node.id]
+    var check = AttachmentCheck(labelID: node.id, targetID: anchor.targetID, attachment: attachment)
+    guard let attachment else {
+      check.errors.append("missingAttachment")
+      return check
+    }
+    check.isResolved = attachment.isResolved
+    check.canonicalRequestedPointPreserved = attachment.requestedLocal == anchor.point
+    if !check.canonicalRequestedPointPreserved {
+      check.errors.append("canonicalRequestedPointChanged")
+    }
+    if attachment.labelID != node.id || attachment.targetID != anchor.targetID {
+      check.errors.append("attachmentIdentityMismatch")
+    }
+    guard attachment.isResolved,
+      attachment.status == .requestedProjection || attachment.status == .surfaceSearch,
+      let world = attachment.resolvedWorld, world.isFinite,
+      let requestedWorld = attachment.requestedWorld, requestedWorld.isFinite,
+      let targetLocal = attachment.resolvedTargetLocal, targetLocal.isFinite,
+      let geometryLocal = attachment.resolvedGeometryLocal, geometryLocal.isFinite,
+      let surfaceID = attachment.surfaceNodeID,
+      let target = canvas.spatialNode(id: anchor.targetID),
+      let surface = canvas.spatialNode(id: surfaceID), surface.geometry != nil
+    else {
+      check.errors.append("unresolvedOrMissingSurface")
+      return check
+    }
+    if !belongs(surface, to: target) { check.errors.append("surfaceOutsideRequestedTarget") }
+    let tolerance = worldTolerance(world)
+    let expectedRequested = vector(target.convertPosition(native(anchor.point), to: nil))
+    if !expectedRequested.isFinite
+      || distance(expectedRequested, requestedWorld) > worldTolerance(expectedRequested)
+    {
+      check.errors.append("requestedWorldDoesNotMatchCanonicalPoint")
+    }
+    let targetWorld = vector(target.convertPosition(native(targetLocal), to: nil))
+    let geometryWorld = vector(surface.convertPosition(native(geometryLocal), to: nil))
+    if !targetWorld.isFinite || !geometryWorld.isFinite
+      || distance(targetWorld, world) > tolerance || distance(geometryWorld, world) > tolerance
+    {
+      check.errors.append("resolvedLocalAndWorldCoordinatesDisagree")
+    }
+    guard let path = canvas.projectedLeaderPath(id: node.id), let start = pathStart(path),
+      start.x.isFinite, start.y.isFinite,
+      canvas.projectedLabelFrame(id: node.id) != nil
+    else {
+      check.errors.append("missingVisibleLeaderOrLabel")
+      return check
+    }
+    check.leaderStartDocument = .init(x: start.x, y: start.y)
+    let actual = canvas.canvasFrame(forDocumentRect: CGRect(origin: start, size: .zero)).origin
+    guard actual.x.isFinite, actual.y.isFinite else {
+      check.errors.append("nonfiniteLeaderEndpoint")
+      return check
+    }
+    check.leaderStartCanvas = .init(x: actual.x, y: actual.y)
+    let projected = stage.projectPoint(native(world))
+    let projectedPoint = CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y))
+    guard projected.x.isFinite, projected.y.isFinite, projected.z.isFinite,
+      projected.z >= 0, projected.z <= 1, stage.bounds.contains(projectedPoint)
+    else {
+      check.errors.append("resolvedSurfaceOutsideViewport")
+      return check
+    }
+    let expected = stage.convert(projectedPoint, to: canvas)
+    let endpointError = hypot(expected.x - actual.x, expected.y - actual.y)
+    check.resolvedProjectionCanvas = .init(x: expected.x, y: expected.y)
+    check.endpointCanvasError = endpointError
+    if endpointError > 0.5 { check.errors.append("leaderDoesNotProjectResolvedSurface") }
+
+    let actualStagePoint = stage.convert(actual, from: canvas)
+    // Do not supply a target/rootNode filter: the closest visible triangle of
+    // every renderer-owned part participates in occlusion.
+    guard
+      let hit = stage.hitTest(
+        actualStagePoint,
+        options: [
+          .searchMode: SCNHitTestSearchMode.closest.rawValue, .boundingBoxOnly: false,
+          .clipToZRange: true, .backFaceCulling: true, .ignoreHiddenNodes: true,
+          .categoryBitMask: 1,
+        ]
+      ).first,
+      let hitID = document.nodes.first(where: { canvas.spatialNode(id: $0.id) === hit.node })?.id,
+      hit.node.geometry != nil, hit.faceIndex >= 0
+    else {
+      check.errors.append("noWholeSceneClosestTriangle")
+      return check
+    }
+    let hitWorld = vector(hit.worldCoordinates)
+    guard hitWorld.isFinite else {
+      check.errors.append("nonfiniteClosestTriangle")
+      return check
+    }
+    check.closestHitSurfaceNodeID = hitID
+    check.closestHitWorld = hitWorld
+    check.closestHitFaceIndex = hit.faceIndex
+    check.surfaceWorldError = distance(hitWorld, world)
+    if hit.node !== surface || hitID != surfaceID || !belongs(hit.node, to: target) {
+      check.errors.append("closestTriangleOutsideResolvedTargetSurface")
+    }
+    if distance(hitWorld, world) > tolerance {
+      check.errors.append("endpointIsNotClosestTrianglePoint")
+    }
+    check.wholeSceneClosestTriangleVerified = check.errors.isEmpty
+    return check
+  }
+
+  private static func belongs(_ node: SCNNode, to ancestor: SCNNode) -> Bool {
+    var current: SCNNode? = node
+    for _ in 0..<128 {
+      guard let value = current else { return false }
+      if value === ancestor { return true }
+      current = value.parent
+    }
+    return false
+  }
+
+  private static func native(_ point: Vector3D) -> SCNVector3 {
+    .init(Float(point.x), Float(point.y), Float(point.z))
+  }
+
+  private static func vector(_ point: SCNVector3) -> Vector3D {
+    .init(x: Double(point.x), y: Double(point.y), z: Double(point.z))
+  }
+
+  private static func distance(_ first: Vector3D, _ second: Vector3D) -> Double {
+    hypot(hypot(first.x - second.x, first.y - second.y), first.z - second.z)
+  }
+
+  private static func worldTolerance(_ point: Vector3D) -> Double {
+    // SceneKit hit positions are single-precision; retain a small absolute
+    // floor plus a scale-aware float round-trip allowance.
+    max(0.0001, max(abs(point.x), abs(point.y), abs(point.z)) * Double(Float.ulpOfOne) * 16)
   }
 
   @MainActor private static func ownPresentation(

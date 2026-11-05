@@ -1,6 +1,6 @@
 # Speech and visual presentation timing
 
-Scene-pointing checkpoint, **6 November 2026**: narrated visits to native generated-scene parts and attached captions are implemented. Recovery from temporarily unavailable host bounds is still under verification; no new installed pass is claimed here. See the [scene-pointing contract, artifact-scoped results and current recovery boundary](SCENE-CURSOR-POINTING.md). All 21 whole-product acceptance gates remain open.
+Scene-pointing checkpoint, **6 November 2026**: signed source `e8a7278` passed **665 local Swift tests** and two installed native narration/focus checks, including recovery after temporarily unavailable host bounds. The user separately confirmed the real Control+Option flow: the cursor points at narrated parts and captions stay close. See the [contract, exact artifacts and verification limits](SCENE-CURSOR-POINTING.md). All 21 whole-product acceptance gates remain open.
 
 Timing implementation recorded 5 November 2026; scene-pointing cross-reference updated 6 November. This slice coordinates accepted explanation scenes with native synthesis notifications or an explicit text fallback. It does not establish acoustic synchronization, exact HeyClicky timing, frame rate or full feature parity. All 21 end-to-end gates in [the public-feature acceptance ledger](HEYCLICKY-PUBLIC-FEATURES.md) remain open.
 
@@ -38,7 +38,7 @@ The speech service accepts at most **24 pending utterances** and **32,000 UTF-8 
 
 Stop revokes playback generation/beat ownership and speech tokens before native cancellation. It emits a distinct host-stop terminal receipt rather than claiming that the delegate supplied a cancellation. Stop preserves the canonical document and last released snapshot; Clear hides the floating surface without deleting the retained document. User edits, explicit editor entry, sleep/session loss and display topology loss invalidate pending presentation and speech. Dismissed surfaces do not resume old queued beats after wake. Stale render acknowledgements and narration completions cannot advance a newer owner.
 
-The renderer still owns independent part introduction and anchored-label reveals. Native cursor visits to narrated parts are now implemented in the separate [scene-pointing slice](SCENE-CURSOR-POINTING.md), whose current recovery verification remains pending. Neither slice establishes word-exact diagram marks or general semantic correspondence between narration and geometry. Native submission, synthesis notifications, caption submission and audible output remain separate claims.
+The renderer still owns independent part introduction and anchored-label reveals. Native cursor visits to narrated parts are now implemented in the separate [scene-pointing slice](SCENE-CURSOR-POINTING.md), with installed native recovery checks and separately attributed user feedback. Neither slice establishes word-exact diagram marks or general semantic correspondence between narration and geometry. Native submission, synthesis notifications, caption submission and audible output remain separate claims.
 
 ## Historical timing development evidence
 

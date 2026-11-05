@@ -22,11 +22,11 @@ Open **OpenCompanion** from `/Applications/OpenCompanion.app`. Every update repl
 
 Hover over the camera notch for a quick peek; move away to tuck it without losing your draft. Click **Open chat** or press **⌘⇧Space** for the full conversation. Hold **Control + Option**, wait for Listening, speak, and release either key to submit. The reply is spoken for that turn. **Escape** stops output. A notchless display gets a compact capsule below its menu bar.
 
-Global voice observation needs macOS Input Monitoring or Accessibility access. Voice input also needs Microphone and Speech Recognition permission. Settings reports the installed monitor status and provides repair controls. Voice hotkey turns do not automatically capture the screen or consume selected files/screens; ordinary conversation history and the notebook remain available.
+Global voice observation needs macOS Input Monitoring or Accessibility access. Voice input also needs Microphone and Speech Recognition permission. Settings reports the installed monitor status and provides repair controls. Ordinary voice conversation does not capture the desktop. Requested screen guidance uses a fresh frame; other selected context follows its explicit scope.
 
 If the shortcut is unavailable, choose **Set up voice** in the peek, then **Allow global voice shortcut…** in Settings. Enable the installed OpenCompanion in macOS Input Monitoring and quit/reopen it. Allow the first Microphone/Speech prompts, release the keys to interact with the prompt, then start a fresh hold.
 
-Diagrams open in a separate notebook panel while conversation stays in the notch. Streaming updates retain the same canvas and leave keyboard focus where you are working.
+Generated explanations appear on a transparent, click-through native canvas while conversation stays in the notch. The companion cursor visits narrated parts with its caption close beside it. Hold Option over a visible 3D part and drag to orbit; release to restore click-through. Open Notebook deliberately for editing, saving and export. [Scene pointing and verified limits](docs/SCENE-CURSOR-POINTING.md).
 
 Settings includes configurable global shortcuts and an optional display-capture shortcut. Registration conflicts are reported; the last working shortcut stays available for that session.
 
@@ -46,6 +46,7 @@ Configure an HTTPS OpenAI-compatible base URL, exact model ID and key in Setting
 - Deliberately selected display/window/region context with bounded AX/OCR and spatial drawing.
 - Validated retained diagrams, editable notes, local animation controls, original motor/lever/circuit examples.
 - Native 3D box/sphere/cylinder stages using SceneKit’s Metal backend; general physics is not claimed.
+- Ordered explanation scenes, speech-driven cursor captions and native surface-grounded pointing.
 - SQLite library, history/search, explicit memory, scoped text/PDF files with hashes and citations.
 - App-running durable jobs/routines, cancellation, leases and unknown-outcome recovery.
 - Actual MCP HTTP/SSE discovery/calls with account token isolation.

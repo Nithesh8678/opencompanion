@@ -66,6 +66,25 @@ Two separate real default-model requests used normal NDJSON and actual `gpt-5.6-
 
 The pendulum's public receipt retains its declared focus IDs `fixed-support`, `pendulum-rod`, `pivot-pin`; their corresponding narration describes those roles. The earlier water trial counted three admitted focus IDs before the later bounded target-ID evidence field existed; it does not retain which IDs were selected. The public results are `/tmp/OpenCompanion-Focus-NDJSON-Water-2026-11-05/water-molecule/result.json` and `/tmp/OpenCompanion-Focus-NDJSON-Pendulum-2026-11-05/simple-pendulum/result.json`. Those provider helpers do not render, play speech, capture a screen or exercise AppModel/physical hotkeys. Their successes are separate from native cursor motion. The trials are not controlled latency comparisons or a broad quality/reliability result.
 
+## Exact signed recovery checkpoint
+
+The single canonical app at `/Applications/OpenCompanion.app` contains clean source **`e8a7278006f87a82a31450ee1276a8bf82d3a533`**, executable SHA-256 **`98d19a294493514c3c1f7cae93af01f9618a12501fda1c58e7ea0cca9044d261`**. Build/install receipts, Info.plist and the independently hashed executable agree. The existing certificate/team `BPR2T4D656` is reused; deep strict signature verification and the designated requirement passed. This is a local arm64 build, not a notarized distribution. Installer cleanup issues are empty; no temporary build/staging app bundles or extra Companion app in Applications remained.
+
+Both exact installed runs passed the unchanged combined authored native check:
+
+| Run | Native submitted-layer tip error, stages 1 / 2 | Native caption/body gap, both stages | Evidence |
+| --- | --- | --- | --- |
+| 1 | 0.499886 / 0.783001 logical points | 8.485281 points | `/tmp/OpenCompanion-Focus-Recovery-Installed-Run1-2026-11-06/explanation-narration-acceptance.json` |
+| 2 | 0.499886 / 0.783001 logical points | 8.485281 points | `/tmp/OpenCompanion-Focus-Recovery-Installed-Run2-2026-11-06/explanation-narration-acceptance.json` |
+
+Errors and gaps remained within their limits both before and after own-window capture. Both runs observed two real synthesis starts/ranges/finishes, matching successful native revisions before speech enqueue, exact full-scene closest-triangle ownership, passive/nonkey stacking, unchanged foreground/physical pointer, retained canonical state and rejected late focus/completion/render replay after Stop. Run two actually recorded stage-two `hostBoundsUnavailable` under the current model owner, followed by successful native arrival and narration completion; this is a recovered observed interruption, not only a manufactured unit-test condition. The first scene finished before the second was released in both runs. These are two small static authored trials, not a reliability rate or acoustic measurement.
+
+The own-view scene and own cursor-window PNGs were inspected: the added box and sphere retain their white labels/leaders, and the short pink caption is close to the red cursor halo rather than detached at the host-panel perimeter. These separate own-window images do not establish desktop compositing or pixel-level reference parity. Raw files remain outside the public repository.
+
+After the helpers, CUA reopened the canonical app normally and initially observed only `org.opencompanion.cursor`, with no Dashboard or Notebook. The user then performed the real Control+Option request “Create a 3D explanation of a water molecule” and reported **“Cursor points at parts; captions stay close.”** This is attributed acceptance of that physical provider/presentation workflow and its visual feel. No prompt-free trace was correlated with that response, so its exact model identity, latency, acoustic alignment, scene semantics and FPS are not independently established. The earlier separate user confirmation that parts/captions follow speech remains in [the timing report](SPEECH-VISUAL-TIMING.md).
+
+Exact-source [CI run 42089257408](https://github.com/Nithesh8678/opencompanion/actions/runs/42089257408) passed native tests, the native release build and protocol checks for installed source `e8a7278006f87a82a31450ee1276a8bf82d3a533`. The later evidence-only documentation commit does not replace that installed executable. No whole-product acceptance row closes from this checkpoint.
+
 ## Verification boundary
 
 Focused pure visit-policy tests passed during implementation. Pure authority and visit tests cover exact identities, target/ancestor replacement, bounded input, stale scoped updates, retargeting, glyph-tip anchoring and edge placement. This is not an actual native cursor-arrival result or physical-input acceptance.

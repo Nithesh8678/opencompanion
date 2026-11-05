@@ -362,7 +362,7 @@ import SwiftUI
             .accessibilityIdentifier("companion.settings.guidanceModel")
           }
           detail(
-            "Terra handles screen analysis and highlighting. Other tasks use your conversation model."
+            "Terra handles screen analysis and highlighting. With no conversation model entered, visual lessons also prefer available Terra; chat uses the account default. An entered model applies to chat and visual lessons. Visual lessons request a supported fast effort."
           )
           Text(model.guidanceProviderStatus)
             .font(.system(size: 12, design: .rounded))

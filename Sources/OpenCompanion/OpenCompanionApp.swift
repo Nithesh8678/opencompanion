@@ -21,6 +21,8 @@ import SwiftUI
   private var manualGuidanceControls: ManualGuidanceControls?
   private var utilityWindow: NSWindow?
   private var explanationPanel: NSPanel?
+  private var explanationOverlay: ExplanationOverlay?
+  private var explanationRequestDisplay: (generation: UInt64, displayID: CGDirectDisplayID)?
   private let hotkey = HotkeyService()
   private let captureHotkey = HotkeyService()
   private let stopHotkey = HotkeyService()
@@ -46,6 +48,7 @@ import SwiftUI
       "--interaction-acceptance", "--cursor-acceptance", "--cursor-live-acceptance",
       "--guidance-live-acceptance", "--guidance-routing-acceptance",
       "--guidance-manual-live-acceptance",
+      "--spatial-scene-live-acceptance", "--explanation-overlay-acceptance",
     ].contains(where: CommandLine.arguments.contains)
     model = AppModel(acceptanceMode: acceptanceMode)
     model.onOpen = { [weak self] in self?.openRequestedSurface() }
@@ -53,7 +56,12 @@ import SwiftUI
       self?.utilityWindow?.orderOut(nil)
       self?.shell?.open()
     }
-    model.onSceneReady = { [weak self] in self?.showExplanation(focus: false) }
+    model.onSceneReady = { [weak self] in self?.showGeneratedExplanation() }
+    model.isScenePresentationVisible = { [weak self] documentID in
+      guard let self else { return false }
+      return self.explanationOverlay?.isVisible(documentID: documentID) == true
+        || self.notebookEditorCanvas()?.renderedDocumentID == documentID
+    }
     installMenus()
     if CommandLine.arguments.contains("--keychain-acceptance") {
       let service = "org.opencompanion.acceptance.\(UUID().uuidString)"
@@ -111,6 +119,45 @@ import SwiftUI
       }
       return
     }
+    if let index = CommandLine.arguments.firstIndex(of: "--spatial-scene-live-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 1 < CommandLine.arguments.count else {
+            throw ProviderError.message("Provide an output directory for spatial scene acceptance.")
+          }
+          try await SpatialSceneLiveAcceptance.run(
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
+            executable: model.codexPath, model: model.codexModel)
+          print("SPATIAL_SCENE_LIVE_ACCEPTANCE_PASSED")
+        } catch {
+          print("SPATIAL_SCENE_LIVE_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
+    }
+    if let index = CommandLine.arguments.firstIndex(of: "--explanation-overlay-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 1 < CommandLine.arguments.count else {
+            throw ProviderError.message("Provide an output directory for explanation acceptance.")
+          }
+          let sceneURL =
+            index + 2 < CommandLine.arguments.count
+            ? URL(fileURLWithPath: CommandLine.arguments[index + 2]) : nil
+          try await ExplanationOverlayAcceptance.run(
+            model: model, output: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
+            documentURL: sceneURL)
+          print("EXPLANATION_OVERLAY_ACCEPTANCE_PASSED")
+        } catch {
+          print("EXPLANATION_OVERLAY_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
+    }
     shell = CompanionShell(
       model: model, observePointer: !acceptanceMode,
       onOpenWorkspace: { [weak self] in self?.openRequestedSurface() })
@@ -121,6 +168,7 @@ import SwiftUI
       }
       self.utilityWindow?.orderOut(nil)
       self.explanationPanel?.orderOut(nil)
+      self.explanationOverlay?.dismiss()
       try await shell.prepareScreenGuidance(generation: generation, expectedPID: expectedPID)
     }
     model.onVoiceResponseSubmitted = { [weak self] source, destination in
@@ -142,6 +190,7 @@ import SwiftUI
         self?.cursor?.beginInput(generation: generation)
       }
       model.onCursorResponseStarted = { [weak self] generation, guidance in
+        self?.rememberExplanationDisplay(generation: generation)
         self?.cursor?.beginResponse(generation: generation, isGuidance: guidance)
       }
       model.onCursorTextPreview = { [weak self] generation, preview in
@@ -492,7 +541,65 @@ import SwiftUI
   private func openRequestedSurface() {
     if model.section == "Notebook" { showExplanation(focus: true) } else { showWorkspace() }
   }
+
+  private func rememberExplanationDisplay(generation: UInt64) {
+    guard explanationRequestDisplay?.generation != generation,
+      let screen = currentExplanationDisplay(),
+      let displayID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+        as? NSNumber
+    else { return }
+    explanationRequestDisplay = (generation, displayID.uint32Value)
+  }
+
+  private func currentExplanationDisplay() -> NSScreen? {
+    NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
+      ?? NSScreen.main ?? NSScreen.screens.first
+  }
+
+  private func showGeneratedExplanation() {
+    guard let document = model.scene else { return }
+    // An explicitly opened editor keeps its editing surface during same-doc
+    // revisions. A newly generated document uses the passive presentation.
+    if notebookEditorCanvas()?.renderedDocumentID == document.id { return }
+    unmountNotebookEditor()
+    let screen: NSScreen?
+    if let binding = explanationRequestDisplay, binding.generation == model.taskGeneration {
+      screen = NSScreen.screens.first {
+        ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+          == binding.displayID
+      }
+    } else {
+      screen = currentExplanationDisplay()
+    }
+    guard let screen else { return }
+    if explanationOverlay == nil {
+      explanationOverlay = ExplanationOverlay(model: model) { [weak self] in self?.model.stop() }
+    }
+    explanationOverlay?.show(document: document, on: screen)
+  }
+
+  private func unmountNotebookEditor() {
+    explanationPanel?.orderOut(nil)
+    explanationPanel?.contentView = nil
+  }
+
+  private func notebookEditorCanvas() -> RetainedCanvasView? {
+    guard let panel = explanationPanel, panel.isVisible, let root = panel.contentView else {
+      return nil
+    }
+    var remaining = [root]
+    var visited = 0
+    while let view = remaining.popLast(), visited < 512 {
+      visited += 1
+      guard !view.isHiddenOrHasHiddenAncestor else { continue }
+      if let canvas = view as? RetainedCanvasView, canvas.window === panel { return canvas }
+      remaining.append(contentsOf: view.subviews)
+    }
+    return nil
+  }
+
   private func showExplanation(focus: Bool) {
+    explanationOverlay?.dismiss()
     if explanationPanel == nil {
       let display = NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1280, height: 800)
       let panel = ExplanationPanel(
@@ -504,10 +611,13 @@ import SwiftUI
       panel.isReleasedWhenClosed = false
       panel.minSize = CGSize(width: 760, height: 580)
       panel.collectionBehavior = [.fullScreenAuxiliary]
-      panel.contentView = NSHostingView(
-        rootView: WorkspaceView(model: model, notebookOnly: true).preferredColorScheme(.dark))
+      panel.sharingType = .none
       panel.center()
       explanationPanel = panel
+    }
+    if explanationPanel?.contentView == nil {
+      explanationPanel?.contentView = NSHostingView(
+        rootView: WorkspaceView(model: model, notebookOnly: true).preferredColorScheme(.dark))
     }
     if focus {
       NSApp.activate(ignoringOtherApps: true)
@@ -558,6 +668,7 @@ import SwiftUI
     cursor?.shutdown()
     screenGuidance?.shutdown()
     manualGuidanceControls?.shutdown()
+    explanationOverlay?.shutdown()
     shell?.shutdown()
     model.stop()
     model.runner.stop()
@@ -573,4 +684,8 @@ import SwiftUI
 private final class ExplanationPanel: NSPanel {
   override var canBecomeKey: Bool { true }
   override var canBecomeMain: Bool { false }
+  override func close() {
+    contentView = nil
+    super.close()
+  }
 }

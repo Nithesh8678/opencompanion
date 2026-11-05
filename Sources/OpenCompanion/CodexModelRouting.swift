@@ -6,7 +6,8 @@ enum GuidanceModelPreference: String, Codable, CaseIterable, Sendable {
 
 struct CodexRoutingSelection: Sendable, Equatable {
   enum Reason: String, Codable, Sendable {
-    case terraGuidance, conversation, configuredGuidance, terraUnavailableFallback
+    case terraGuidance, terraVisual, conversation, visual, configuredGuidance,
+      terraUnavailableFallback
   }
   let model: String
   let effort: String?
@@ -32,7 +33,10 @@ enum CodexModelRouting {
   ) throws -> CodexRoutingSelection {
     let configured = configuredModel.trimmingCharacters(in: .whitespacesAndNewlines)
     let isGuidance = policy.route == .screenGuidance
-    if isGuidance, preference == .terra {
+    let isVisual = policy.route == .notebook
+    let prefersTerra =
+      isGuidance && preference == .terra || isVisual && configured.isEmpty
+    if prefersTerra {
       let counts = Dictionary(grouping: catalog, by: \.model).mapValues(\.count)
       let candidates = catalog.compactMap { entry -> (CodexRoutingModel, [Int])? in
         guard entry.supportsImages, counts[entry.model] == 1,
@@ -47,7 +51,7 @@ enum CodexModelRouting {
       if let latest {
         return .init(
           model: latest.0.model, effort: preferredEffort(latest.0.supportedEfforts),
-          reason: .terraGuidance)
+          reason: isGuidance ? .terraGuidance : .terraVisual)
       }
     }
     let selected: String
@@ -66,12 +70,12 @@ enum CodexModelRouting {
       )
     }
     let effort =
-      isGuidance && matches.count == 1
+      (isGuidance || isVisual) && matches.count == 1
       ? matches.first.flatMap { preferredEffort($0.supportedEfforts) } : nil
     return .init(
       model: selected, effort: effort,
       reason: !isGuidance
-        ? .conversation
+        ? (isVisual ? .visual : .conversation)
         : (preference == .terra ? .terraUnavailableFallback : .configuredGuidance))
   }
 

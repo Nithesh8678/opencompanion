@@ -107,7 +107,7 @@ actor CodexProvider {
       }
       var catalogModels: [CodexRoutingModel] = []
       if model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        || requestPolicy.route == .screenGuidance
+        || requestPolicy.route == .screenGuidance || requestPolicy.route == .notebook
       {
         try session.send(
           method: "model/list", id: 10,

@@ -177,6 +177,9 @@ struct ResponseInputPlan: Sendable {
   var onOpen: (() -> Void)?
   var onCompanionRequested: (() -> Void)?
   var onSceneReady: (() -> Void)?
+  /// Native presentation owns visibility and document identity. A sidebar or
+  /// an unrelated utility window cannot authorize edits to a retained scene.
+  var isScenePresentationVisible: ((String) -> Bool)?
   private var trace: [[String: String]] = []
   init(
     acceptanceMode: Bool = false, store: LocalStore? = nil,
@@ -325,10 +328,8 @@ struct ResponseInputPlan: Sendable {
     }
   }
   private var notebookContextIsVisible: Bool {
-    guard section == "Notebook" else { return false }
-    return NSApp?.windows.contains {
-      $0.isVisible && ($0.title == "OpenCompanion Notebook" || $0.title == "OpenCompanion")
-    } ?? false
+    guard section == "Notebook", let documentID = scene?.id else { return false }
+    return isScenePresentationVisible?(documentID) == true
   }
 
   func send() { send(textOverride: nil, voiceOnly: false, speakAloud: false) }

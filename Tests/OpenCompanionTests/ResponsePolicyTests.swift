@@ -47,6 +47,8 @@ struct ResponsePolicyTests {
     "Solve x + 4 = 9",
     "What is a diagram?",
     "What are flowcharts?",
+    "What is a 3D model?",
+    "I sometimes create 3D models",
     "Define notebook",
     "Explain what a chart is",
     "Explain this diagram",
@@ -83,6 +85,10 @@ struct ResponsePolicyTests {
     "I want a diagram of the water cycle",
     "Draw a diagram of what is happening",
     "Draw a diagram labeled ‘text only’",
+    "Create a small interactive 3D cutaway lesson explaining a brushed DC motor",
+    "Create a small interactive 3D ball-and-stick explanation of a water molecule",
+    "Create a small interactive 3D ball-and-stick explanation of a water molecule. Show one oxygen atom, two hydrogen atoms and the two bonds in a bent arrangement, with short labels attached to the atoms. Explain that the sizes and bond lengths are illustrative. Build it progressively.",
+    "Show me a 3D model of a bicycle",
   ])
   func explicitVisualRequestsPermitButDoNotRequireANotebook(_ text: String) {
     let result = policy(text, hasNotebook: true)
@@ -117,6 +123,8 @@ struct ResponsePolicyTests {
     "Do not open a notebook. Teach me about forces",
     "Explain how a motor works without a diagram",
     "I need plain text explaining how a motor works",
+    "Can you not create a 3D model? Explain it in words",
+    "Make a 3D scene, but answer only in text",
   ])
   func explicitPresentationOptOutOverridesLearningAndVisualKeywords(_ text: String) {
     #expect(policy(text, inNotebook: true, hasNotebook: true).route == .conversation)

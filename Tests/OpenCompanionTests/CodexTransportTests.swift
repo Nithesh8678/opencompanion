@@ -4,7 +4,9 @@ import Testing
 
 @testable import OpenCompanion
 
-struct CodexTransportTests {
+// Each case starts a real Python subprocess. Bound fixture concurrency so cold
+// interpreter startup does not consume another case's protocol watchdog.
+@Suite(.serialized) struct CodexTransportTests {
   @Test(arguments: [
     ResponsePolicy.Route.screenGuidance, .conversation, .notebook,
   ])
@@ -56,10 +58,10 @@ struct CodexTransportTests {
 
     let turn = try #require(requests.first { $0["method"] as? String == "turn/start" })
     let turnParams = try #require(turn["params"] as? [String: Any])
-    #expect(turnParams["effort"] as? String == (route == .screenGuidance ? "low" : nil))
+    #expect(turnParams["effort"] as? String == (route == .conversation ? nil : "low"))
     #expect(
       requests.filter { $0["method"] as? String == "model/list" }.count
-        == (route == .screenGuidance ? 1 : 0))
+        == (route == .conversation ? 0 : 1))
     let input = try #require(turnParams["input"] as? [[String: Any]])
     let turnText = try #require(input.first { $0["type"] as? String == "text" }?["text"] as? String)
     #expect(turnText.contains(prompt))
@@ -182,7 +184,56 @@ struct CodexTransportTests {
   func nonGuidanceTurnsIgnoreTheTerraPreference(_ route: ResponsePolicy.Route) async throws {
     try await assertRouting(
       models: [catalogModel("gpt-5.6-sol", isDefault: true), catalogModel("gpt-5.6-terra")],
-      route: route, expected: .init(model: "gpt-5.6-sol", effort: nil, reason: .conversation))
+      route: route,
+      expected: .init(
+        model: "gpt-5.6-sol", effort: route == .notebook ? "low" : nil,
+        reason: route == .notebook ? .visual : .conversation))
+  }
+
+  @Test(arguments: [
+    EffortFixture(supported: ["medium", "low", "none"], expected: "low"),
+    EffortFixture(supported: ["medium", "minimal"], expected: "minimal"),
+    EffortFixture(supported: ["none"], expected: "none"),
+    EffortFixture(supported: ["high"], expected: nil),
+    EffortFixture(supported: nil, expected: nil),
+  ])
+  func visualTurnsUseOnlyTheSelectedModelsAdvertisedFastEffort(_ fixture: EffortFixture) throws {
+    let result = try CodexModelRouting.select(
+      configuredModel: "configured-visual-model",
+      policy: ResponsePolicy.resolve(text: "Draw a model of a lever", screenGuidanceEnabled: true),
+      preference: .terra,
+      catalog: [
+        .init(
+          model: "configured-visual-model", alias: nil, isDefault: true, supportsImages: true,
+          supportedEfforts: Set(fixture.supported ?? [])),
+        .init(
+          model: "gpt-99-terra", alias: nil, isDefault: false, supportsImages: true,
+          supportedEfforts: ["low"]),
+      ])
+    #expect(result.model == "configured-visual-model" && result.reason == .visual)
+    #expect(result.effort == fixture.expected)
+  }
+
+  @Test func defaultVisualTurnsPreferVisibleTerraWhileAnExplicitModelKeepsItsAuthority() throws {
+    let policy = ResponsePolicy.resolve(
+      text: "Create a 3D model of a bicycle", screenGuidanceEnabled: true)
+    let catalog: [CodexRoutingModel] = [
+      .init(
+        model: "account-default", alias: nil, isDefault: true, supportsImages: true,
+        supportedEfforts: ["low"]),
+      .init(
+        model: "gpt-5.6-terra", alias: nil, isDefault: false, supportsImages: true,
+        supportedEfforts: ["low"]),
+    ]
+    let automatic = try CodexModelRouting.select(
+      configuredModel: "", policy: policy, preference: .conversation, catalog: catalog)
+    #expect(automatic == .init(model: "gpt-5.6-terra", effort: "low", reason: .terraVisual))
+    let explicit = try CodexModelRouting.select(
+      configuredModel: "account-default", policy: policy, preference: .terra, catalog: catalog)
+    #expect(explicit == .init(model: "account-default", effort: "low", reason: .visual))
+    let fallback = try CodexModelRouting.select(
+      configuredModel: "", policy: policy, preference: .terra, catalog: [catalog[0]])
+    #expect(fallback == .init(model: "account-default", effort: "low", reason: .visual))
   }
 
   @Test func unavailableTerraReportsFallbackWithoutChangingTheConfiguredModel() async throws {
@@ -358,7 +409,7 @@ struct CodexTransportTests {
     #expect((threadParams["dynamicTools"] as? [Any])?.isEmpty == true)
     #expect(
       requests.filter { $0["method"] as? String == "model/list" }.count
-        == (route == .screenGuidance ? 1 : 0))
+        == (route == .conversation ? 0 : 1))
   }
 
   @Test func shortStdioResponsesStreamWithoutWaitingForPipeEOF() async throws {
@@ -368,10 +419,10 @@ struct CodexTransportTests {
     let receiver = TransportUnitReceiver()
     let timeout = Task {
       try await Task.sleep(for: .seconds(3))
+      await receiver.markWatchdogFired()
       await provider.stop()
     }
     defer { timeout.cancel() }
-    let started = ContinuousClock.now
     do {
       try await provider.stream(
         executable: fixture.path, model: "",
@@ -392,7 +443,10 @@ struct CodexTransportTests {
       }
       throw error
     }
-    #expect(started.duration(to: .now) < .seconds(2))
+    // The fixture waits for more stdin and keeps stdout open indefinitely.
+    // Completing before forced shutdown proves incremental pipe reading;
+    // elapsed interpreter startup is not a renderer/provider latency claim.
+    #expect(await receiver.watchdogFired == false)
     #expect(await receiver.text == "ready")
   }
 
@@ -513,7 +567,9 @@ struct CodexTransportTests {
 
 private actor TransportUnitReceiver {
   var text = ""
+  var watchdogFired = false
   func append(_ value: String) { text += value }
+  func markWatchdogFired() { watchdogFired = true }
 }
 
 private actor TransportRoutingReceiver {

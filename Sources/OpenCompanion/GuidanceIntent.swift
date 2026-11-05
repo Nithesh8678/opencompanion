@@ -122,7 +122,7 @@ enum GuidanceIntent {
     if has(["chat", "between"]) || has(["conversation", "between"]) { return false }
     let authored = contains([
       "diagram", "illustration", "poem", "story", "essay", "code", "script", "article",
-      "tutorial", "prompt", "email", "example", "sample",
+      "tutorial", "prompt", "email", "example", "sample", "3d", "2d",
     ])
     if authored, !uiContext { return false }
     if authored, contains(["chatgpt"]), !explicitScreen, !near { return false }

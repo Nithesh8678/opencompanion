@@ -10,6 +10,7 @@ Independent clocks:
 
 - Reasoning emits complete units; no frame-by-frame model calls.
 - Retained native layers and cached procedural geometry animate locally.
+- Typed spatial scenes use bounded semantic primitives and transforms, with native SceneKit rendering and projected label anchors. The passive explanation window and its small Clear control are separate from the explicit Notebook editor. Label pacing runs locally even with scene playback paused; it stops when settled. See [the recording evidence, protocol and limits](EXPLANATION-OVERLAY.md).
 - Apple speech synthesizer delegate events report only their actual meaning. The tested core beat clock can release speech-synchronized or text-only beats; complete application audio-reveal synchronization remains a tracked integration gap.
 
 Cancellation advances the application generation before cancelling tasks/playback/annotations. Notebook revisions and desktop perception revisions are distinct. A current notebook does not validate an old desktop rectangle. Job leases prevent concurrent ownership; interrupted non-idempotent effects become outcomeUnknown, requiring observation before replay.

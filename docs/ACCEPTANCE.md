@@ -1,5 +1,9 @@
 # Acceptance evidence
 
+This page preserves the initial 3 November observations. For the latest counts,
+installed checks and unresolved gates, use [FEATURE-STATUS.md](FEATURE-STATUS.md)
+and the [explanation overlay report](EXPLANATION-OVERLAY.md).
+
 3 November 2026, Apple Silicon, macOS26.6.2, Swift6.4.2 / Xcode27.2. These are observed boundaries, not performance guarantees.
 
 ## Local automated checks

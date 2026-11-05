@@ -14,13 +14,15 @@ public struct SceneNode: Codable, Equatable, Identifiable, Sendable {
   public var parentID: String?
   public var bindings: [String: SafeExpression]
   public var accessibilityLabel: String
+  public var spatial3D: SceneSpatial3D?
   public init(
     id: String, kind: Kind, x: Double = 0, y: Double = 0, width: Double = 0, height: Double = 0,
     text: String = "", color: String = "#27382F", fill: String = "transparent",
     strokeWidth: Double = 2,
     fontSize: Double = 18, points: [Point2D] = [], subpaths: [[Point2D]] = [], rotation: Double = 0,
     opacity: Double = 1, scaleX: Double = 1, scaleY: Double = 1, parentID: String? = nil,
-    bindings: [String: SafeExpression] = [:], accessibilityLabel: String = ""
+    bindings: [String: SafeExpression] = [:], accessibilityLabel: String = "",
+    spatial3D: SceneSpatial3D? = nil
   ) {
     self.id = id
     self.kind = kind
@@ -42,10 +44,11 @@ public struct SceneNode: Codable, Equatable, Identifiable, Sendable {
     self.parentID = parentID
     self.bindings = bindings
     self.accessibilityLabel = accessibilityLabel
+    self.spatial3D = spatial3D
   }
   private enum CodingKeys: String, CodingKey {
     case id, kind, x, y, width, height, text, color, fill, strokeWidth, fontSize, points, subpaths
-    case rotation, opacity, scaleX, scaleY, parentID, bindings, accessibilityLabel
+    case rotation, opacity, scaleX, scaleY, parentID, bindings, accessibilityLabel, spatial3D
   }
   public init(from decoder: any Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -68,7 +71,8 @@ public struct SceneNode: Codable, Equatable, Identifiable, Sendable {
       scaleY: try c.decodeIfPresent(Double.self, forKey: .scaleY) ?? 1,
       parentID: try c.decodeIfPresent(String.self, forKey: .parentID),
       bindings: try c.decodeIfPresent([String: SafeExpression].self, forKey: .bindings) ?? [:],
-      accessibilityLabel: try c.decodeIfPresent(String.self, forKey: .accessibilityLabel) ?? "")
+      accessibilityLabel: try c.decodeIfPresent(String.self, forKey: .accessibilityLabel) ?? "",
+      spatial3D: try c.decodeIfPresent(SceneSpatial3D.self, forKey: .spatial3D))
   }
 }
 
@@ -94,15 +98,17 @@ public struct SceneAnimation: Codable, Equatable, Identifiable, Sendable {
   public var behavior: Behavior
   public var speed: Double
   public var amplitude: Double
+  public var axis3D: Axis3D?
   public init(
     id: String, targetID: String, behavior: Behavior = .rotate, speed: Double = 45,
-    amplitude: Double = 1
+    amplitude: Double = 1, axis3D: Axis3D? = nil
   ) {
     self.id = id
     self.targetID = targetID
     self.behavior = behavior
     self.speed = speed
     self.amplitude = amplitude
+    self.axis3D = axis3D
   }
 }
 
@@ -130,11 +136,17 @@ public struct SceneLimits: Sendable {
   public var maximumDepth = 32
   public var maximumOperations = 2_048
   public var maximumCoordinate = 100_000.0
+  public var maximumSpatialNodes = 128
+  public var maximumSpatialVertices = 32_768
+  public var maximumSpatialTriangles = 65_536
+  public var maximumSpatialSegments = 64
+  public var maximumSpatialDimension = 1_000.0
   public init() {}
 }
 
 public struct SceneDocument: Codable, Equatable, Identifiable, Sendable {
   public static let schemaVersion = "opencompanion.scene/1"
+  public static let spatialSchemaVersion = "opencompanion.scene/2"
   public var id, title: String
   public var revision: Int
   public var width, height: Double
@@ -172,9 +184,8 @@ public struct SceneDocument: Codable, Equatable, Identifiable, Sendable {
   }
   public init(from decoder: any Decoder) throws {
     let c = try decoder.container(keyedBy: CodingKeys.self)
-    if let version = try c.decodeIfPresent(String.self, forKey: .specVersion),
-      version != Self.schemaVersion
-    {
+    let version = try c.decodeIfPresent(String.self, forKey: .specVersion)
+    if let version, ![Self.schemaVersion, Self.spatialSchemaVersion].contains(version) {
       throw CoreError.invalidDocument("unsupported schema \(version)")
     }
     self.init(
@@ -191,10 +202,14 @@ public struct SceneDocument: Codable, Equatable, Identifiable, Sendable {
       controls: try c.decodeIfPresent([SceneControl].self, forKey: .controls) ?? [],
       notes: try c.decodeIfPresent(String.self, forKey: .notes) ?? "",
       citations: try c.decodeIfPresent([String].self, forKey: .citations) ?? [])
+    if usesSpatial3D, version != Self.spatialSchemaVersion {
+      throw CoreError.invalidDocument("typed 3D requires scene schema version 2")
+    }
   }
   public func encode(to encoder: any Encoder) throws {
     var c = encoder.container(keyedBy: CodingKeys.self)
-    try c.encode(Self.schemaVersion, forKey: .specVersion)
+    try c.encode(
+      usesSpatial3D ? Self.spatialSchemaVersion : Self.schemaVersion, forKey: .specVersion)
     try c.encode(id, forKey: .id)
     try c.encode(title, forKey: .title)
     try c.encode(revision, forKey: .revision)
@@ -299,7 +314,9 @@ public struct SceneDocument: Codable, Equatable, Identifiable, Sendable {
       throw CoreError.invalidExpression("numeric binding required")
     }
     _ = try resolvedNodes(at: 0)
+    try validateSpatial3D(limits: limits)
     var animationIDs = Set<String>()
+    var spatialFlowAmplitudes: [String: Double] = [:]
     for animation in animations {
       guard !animation.id.isEmpty, animation.id.utf8.count <= 256 else {
         throw CoreError.invalidDocument("animation identifier")
@@ -310,9 +327,23 @@ public struct SceneDocument: Codable, Equatable, Identifiable, Sendable {
       guard lookup[animation.targetID] != nil else {
         throw CoreError.missingReference(animation.targetID)
       }
+      if animation.axis3D != nil {
+        guard animation.behavior == .rotate, let target = lookup[animation.targetID],
+          target.spatial3D != nil, [.mesh, .group].contains(target.kind)
+        else { throw CoreError.invalidDocument("3D animation axis target") }
+      }
       guard animation.speed.isFinite, animation.amplitude.isFinite, abs(animation.speed) <= 10_000,
         abs(animation.amplitude) <= limits.maximumCoordinate
       else { throw CoreError.invalidDocument("animation range") }
+      if animation.behavior == .flow, let target = lookup[animation.targetID],
+        let spatial = target.spatial3D, [.mesh, .group].contains(target.kind)
+      {
+        let amplitude = (spatialFlowAmplitudes[target.id] ?? 0) + abs(animation.amplitude)
+        guard target.bindings["spatial3D.transform.position.x"] == nil,
+          abs(spatial.transform.position.x) + amplitude <= 1_000
+        else { throw CoreError.invalidDocument("3D flow range or position binding") }
+        spatialFlowAmplitudes[target.id] = amplitude
+      }
     }
     var controlIDs = Set<String>()
     for control in controls {
@@ -360,16 +391,35 @@ public struct SceneDocument: Codable, Equatable, Identifiable, Sendable {
         }
         switch animation.behavior {
         case .rotate:
-          node.rotation =
-            (node.rotation + Self.boundedPhase(time: time, speed: animation.speed, period: 360))
-            .truncatingRemainder(dividingBy: 360)
+          let amount = Self.boundedPhase(time: time, speed: animation.speed, period: 360)
+          if var spatial = node.spatial3D, [.mesh, .group].contains(node.kind) {
+            switch animation.axis3D ?? .y {
+            case .x:
+              spatial.transform.rotationDegrees.x = (spatial.transform.rotationDegrees.x + amount)
+                .truncatingRemainder(dividingBy: 360)
+            case .y:
+              spatial.transform.rotationDegrees.y = (spatial.transform.rotationDegrees.y + amount)
+                .truncatingRemainder(dividingBy: 360)
+            case .z:
+              spatial.transform.rotationDegrees.z = (spatial.transform.rotationDegrees.z + amount)
+                .truncatingRemainder(dividingBy: 360)
+            }
+            node.spatial3D = spatial
+          } else {
+            node.rotation = (node.rotation + amount).truncatingRemainder(dividingBy: 360)
+          }
         case .pulse:
           node.opacity *=
             0.6 + 0.4 * sin(Self.boundedPhase(time: time, speed: animation.speed, period: .pi * 2))
         case .flow:
-          node.x +=
+          let amount =
             sin(Self.boundedPhase(time: time, speed: animation.speed, period: .pi * 2))
             * animation.amplitude
+          if node.spatial3D != nil, [.mesh, .group].contains(node.kind) {
+            node.spatial3D?.transform.position.x += amount
+          } else {
+            node.x += amount
+          }
         }
       }
       return node
@@ -385,6 +435,13 @@ public struct SceneDocument: Codable, Equatable, Identifiable, Sendable {
         && value.dropFirst().allSatisfy(\.isHexDigit))
   }
   private static func bindingIsValid(_ property: String, node: SceneNode) -> Bool {
+    if property.hasPrefix("spatial3D.") {
+      let pieces = property.split(separator: ".")
+      return node.spatial3D != nil && [.mesh, .group].contains(node.kind)
+        && pieces.count == 4 && pieces[1] == "transform"
+        && ["position", "rotationDegrees", "scale"].contains(String(pieces[2]))
+        && ["x", "y", "z"].contains(String(pieces[3]))
+    }
     if ["x", "y", "width", "height", "rotation", "opacity", "scaleX", "scaleY"].contains(property) {
       return true
     }
@@ -397,6 +454,42 @@ public struct SceneDocument: Codable, Equatable, Identifiable, Sendable {
 
 extension SceneNode {
   fileprivate mutating func setBoundProperty(_ property: String, value: Double) throws {
+    if property.hasPrefix("spatial3D.") {
+      let pieces = property.split(separator: ".")
+      guard value.isFinite, pieces.count == 4, pieces[1] == "transform", var spatial = spatial3D,
+        [.mesh, .group].contains(kind), ["x", "y", "z"].contains(String(pieces[3]))
+      else { throw CoreError.invalidExpression("3D binding property") }
+      var vector: Vector3D
+      switch pieces[2] {
+      case "position":
+        guard abs(value) <= 1_000 else {
+          throw CoreError.invalidExpression("3D position binding range")
+        }
+        vector = spatial.transform.position
+      case "rotationDegrees":
+        vector = spatial.transform.rotationDegrees
+      case "scale":
+        guard (0.001...100).contains(value) else {
+          throw CoreError.invalidExpression("3D scale binding range")
+        }
+        vector = spatial.transform.scale
+      default: throw CoreError.invalidExpression("3D binding field")
+      }
+      let assigned =
+        pieces[2] == "rotationDegrees" ? value.truncatingRemainder(dividingBy: 360) : value
+      switch pieces[3] {
+      case "x": vector.x = assigned
+      case "y": vector.y = assigned
+      default: vector.z = assigned
+      }
+      switch pieces[2] {
+      case "position": spatial.transform.position = vector
+      case "rotationDegrees": spatial.transform.rotationDegrees = vector
+      default: spatial.transform.scale = vector
+      }
+      spatial3D = spatial
+      return
+    }
     if property == "rotation" {
       guard value.isFinite else { throw CoreError.invalidExpression("rotation must be finite") }
       rotation = value.truncatingRemainder(dividingBy: 360)

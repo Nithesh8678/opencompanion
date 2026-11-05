@@ -181,6 +181,7 @@ struct ResponsePolicy: Sendable, Equatable {
       let objects: Set<String> = [
         "diagram", "diagrams", "chart", "charts", "graph", "graphs", "drawing", "drawings",
         "notebook", "canvas", "sketch", "sketches", "animation", "animations", "visuals",
+        "model", "models", "scene", "scenes", "cutaway", "cutaways",
       ]
       for index in words.indices where words[index] == "no" || words[index] == "without" {
         let fillers: Set<String> = ["need", "for", "a", "an", "the", "any", "more"]
@@ -247,6 +248,14 @@ struct ResponsePolicy: Sendable, Equatable {
       if leading.first == "please" { leading = leading.dropFirst() }
       if let first = leading.first, direct.contains(first) { return true }
       if contains(["visually", "graphically"]), contains(["explain", "show", "teach"]) {
+        return true
+      }
+      if contains(["3d", "2d"]),
+        contains([
+          "model", "models", "scene", "scenes", "cutaway", "cutaways", "lesson", "explanation",
+        ]),
+        contains(["create", "make", "build", "show", "design"])
+      {
         return true
       }
       let objects: Set<String> = [

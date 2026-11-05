@@ -8,16 +8,45 @@ enum ManualGuidanceLiveAcceptance {
     model: AppModel, cursor: CursorCompanionCoordinator, output: URL
   ) async throws {
     try Task.checkCancellation()
+    // The UI driver can invoke a background app's AX controls without making
+    // that app foreground. Wait for a real user focus change; never activate an
+    // app or capture unrelated content to make this acceptance pass.
+    try FileHandle.standardOutput.write(
+      contentsOf: Data("GUIDANCE_MANUAL_WAITING_FOR_PUBLIC_FIXTURE\n".utf8))
+    let foregroundDeadline = ProcessInfo.processInfo.systemUptime + 90
+    while NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+      != "org.opencompanion.fixture.guidance"
+    {
+      try Task.checkCancellation()
+      guard ProcessInfo.processInfo.systemUptime < foregroundDeadline else {
+        throw ProviderError.message(
+          "Manual guidance startup: the public Guidance Fixture did not become foreground within 90 seconds."
+        )
+      }
+      try await Task.sleep(for: .milliseconds(100))
+    }
     guard let fixture = NSWorkspace.shared.frontmostApplication,
-      fixture.bundleIdentifier == "org.opencompanion.fixture.guidance",
-      let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }),
-      let displayNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
-        as? NSNumber,
-      fixtureCoversDisplay(pid: fixture.processIdentifier, screen: screen),
-      let productionTargetObserver = model.onScreenGuidanceTargetAccepted
+      fixture.bundleIdentifier == "org.opencompanion.fixture.guidance"
     else {
       throw ProviderError.message(
-        "Open the opaque public Guidance Fixture on the active display with production guidance observation installed."
+        "Manual guidance startup: the public Guidance Fixture must be foreground.")
+    }
+    guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }),
+      let displayNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+        as? NSNumber
+    else {
+      throw ProviderError.message(
+        "Manual guidance startup: the pointer must be on a display with valid native display geometry."
+      )
+    }
+    guard fixtureCoversDisplay(pid: fixture.processIdentifier, screen: screen) else {
+      throw ProviderError.message(
+        "Manual guidance startup: the public Guidance Fixture must cover the pointer display.")
+    }
+    guard let productionTargetObserver = model.onScreenGuidanceTargetAccepted
+    else {
+      throw ProviderError.message(
+        "Manual guidance startup: the production guidance target observer is not installed."
       )
     }
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)

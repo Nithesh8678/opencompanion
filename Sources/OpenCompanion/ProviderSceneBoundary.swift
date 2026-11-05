@@ -85,7 +85,7 @@ enum ProviderSceneBoundary {
       rotation: node.rotation, opacity: node.opacity, scaleX: node.scaleX, scaleY: node.scaleY,
       fontSize: node.fontSize, strokeWidth: node.strokeWidth, text: node.text, color: node.color,
       fill: node.fill, accessibilityLabel: node.accessibilityLabel, points: node.points,
-      subpaths: node.subpaths, bindings: node.bindings)
+      subpaths: node.subpaths, bindings: node.bindings, spatial3D: node.spatial3D)
   }
 
   private static func normalizedPatch(

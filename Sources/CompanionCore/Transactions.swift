@@ -7,13 +7,15 @@ public struct ScenePatch: Codable, Equatable, Sendable {
   public var points: [Point2D]?
   public var subpaths: [[Point2D]]?
   public var bindings: [String: SafeExpression]?
+  public var spatial3D: SceneSpatial3D?
   public init(
     x: Double? = nil, y: Double? = nil, width: Double? = nil, height: Double? = nil,
     rotation: Double? = nil,
     opacity: Double? = nil, scaleX: Double? = nil, scaleY: Double? = nil, fontSize: Double? = nil,
     strokeWidth: Double? = nil, text: String? = nil, color: String? = nil, fill: String? = nil,
     accessibilityLabel: String? = nil, points: [Point2D]? = nil,
-    subpaths: [[Point2D]]? = nil, bindings: [String: SafeExpression]? = nil
+    subpaths: [[Point2D]]? = nil, bindings: [String: SafeExpression]? = nil,
+    spatial3D: SceneSpatial3D? = nil
   ) {
     self.x = x
     self.y = y
@@ -32,6 +34,7 @@ public struct ScenePatch: Codable, Equatable, Sendable {
     self.points = points
     self.subpaths = subpaths
     self.bindings = bindings
+    self.spatial3D = spatial3D
   }
   /// A value copy is useful when checking provider geometry before committing
   /// an atomic document transaction. Omitted fields retain their prior values.
@@ -58,6 +61,7 @@ public struct ScenePatch: Codable, Equatable, Sendable {
     if let points { node.points = points }
     if let subpaths { node.subpaths = subpaths }
     if let bindings { node.bindings = bindings }
+    if let spatial3D { node.spatial3D = spatial3D }
   }
 }
 
@@ -199,6 +203,10 @@ extension SceneDocument {
       case .patch(let id, let fields):
         guard let index = result.nodes.firstIndex(where: { $0.id == id }) else {
           throw CoreError.missingReference(id)
+        }
+        guard result.nodes[index].spatial3D != nil || fields.spatial3D == nil else {
+          throw CoreError.invalidDocument(
+            "Changing a retained 2D part to 3D requires remove and create")
         }
         fields.apply(to: &result.nodes[index])
       case .remove(let id):

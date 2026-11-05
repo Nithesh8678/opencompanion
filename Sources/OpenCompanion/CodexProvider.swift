@@ -75,6 +75,7 @@ actor CodexProvider {
     guidanceModel: GuidanceModelPreference = .terra,
     onRouting: (@Sendable (CodexRoutingSelection) async -> Void)? = nil,
     onTiming: (@Sendable (CodexTimingEvent) async -> Void)? = nil,
+    onStructuredProgress: (@Sendable (StructuredSpatialStageProgress) async -> Void)? = nil,
     onUnit: @escaping @Sendable (ProviderUnit) async throws -> Void,
     onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil,
     responsePolicy: ResponsePolicy? = nil,
@@ -158,6 +159,22 @@ actor CodexProvider {
         "apps": .object(["_default": .object(["enabled": .bool(false)])]),
       ])
       await timing.mark(.configurationReady)
+      let instructions: String
+      let developerInstructions: String
+      switch outputMode {
+      case .ndjson:
+        instructions = ReasoningProvider.baseInstructions(for: requestPolicy)
+        developerInstructions =
+          "Emit only the permitted NDJSON assistant units for the current response policy. No tools are authorized for this thread."
+      case .structuredScene, .structuredUnifiedScene:
+        instructions = ReasoningProvider.standaloneStructuredSceneInstructions(for: requestPolicy)
+        developerInstructions =
+          "Emit one schema-constrained final answer object with a progressive units array. Do not emit interim commentary. No tools are authorized for this thread."
+      case .structuredSpatialSteps:
+        instructions = ReasoningProvider.standaloneStructuredSpatialStepsInstructions
+        developerInstructions =
+          "Emit one schema-constrained final answer object with a progressive steps array. Each step requires actual typed parts and its narration. Do not emit interim commentary. No tools are authorized for this thread."
+      }
       try session.send(
         method: "thread/start", id: 4,
         params: .object([
@@ -165,16 +182,10 @@ actor CodexProvider {
           "approvalPolicy": .string("never"), "sandbox": .string("read-only"),
           "cwd": .string(session.workingDirectory.path),
           "baseInstructions": .string(
-            (outputMode.isStructured
-              ? ReasoningProvider.standaloneStructuredSceneInstructions(for: requestPolicy)
-              : ReasoningProvider.baseInstructions(for: requestPolicy))
+            instructions
               + "\nYou are a native assistant response provider. Do not call any tools, inspect files, use shell, or follow local project instructions. All needed context is supplied in the user input."
           ),
-          "developerInstructions": .string(
-            outputMode.isStructured
-              ? "Emit one schema-constrained final answer object with a progressive units array. Do not emit interim commentary. No tools are authorized for this thread."
-              : "Emit only the permitted NDJSON assistant units for the current response policy. No tools are authorized for this thread."
-          ),
+          "developerInstructions": .string(developerInstructions),
           "dynamicTools": .array([]), "config": config, "serviceName": .string("opencompanion"),
         ]))
       let started = try await Self.response(id: 4, iterator: &iterator)
@@ -217,12 +228,16 @@ actor CodexProvider {
       let deliverUnit: @Sendable (ProviderUnit) async throws -> Void = { unit in
         try Task.checkCancellation()
         try await onUnit(unit)
-        try Task.checkCancellation()
+        // The steps decoder records a successful scene callback before checking
+        // cancellation between scene and narration. Do not turn that known
+        // admission into an uncounted callback failure in this wrapper.
+        if outputMode != .structuredSpatialSteps { try Task.checkCancellation() }
         await timing.mark(.firstUnitAccepted)
         if unit.type == "scene" { await timing.mark(.firstSceneAccepted) }
       }
       var decoder = ProviderTextStreamDecoder()
-      var structured = CodexStructuredOutput(threadID: threadID)
+      var structured = CodexStructuredOutput(threadID: threadID, outputMode: outputMode)
+      var lastSpatialProgress: StructuredSpatialStageProgress?
       var totalBytes = 0
       var sawCompleted = false
       while let message = try await iterator.next() {
@@ -265,8 +280,19 @@ actor CodexProvider {
           }
         }
         if outputMode.isStructured {
-          try await structured.receive(
-            method: method, params: params, onUnit: deliverUnit, onText: onText)
+          do {
+            try await structured.receive(
+              method: method, params: params, onUnit: deliverUnit, onText: onText)
+          } catch {
+            if let progress = structured.spatialProgress, progress != lastSpatialProgress {
+              await onStructuredProgress?(progress)
+            }
+            throw error
+          }
+          if let progress = structured.spatialProgress, progress != lastSpatialProgress {
+            await onStructuredProgress?(progress)
+            lastSpatialProgress = progress
+          }
           if structured.finalMessageStarted { await timing.mark(.finalMessageStarted) }
           if structured.finalMessageCompleted { await timing.mark(.finalMessageCompleted) }
         }
@@ -285,7 +311,17 @@ actor CodexProvider {
         guard sawCompleted else {
           throw ProviderError.message("Codex ended before the structured turn completed.")
         }
-        try await structured.finishTurn(onUnit: deliverUnit, onText: onText)
+        do {
+          try await structured.finishTurn(onUnit: deliverUnit, onText: onText)
+        } catch {
+          if let progress = structured.spatialProgress, progress != lastSpatialProgress {
+            await onStructuredProgress?(progress)
+          }
+          throw error
+        }
+        if let progress = structured.spatialProgress, progress != lastSpatialProgress {
+          await onStructuredProgress?(progress)
+        }
         if structured.usedPhaseCompatibilityFallback {
           await timing.mark(.phaseCompatibilityFallback)
           await timing.mark(.finalMessageCompleted)

@@ -54,6 +54,7 @@ enum SpatialSceneLiveAcceptance {
           messages: [.init(role: "user", text: fixture.prompt)], context: "", image: nil,
           scene: nil, onRouting: { await collector.route($0) },
           onTiming: { await collector.timing($0) },
+          onStructuredProgress: { await collector.structuredProgress($0) },
           onUnit: { try await collector.receive($0) }, responsePolicy: policy,
           outputMode: outputMode)
       } catch {
@@ -95,6 +96,7 @@ enum SpatialSceneLiveAcceptance {
         "narrationPreviewUTF8Bytes": snapshot.narrationPreviewUTF8Bytes,
         "narrationPreviewTruncated": snapshot.narrationPreviewTruncated,
         "lastRejectedScene": NSNull(),
+        "structuredStageProgress": NSNull(),
         "progressiveGeometryUnits": snapshot.progressiveGeometryUnits,
         "typedMeshCount": meshes.count, "anchoredLabelCount": labels.count,
         "geometryTypes": geometryTypes.sorted(), "matchedLabelConcepts": concepts,
@@ -113,6 +115,10 @@ enum SpatialSceneLiveAcceptance {
       if let rejection = snapshot.lastRejectedScene {
         result["lastRejectedScene"] = try JSONSerialization.jsonObject(
           with: encoder.encode(rejection))
+      }
+      if let progress = snapshot.structuredStageProgress {
+        result["structuredStageProgress"] = try JSONSerialization.jsonObject(
+          with: encoder.encode(progress))
       }
       results.append(result)
       try write(result, to: directory.appendingPathComponent("result.json"))
@@ -155,20 +161,28 @@ enum SpatialSceneOutputSelection {
   static func select(arguments: [String]) throws -> CodexOutputMode {
     let originalFlag = "--structured-scene-output"
     let unifiedFlag = "--structured-unified-output"
+    let stepsFlag = "--structured-spatial-steps"
+    let formatFlags = [originalFlag, unifiedFlag, stepsFlag]
     guard
       !arguments.contains(where: {
-        $0.hasPrefix(originalFlag + "=") || $0.hasPrefix(unifiedFlag + "=")
+        argument in formatFlags.contains { argument.hasPrefix($0 + "=") }
       })
     else {
       throw ProviderError.message("Structured output flags do not accept a value.")
     }
-    let selected = arguments.filter { $0 == originalFlag || $0 == unifiedFlag }
+    for index in arguments.indices where formatFlags.contains(arguments[index]) {
+      guard index + 1 == arguments.count || arguments[index + 1].hasPrefix("--") else {
+        throw ProviderError.message("Structured output flags do not accept a value.")
+      }
+    }
+    let selected = arguments.filter { formatFlags.contains($0) }
     guard selected.count <= 1 else {
       throw ProviderError.message("Specify one structured output format at most once.")
     }
     switch selected.first {
     case originalFlag: return .structuredScene
     case unifiedFlag: return .structuredUnifiedScene
+    case stepsFlag: return .structuredSpatialSteps
     default: return .ndjson
     }
   }
@@ -453,6 +467,7 @@ struct SpatialSceneAcceptanceSnapshot: Sendable {
   let narrationPreviewUTF8Bytes: Int
   let narrationPreviewTruncated: Bool
   let lastRejectedScene: SpatialRejectedSceneSummary?
+  let structuredStageProgress: StructuredSpatialStageProgress?
   let sceneUnits: Int
   let progressiveGeometryUnits: Int
   let firstSceneMS: Double?
@@ -515,6 +530,7 @@ actor SpatialSceneAcceptanceCollector {
   private var narrationPreviewUTF8Bytes = 0
   private var narrationPreviewTruncated = false
   private var lastRejectedScene: SpatialRejectedSceneSummary?
+  private var structuredStageProgress: StructuredSpatialStageProgress?
   private var sceneUnits = 0
   private var progressiveGeometryUnits = 0
   private var encounteredMeshIDs: Set<String> = []
@@ -526,6 +542,9 @@ actor SpatialSceneAcceptanceCollector {
 
   init(started: TimeInterval) { self.started = started }
   func route(_ value: CodexRoutingSelection) { routing = value }
+  func structuredProgress(_ value: StructuredSpatialStageProgress) {
+    structuredStageProgress = value
+  }
   func timing(_ event: CodexTimingEvent) {
     guard timings.count < CodexTimingEvent.Stage.allCases.count else { return }
     timings.append(event)
@@ -585,6 +604,7 @@ actor SpatialSceneAcceptanceCollector {
       narrationPreview: narrationPreview, narrationPreviewUTF8Bytes: narrationPreviewUTF8Bytes,
       narrationPreviewTruncated: narrationPreviewTruncated,
       lastRejectedScene: lastRejectedScene,
+      structuredStageProgress: structuredStageProgress,
       sceneUnits: sceneUnits,
       progressiveGeometryUnits: progressiveGeometryUnits,
       firstSceneMS: firstSceneMS, firstTypedMS: firstTypedMS, routing: routing, timings: timings)

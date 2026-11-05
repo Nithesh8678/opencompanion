@@ -4,7 +4,7 @@ import Foundation
 /// The schema path is an opt-in experiment for new explanations. It does not
 /// alter ordinary conversation, screen guidance, retained edits or model choice.
 enum CodexOutputMode: String, Sendable {
-  case ndjson, structuredScene, structuredUnifiedScene
+  case ndjson, structuredScene, structuredUnifiedScene, structuredSpatialSteps
 
   var isStructured: Bool { self != .ndjson }
   var schema: JSONValue? {
@@ -12,6 +12,7 @@ enum CodexOutputMode: String, Sendable {
     case .ndjson: nil
     case .structuredScene: StructuredSceneOutputSchema.value
     case .structuredUnifiedScene: StructuredSceneOutputSchema.unifiedValue
+    case .structuredSpatialSteps: StructuredSpatialStageSchema.value
     }
   }
 
@@ -44,15 +45,25 @@ struct CodexStructuredOutput: Sendable {
   private var items: [String: Item] = [:]
   private var finalID: String?
   private var decoder = StructuredSceneStreamDecoder()
+  private var spatialDecoder = StructuredSpatialStageStreamDecoder()
+  private let outputMode: CodexOutputMode
   private var totalDeltaBytes = 0
   private var totalCompletedBytes = 0
   private var terminal = false
   private(set) var finalMessageStarted = false
   private(set) var finalMessageCompleted = false
   private(set) var usedPhaseCompatibilityFallback = false
-  var acceptedUnits: Int { decoder.acceptedUnits }
+  var acceptedUnits: Int {
+    outputMode == .structuredSpatialSteps ? spatialDecoder.acceptedUnits : decoder.acceptedUnits
+  }
+  var spatialProgress: StructuredSpatialStageProgress? {
+    outputMode == .structuredSpatialSteps ? spatialDecoder.progress : nil
+  }
 
-  init(threadID: String) { self.threadID = threadID }
+  init(threadID: String, outputMode: CodexOutputMode = .structuredScene) {
+    self.threadID = threadID
+    self.outputMode = outputMode
+  }
 
   mutating func bind(turnID: String) throws {
     guard !turnID.isEmpty, turnID.utf8.count <= 256,
@@ -113,7 +124,7 @@ struct CodexStructuredOutput: Sendable {
         if item.phase != .commentary { item.deltas += delta }
         items[id] = item
         if item.phase == .final {
-          try await decoder.append(delta, onUnit: onUnit, onText: onText)
+          try await append(delta, onUnit: onUnit, onText: onText)
         }
       case "item/completed":
         if let id = params?["item"]?["id"]?.string, items[id] != nil,
@@ -161,9 +172,9 @@ struct CodexStructuredOutput: Sendable {
           // Started final messages were already streamed. Unknown-phase and
           // completed-only messages have not yet admitted any of this text.
           if !item.sawDelta || !streamedAsFinal {
-            try await decoder.append(text, onUnit: onUnit, onText: onText)
+            try await append(text, onUnit: onUnit, onText: onText)
           }
-          try await decoder.finish(onUnit: onUnit, onText: onText)
+          try await finish(onUnit: onUnit, onText: onText)
           finalMessageCompleted = true
         }
       default: break
@@ -188,8 +199,8 @@ struct CodexStructuredOutput: Sendable {
         else { throw failure("No unambiguous completed structured answer was received.") }
         usedPhaseCompatibilityFallback = true
         try selectFinal(entry.key)
-        try await decoder.append(text, onUnit: onUnit, onText: onText)
-        try await decoder.finish(onUnit: onUnit, onText: onText)
+        try await append(text, onUnit: onUnit, onText: onText)
+        try await finish(onUnit: onUnit, onText: onText)
         finalMessageCompleted = true
       }
       guard finalMessageCompleted, acceptedUnits > 0 else {
@@ -199,6 +210,29 @@ struct CodexStructuredOutput: Sendable {
     } catch {
       terminal = true
       throw error
+    }
+  }
+
+  private mutating func append(
+    _ delta: String,
+    onUnit: @Sendable (ProviderUnit) async throws -> Void,
+    onText: (@Sendable (ProviderTextPreview) async throws -> Void)?
+  ) async throws {
+    if outputMode == .structuredSpatialSteps {
+      try await spatialDecoder.append(delta, onUnit: onUnit, onText: onText)
+    } else {
+      try await decoder.append(delta, onUnit: onUnit, onText: onText)
+    }
+  }
+
+  private mutating func finish(
+    onUnit: @Sendable (ProviderUnit) async throws -> Void,
+    onText: (@Sendable (ProviderTextPreview) async throws -> Void)?
+  ) async throws {
+    if outputMode == .structuredSpatialSteps {
+      try await spatialDecoder.finish(onUnit: onUnit, onText: onText)
+    } else {
+      try await decoder.finish(onUnit: onUnit, onText: onText)
     }
   }
 

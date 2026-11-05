@@ -1,14 +1,16 @@
 # Structured explanation streaming: experimental checkpoint
 
-**Checkpoint, 5 November 2026.** This is an opt-in output-format experiment, not a promoted explanation path or a model-default change. Clean source `96180a1d07a6f28a7601fc8889cf6be519e5f9ea` passes **498 local Swift tests** (436 app across 57 suites, 21 store, 41 core) and a signed build, and is now installed as the sole canonical app. Its executable SHA-256 is `1ba5094a3e38aa22f9bf856cd96af4696e63f8c482301075857d724124acc787`; receipt/Info.plist/hash agree, the existing certificate's deep strict signature and designated requirement are valid, and cleanup reported no issues. Exact-source [CI run `42052198287`](https://github.com/Nithesh8678/opencompanion/actions/runs/42052198287) passed both native tests/build and protocol checks. Reopening through CUA checked only cursor Accessibility state, without Dashboard/Notebook. A separate normal NDJSON/Terra water control and native render passed on this binary; no physical input or audio check is inferred. Older native motor evidence remains tied to `6e55f75`; see [feature status](FEATURE-STATUS.md).
+**Source checkpoint, 5 November 2026.** The new opt-in `--structured-spatial-steps` path is implemented and the full local suite passes **533 Swift tests** (471 app across 60 suites, 21 store, 41 core). Its signed build, real-model trial, native output check and clean installation are pending. Neither this source result nor the earlier schema experiments promotes an output format or changes the model default.
 
-Original-schema trials failed explanation quality or native admission; unified Terra completed with no scene units, while unified Luna retained three atoms before a later scene was rejected. Neither produced an accepted complete lesson. Installing this code does not change those experimental results. Defaults and native quality gates remain unchanged.
+The current installed source remains `96180a1d07a6f28a7601fc8889cf6be519e5f9ea`, which passed **498 local Swift tests**, a signed build and exact-source [CI run `42052198287`](https://github.com/Nithesh8678/opencompanion/actions/runs/42052198287), including native tests/build and protocol checks. Its executable SHA-256 is `1ba5094a3e38aa22f9bf856cd96af4696e63f8c482301075857d724124acc787`; receipt/Info.plist/hash agree, the existing certificate's deep strict signature and designated requirement are valid, and cleanup reported no issues. Reopening through CUA checked only cursor Accessibility state, without Dashboard/Notebook. A separate normal NDJSON/Terra water control and native render passed on that binary; no physical input or audio check is inferred. Older native motor evidence remains tied to `6e55f75`; see [feature status](FEATURE-STATUS.md).
+
+Historical original-schema trials failed explanation quality or native admission; unified Terra completed with no scene units, while unified Luna retained three atoms before a later scene was rejected. Neither produced an accepted complete lesson. The new scene-required path has no real-model result yet. Defaults and native quality gates remain unchanged.
 
 Normal production output remains **NDJSON**, with the existing **Terra** selection policy unchanged. Passing a schema or pipe fixture does not establish useful geometry, scientific accuracy, native rendering, speech alignment or lower answer latency.
 
 ## Scope and wire format
 
-The explicit structured modes add a raw JSON Schema to `turn/start.outputSchema` and request one final object. The original mode is `CodexOutputMode.structuredScene`; the alternate is `structuredUnifiedScene`:
+The explicit structured modes add a raw JSON Schema to `turn/start.outputSchema` and request one final object. The original `CodexOutputMode.structuredScene` and alternate `structuredUnifiedScene` use this units envelope; the new `structuredSpatialSteps` uses the separate steps format below:
 
 ```json
 {"units":[{"type":"text","text":"A short explanation."},{"type":"scene","title":"Public lesson","nodes":[],"removeIDs":[],"animations":[]}]}
@@ -16,7 +18,7 @@ The explicit structured modes add a raw JSON Schema to `turn/start.outputSchema`
 
 This example shows framing only; an empty scene does not pass the lesson-quality gate. Complete text and scene units retain the existing `ProviderUnit` meaning. The prototype supports bounded typed 3D groups, meshes and anchored labels, plus a restricted set of 2D nodes and animations. Geometry variants have exact keys; foreign primitive keys are not added as null placeholders. Genuine nullable fields retain native default semantics.
 
-The adapter rejects these modes **before process startup** unless the immutable response policy authorizes a new standalone notebook explanation, without a retained notebook, supplied scene or image. Conversation, screen guidance and existing-document editing remain outside the experiment. The requested schemas exclude parameters, bindings, expressions, operations, arbitrary assets and renderer code; complete local enforcement of nested schema exclusions remains a promotion gate below. No normal preference is changed.
+The adapter rejects these modes **before process startup** unless the immutable response policy authorizes a new standalone notebook explanation, without a retained notebook, supplied scene or image. Conversation, screen guidance and existing-document editing remain outside the experiment. The requested schemas exclude parameters, bindings, expressions, operations, arbitrary assets and renderer code. The older units formats retain the local nested-conformance gap below; the new steps format validates its bundled subset locally. No normal preference is changed.
 
 The existing fresh ephemeral teaching thread remains tool-disabled: read-only sandbox, no approvals, empty dynamic tools, disabled inherited MCP/plugin entries, web search and execution features. The schema grants no external-action capability and does not replace the independent tool-attempt rejection.
 
@@ -45,18 +47,19 @@ Each awaited `onUnit` callback retains native semantic admission, atomic scene t
 | Boundary | Limit |
 |---|---:|
 | Aggregate delta text / aggregate authoritative completed text | 2,000,000 UTF-8 bytes each |
-| One unit | 262,144 UTF-8 bytes |
+| One unit or spatial step | 262,144 UTF-8 bytes |
 | One decoded narration unit | 32,000 UTF-8 bytes |
 | Envelope units | 96 |
+| Spatial steps / physical parts per step | 48 / 1–3 |
 | Parser container depth | 32 |
 | Message items per turn | 16 |
 | Turn/item identifier | 256 UTF-8 bytes |
 
 The supplied schema has its own closed-object, variant and range constraints. Native scene/node/geometry/triangle budgets still apply before allocation; schema adherence does not prove references, connected geometry, label meaning or a useful explanation.
 
-**Server schema, client framing and native admission are distinct.** The adapter supplies a schema for remote generation. Its local parser enforces bounded framing and allowed root/unit fields, then native decoders and transactions enforce supported scene semantics and budgets. This is not a complete local validator for the supplied schema. In particular, excluded nested bindings or unknown nested fields are not comprehensively rejected by the framing layer: an underlying native decoder can accept its existing bounded feature or ignore an unknown field. That does not grant tools or arbitrary execution, but it prevents claiming full client-side prototype conformance. Before promotion, validate against the trusted bundled schema locally, or explicitly enforce every prototype exclusion at the native boundary; never accept a model-supplied schema as authority.
+**Server schema, client framing and native admission are distinct.** The adapter supplies a schema for remote generation. The older units formats enforce bounded framing and allowed root/unit fields, then native decoders and transactions enforce supported scene semantics and budgets. Those formats do not fully validate the supplied schema locally: excluded nested bindings or unknown nested fields can reach an existing bounded native decoder or be ignored. This grants no tools or arbitrary execution, but full local enforcement remains their promotion gate. The new spatial-stage compiler validates its immutable bundled subset, including nested closed objects and duplicate keys; it does not replace native graph/transaction admission. Never accept a model-supplied schema as authority.
 
-The explicit public-prompt helper maps `--structured-scene-output` to the original `structuredScene` mode and `--structured-unified-output` to `structuredUnifiedScene`. With neither flag it uses NDJSON. Repeated, conflicting or value-bearing format flags reject before output-directory/provider work; neither format is an automatic fallback for the other. `--spatial-scene-case water-molecule` or `brushed-dc-motor` selects one existing case. Missing, unknown, repeated or malformed case arguments reject before any provider turn. Results record output mode, selected cases, actual model/effort, unmet quality checks and content-free timing stages.
+The explicit public-prompt helper maps `--structured-scene-output` to `structuredScene`, `--structured-unified-output` to `structuredUnifiedScene`, and `--structured-spatial-steps` to `structuredSpatialSteps`. With none it uses NDJSON. Repeated, conflicting or value-bearing format flags reject before output-directory/provider work; no format is an automatic fallback. `--spatial-scene-case water-molecule` or `brushed-dc-motor` selects one existing case. Missing, unknown, repeated or malformed case arguments reject before any provider turn. Results record output mode, selected cases, actual model/effort, unmet quality checks and content-free timing stages.
 
 Only this opt-in public helper stores `narrationPreview`: at most **16,384 UTF-8 bytes total and 64 entries**, truncated at a Unicode-scalar boundary. Recording stops after an omitted suffix; subsequent paragraphs cannot replace it. Byte count and truncation are explicit. This diagnostic is not normal production persistence. The helper supplies public authored prompts, no desktop image, microphone or private notebook; no credentials are written to results.
 
@@ -83,7 +86,7 @@ The first real `structuredUnifiedScene` Terra molecule trial completed the proto
 
 The unified Luna molecule trial admitted **one narration unit and two scene units containing three meshes and no labels**. First accepted geometry arrived at **16.99267 seconds**. A later unit failed with **Invalid scene: 3D mesh needs geometry only**, ending at **43.78207 seconds** without successful protocol completion. Its untruncated rejected summary contained nine mesh rows with repeated oxygen/hydrogen IDs. The earlier three atoms remained retained; they do not establish bonds, a complete lesson, scientific accuracy or native-rendered output. Native admission and all quality gates remained enforced.
 
-The same clean installed binary also ran a normal-path control, without either structured flag:
+The same clean installed binary also ran a normal-path control, without a structured flag:
 
 | Output / model | Public case | Accepted output | First typed geometry / provider finish | Result |
 |---|---|---|---|---|
@@ -93,13 +96,27 @@ A separate native helper loaded the control's saved public scene: all four label
 
 No Luna promotion, lower-latency guarantee, broader concept coverage or complete structured lesson is established. The Luna trial demonstrates partial accepted geometry progression followed by a terminal failure, distinct from a successful completed response. Next acceptance must require useful scene output as well as protocol correctness, repeat the previous failure and held-out cases, preserve the native geometry/surface oracles, and keep first delta, first accepted unit/geometry, provider completion, displayed pixels and audio clocks separate.
 
-## Next design proposal: scene-required steps, not implemented
+## Scene-required spatial steps: implemented, opt-in
 
-The proposed next contract replaces a text-or-scene unit choice with a bounded `steps` array. Each step must contain a scene proposal and narration. Scene data has fixed-role `groups`, `parts` and `labels` arrays, with **at least one part** rather than an all-text alternative. The host assigns native group/mesh/anchored-text kinds from those roles. This reuses the existing five geometry primitives and renderer; it adds no science-name-based correction or geometry capability. Required labels and progression still need explicit quality acceptance rather than an assumption that a nonempty part array makes a useful lesson.
+`CodexOutputMode.structuredSpatialSteps`, selected only by `--structured-spatial-steps` in the public helper, uses this fixed-role format:
 
-Before delivery, a proposed compiler must validate the trusted bundled schema locally, reject foreign fields and duplicate IDs, check group/target references and budgets, and construct a canonical native scene transaction. The host must accept that complete transaction atomically **before releasing the step's narration**. A rejected step leaves previous accepted steps retained as partial content and stops the response; it must not announce the rejected geometry as complete, silently repair its semantic roles or replay earlier steps. Existing generation/revision and cancellation authority remain in force.
+```json
+{"steps":[{"text":"A sphere is round.","title":"Sphere","groups":[],"parts":[{"id":"ball","parentID":null,"fill":"#4488CC","opacity":null,"transform":null,"geometry":{"type":"sphere","radius":1,"segments":24}}],"labels":[],"animations":[],"removeIDs":[]}]}
+```
 
-Diagnostics must distinguish a decoded transport step, canonical scene validation, host acceptance, native first pixels, narration delivery, acoustic output and successful provider completion. A completed envelope is not a completed lesson until independent content/native acceptance passes. This is a design recommendation only: no step-schema parser, compiler, delivery ordering, real comparison or test pass is claimed, and neither experimental mode nor the production default changes here.
+This is a minimal transport example, not a complete lesson. Each step requires all seven fields and **one to three typed physical parts**. The envelope permits 1–48 steps; per step, groups/labels are capped at 32 each, animations at 64 and removals at 128. The host maps `groups`, `parts` and `labels` to native group/mesh/anchored-text kinds. The model cannot supply `kind`, `type` or `spatial3D` role overrides. The existing five primitives, material fields, transforms and renderer are reused, without science-name-based correction or new geometry. This format excludes ordinary 2D output and retains the new-standalone-only scope.
+
+`ObjectArrayStreamFramer` releases only complete stage objects, bounded by 2 MB total, 262,144 bytes per stage and 32 nested containers. `StructuredSpatialStageCompiler` validates the immutable bundled schema's supported subset locally before canonical native decoding: exact required/nullable fields, nested closed objects, enums, patterns, finite/ranged numbers, integer segments and array limits. Raw duplicate keys, including escaped spellings at nested levels, are rejected before JSON decoding loses them. Node IDs are unique across the three role arrays; animation and removal IDs are unique within their own arrays. Remove-and-recreate overlaps remain permitted. Validation work is capped at 16,384 visits, with cancellation checks; no caller-supplied schema or external reference is accepted.
+
+The compiler constructs a canonical scene unit and a text unit. It deliberately does **not** decide graph-reference existence, cycles, parent/target semantics, cross-field shape relationships or aggregate world/geometry budgets; the ordinary native scene transaction must still accept them atomically. A valid wire stage is not yet an accepted scene.
+
+Delivery awaits the native **scene callback first**, checks cancellation, then releases the complete narration preview and text callback. A scene rejection releases neither preview nor text. Cancellation after a successful scene callback retains that scene but releases no narration; later errors retain prior accepted transactions as partial content, without replay or false completion. Shared thread/turn/item identity, phase and authoritative-completion checks remain unchanged. Deterministic subprocess fixtures withhold the envelope's closing brackets and item/turn completion until scene, preview and text callbacks acknowledge receipt, proving actual progressive callback delivery. Rejection, cancellation, pre-start scope, identity and non-replay cases pass in the **533-test local suite**.
+
+The helper's `structuredStageProgress` is null outside reported stage mode. It separately records `decodedStages`, `admittedSceneUnits`, `admittedTextUnits` and `completedStages`, including partial failure. For cancellation immediately after one accepted scene, the counters are **1 / 1 / 0 / 0**. These are callback-admission clocks and counts, not visible pixels, spoken samples or successful provider completion.
+
+Structural requirements do not prove a useful or visible lesson: a part can be fully transparent, an existing ID can be updated, and a one-step envelope is allowed. The prompt asks multipart lessons to use at least three steps; that is not a schema guarantee, and the existing helper still requires at least two units adding previously unseen geometry. Labels, progression, independent illustrative geometry and final native visible-surface/pixel checks remain separate quality gates. The recording's scale/fade, travelling assistant, direct floating orbit, component/speech alignment and acoustic/FPS behavior are not established by scene-before-text callback ordering.
+
+This new mode has passed local compiler, decoder and subprocess transport tests only. Its signed build, real-model trial, native output check and clean installation are pending. No default promotion, lower-latency result, scientific accuracy or complete real-model lesson is claimed.
 
 ## Official contract versus local evidence
 

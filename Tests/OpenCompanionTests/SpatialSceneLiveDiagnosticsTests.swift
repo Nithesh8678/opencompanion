@@ -13,17 +13,35 @@ struct SpatialSceneLiveDiagnosticsTests {
       try SpatialSceneOutputSelection.select(arguments: ["app", "structuredUnifiedScene"])
         == .ndjson)
     #expect(
+      try SpatialSceneOutputSelection.select(arguments: ["app", "structuredSpatialSteps"])
+        == .ndjson)
+    #expect(
       try SpatialSceneOutputSelection.select(arguments: ["app", "--structured-scene-output"])
         == .structuredScene)
     #expect(
       try SpatialSceneOutputSelection.select(arguments: ["app", "--structured-unified-output"])
         == .structuredUnifiedScene)
+    #expect(
+      try SpatialSceneOutputSelection.select(arguments: ["app", "--structured-spatial-steps"])
+        == .structuredSpatialSteps)
     for arguments in [
       ["app", "--structured-scene-output", "--structured-unified-output"],
+      ["app", "--structured-scene-output", "--structured-spatial-steps"],
+      ["app", "--structured-spatial-steps", "--structured-unified-output"],
+      [
+        "app", "--structured-scene-output", "--structured-unified-output",
+        "--structured-spatial-steps",
+      ],
       ["app", "--structured-scene-output", "--structured-scene-output"],
       ["app", "--structured-unified-output", "--structured-unified-output"],
+      ["app", "--structured-spatial-steps", "--structured-spatial-steps"],
       ["app", "--structured-scene-output=true"],
       ["app", "--structured-unified-output=water-molecule"],
+      ["app", "--structured-spatial-steps=true"],
+      ["app", "--structured-spatial-steps="],
+      ["app", "--structured-scene-output", "true"],
+      ["app", "--structured-unified-output", "false"],
+      ["app", "--structured-spatial-steps", "water-molecule"],
     ] {
       #expect(throws: ProviderError.self) {
         try SpatialSceneOutputSelection.select(arguments: arguments)
@@ -41,6 +59,10 @@ struct SpatialSceneLiveDiagnosticsTests {
       try SpatialSceneCaseSelection.select(
         arguments: ["app", "--spatial-scene-case", "brushed-dc-motor"], knownIDs: known)
         == ["brushed-dc-motor"])
+    #expect(
+      try SpatialSceneCaseSelection.select(
+        arguments: ["app", "--structured-spatial-steps", "--spatial-scene-case", "water-molecule"],
+        knownIDs: known) == ["water-molecule"])
   }
 
   @Test(arguments: [
@@ -66,6 +88,25 @@ struct SpatialSceneLiveDiagnosticsTests {
     #expect(snapshot.narrationPreviewUTF8Bytes == "A public explanation.".utf8.count)
     #expect(!snapshot.narrationPreviewTruncated)
     #expect(snapshot.textUnits == 1 && snapshot.sceneUnits == 0)
+    #expect(snapshot.structuredStageProgress == nil)
+  }
+
+  @Test func stageProgressRetainsSeparatePartialAdmissionCounters() async throws {
+    let collector = SpatialSceneAcceptanceCollector(started: ProcessInfo.processInfo.systemUptime)
+    #expect(await collector.snapshot().structuredStageProgress == nil)
+    let partial = StructuredSpatialStageProgress(
+      decodedStages: 1, admittedSceneUnits: 1, admittedTextUnits: 0, completedStages: 0)
+    await collector.structuredProgress(partial)
+    let snapshot = await collector.snapshot()
+    #expect(snapshot.structuredStageProgress == partial)
+    #expect(snapshot.textUnits == 0 && snapshot.narrationPreview.isEmpty)
+    let data = try JSONEncoder().encode(try #require(snapshot.structuredStageProgress))
+    let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Int])
+    #expect(
+      object == [
+        "decodedStages": 1, "admittedSceneUnits": 1,
+        "admittedTextUnits": 0, "completedStages": 0,
+      ])
   }
 
   @Test func truncationNeverSplitsAUnicodeScalarOrResumesAfterAnOmittedSuffix() async throws {

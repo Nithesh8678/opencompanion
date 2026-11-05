@@ -1,10 +1,10 @@
 # Structured explanation streaming: experimental checkpoint
 
-**Source checkpoint, 5 November 2026.** The new opt-in `--structured-spatial-steps` path is implemented and the full local suite passes **533 Swift tests** (471 app across 60 suites, 21 store, 41 core). Its signed build, real-model trial, native output check and clean installation are pending. Neither this source result nor the earlier schema experiments promotes an output format or changes the model default.
+**Checkpoint, 5 November 2026.** The new opt-in `--structured-spatial-steps` path is implemented and the full local suite passes **533 local Swift tests** (471 app across 60 suites, 21 store, 41 core). A clean signed build and canonical installation passed. Terra water and its separate native check passed, while Terra motor and Luna water completed the protocol but failed independent geometry quality. Exact-source CI passed native tests/build and protocol checks. No output format or model default is promoted.
 
-The current installed source remains `96180a1d07a6f28a7601fc8889cf6be519e5f9ea`, which passed **498 local Swift tests**, a signed build and exact-source [CI run `42052198287`](https://github.com/Nithesh8678/opencompanion/actions/runs/42052198287), including native tests/build and protocol checks. Its executable SHA-256 is `1ba5094a3e38aa22f9bf856cd96af4696e63f8c482301075857d724124acc787`; receipt/Info.plist/hash agree, the existing certificate's deep strict signature and designated requirement are valid, and cleanup reported no issues. Reopening through CUA checked only cursor Accessibility state, without Dashboard/Notebook. A separate normal NDJSON/Terra water control and native render passed on that binary; no physical input or audio check is inferred. Older native motor evidence remains tied to `6e55f75`; see [feature status](FEATURE-STATUS.md).
+The current installed source is `ac38f823ff258de29937f5cb28ba753ab84a148e`, with executable SHA-256 `591ccf3fd06393325fee225cd1b495fc7852d2ceaf509773aae61d396e69cdc2`. Build/install receipts, Info.plist and actual hash agree; the existing certificate's strict signature and designated requirement are valid. Only `/Applications/OpenCompanion.app` remains, without cleanup issues or build/staging app copies. CUA quit/reopening and the final post-helper check retained cursor-only Accessibility state, without Dashboard/Notebook. Its [CI run `42057268761`](https://github.com/Nithesh8678/opencompanion/actions/runs/42057268761) passed native tests/build and protocol checks for the exact installed source. Separate provider/native checks are recorded below; no physical input or audio acceptance is inferred. Historical `96180a1` passed 498 local tests, [CI `42052198287`](https://github.com/Nithesh8678/opencompanion/actions/runs/42052198287) and the normal NDJSON water control; older motor native evidence belongs to `6e55f75`.
 
-Historical original-schema trials failed explanation quality or native admission; unified Terra completed with no scene units, while unified Luna retained three atoms before a later scene was rejected. Neither produced an accepted complete lesson. The new scene-required path has no real-model result yet. Defaults and native quality gates remain unchanged.
+Historical original-schema trials failed explanation quality or native admission; unified Terra completed with no scene units, while unified Luna retained three atoms before a later scene was rejected. Neither produced an accepted complete lesson. The new scene-required path's Terra water success and two semantic failures are separate evidence. Defaults and native quality gates remain unchanged.
 
 Normal production output remains **NDJSON**, with the existing **Terra** selection policy unchanged. Passing a schema or pipe fixture does not establish useful geometry, scientific accuracy, native rendering, speech alignment or lower answer latency.
 
@@ -86,7 +86,7 @@ The first real `structuredUnifiedScene` Terra molecule trial completed the proto
 
 The unified Luna molecule trial admitted **one narration unit and two scene units containing three meshes and no labels**. First accepted geometry arrived at **16.99267 seconds**. A later unit failed with **Invalid scene: 3D mesh needs geometry only**, ending at **43.78207 seconds** without successful protocol completion. Its untruncated rejected summary contained nine mesh rows with repeated oxygen/hydrogen IDs. The earlier three atoms remained retained; they do not establish bonds, a complete lesson, scientific accuracy or native-rendered output. Native admission and all quality gates remained enforced.
 
-The same clean installed binary also ran a normal-path control, without a structured flag:
+Historical clean revision `96180a1` also ran a normal-path control, without a structured flag:
 
 | Output / model | Public case | Accepted output | First typed geometry / provider finish | Result |
 |---|---|---|---|---|
@@ -116,7 +116,21 @@ The helper's `structuredStageProgress` is null outside reported stage mode. It s
 
 Structural requirements do not prove a useful or visible lesson: a part can be fully transparent, an existing ID can be updated, and a one-step envelope is allowed. The prompt asks multipart lessons to use at least three steps; that is not a schema guarantee, and the existing helper still requires at least two units adding previously unseen geometry. Labels, progression, independent illustrative geometry and final native visible-surface/pixel checks remain separate quality gates. The recording's scale/fade, travelling assistant, direct floating orbit, component/speech alignment and acoustic/FPS behavior are not established by scene-before-text callback ordering.
 
-This new mode has passed local compiler, decoder and subprocess transport tests only. Its signed build, real-model trial, native output check and clean installation are pending. No default promotion, lower-latency result, scientific accuracy or complete real-model lesson is claimed.
+### Real spatial-steps trials
+
+The clean installed `ac38f823` binary ran these bounded, low-effort public trials. Every row completed the protocol and passed native structural admission; quality remained independently checked:
+
+| Model / public case | Decoded / scene / text / completed stages | Meshes / anchored labels | First accepted geometry | Provider finish | Quality |
+|---|---|---|---:|---:|---|
+| Terra / water molecule | 3 / 3 / 3 / 3 | 5 / 3 | 21.51103 s | 31.65646 s | Passed |
+| Terra / brushed DC motor | 4 / 4 / 4 / 4 | 7 / 7 | 29.17236 s | 54.24596 s | Failed: motor part roles/cutaway |
+| Luna / water molecule | 3 / 3 / 3 / 3 | 5 / 5 | 11.93385 s | 26.90201 s | Failed: geometry variety and atom roles |
+
+Each trial added previously unseen geometry in every stage. For Terra water, first transport delta arrived at 17.57583 s and thread readiness at 0.91052 s, measured from request start. A separate native helper loaded **only that accepted Terra water scene**: three labels were complete, all three requested leaders passed full-scene closest-target surface ownership before/after programmatic camera movement, and canonical hints, zero overlap, alpha pixels, foreground/click-through, stale/current Clear and teardown passed. The final coherent PNG was visually inspected. The native run used no provider, desktop capture, audio, physical drag/Clear click or FPS measurement.
+
+Terra motor failed `motor-axial-part-roles`: its proposed housing was a solid cylinder (radius 2.1, height 3.4), with no tube anywhere, although narration described a curved cutaway/opening. Luna water used tubes for all five meshes, failing `geometry-variety` and `water-atom-roles`; its narration also described an oxygen cutaway form. Luna's first delta was 8.08428 s and thread readiness 0.74561 s. No native render was attempted for either semantically invalid lesson. These observations do not identify a parser, decoder, schema or backend cause, and no oracle was loosened or model output repaired by name.
+
+Exact-source CI passed both native and protocol jobs. One accepted water lesson is not a reliability distribution, scientific-accuracy result, latency parity or justification for default promotion. Faster rejected output does not support changing routing. No further live generation is included in this checkpoint; the historical units-mode failures remain unchanged.
 
 ## Official contract versus local evidence
 

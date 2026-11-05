@@ -64,6 +64,8 @@ Anchored overlay labels use the built-in `ChalkboardSE-Regular` font when availa
 
 The opt-in `--explanation-overlay-acceptance OUTPUT [PUBLIC_SCENE_JSON]` checks only this app's native views and windows. It uses native SceneKit output and the retained label composite; it does not capture the desktop, call a provider, inject input or record audio. Programmatic camera movement is distinguished from a physical orbit gesture. Controller Clear invocation is distinguished from a real mouse click. Raw reference media and private background content are excluded from the repository.
 
+**Semantic surface grounding remains open.** Final motor review found that the model's housing-label point `(0.7, 1.1, 0.7)` lies inside the tube's empty cavity and missing arc. Its native projection is mathematically correct, but visually appears over the rotor. Current geometry oracles and leader-projection checks do not prove that a label touches a visible surface of its named part. Requested anchor hints, validated surface points and occlusion need separate ownership before claiming reliable part labeling.
+
 ## Corrected provider and native-helper evidence
 
 One corrected public-prompt run selected the account's advertised `gpt-5.6-terra`, low effort, with routing reason `terraVisual`. Notebook turns use focused text/scene instructions plus the typed spatial contract and current response policy, without screen-target examples. Both generated lessons passed atomic semantic admission, progressive new-part checks and independent illustrative geometry checks.

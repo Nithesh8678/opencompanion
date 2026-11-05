@@ -203,7 +203,7 @@ actor MCPClient {
     self.credentialLoader = credentialLoader
     self.configuration = configuration
     self.credentials = credentials
-    let timeout = min(max(requestTimeout, 1), 120)
+    let timeout = Self.boundedTimeout(requestTimeout)
     self.requestTimeout = timeout
     if let session {
       self.session = session
@@ -275,14 +275,17 @@ actor MCPClient {
 
   /// The caller presents the selected tool and arguments for explicit user
   /// invocation. Tool descriptions/annotations are untrusted server content.
-  func callTool(name: String, arguments: JSONValue) async throws -> JSONValue {
+  func callTool(name: String, arguments: JSONValue, timeout: TimeInterval? = nil) async throws
+    -> JSONValue
+  {
     guard state.status == .connected, let tool = state.tools.first(where: { $0.name == name })
     else {
       throw MCPError.unavailableTool(name)
     }
     try MCPArgumentValidator.validate(arguments, schema: tool.inputSchema)
     return try await request(
-      method: "tools/call", params: .object(["name": .string(name), "arguments": arguments]))
+      method: "tools/call", params: .object(["name": .string(name), "arguments": arguments]),
+      timeout: timeout)
   }
 
   func disconnect(removeCredential: Bool = false) async throws {
@@ -330,17 +333,19 @@ actor MCPClient {
     throw MCPError.responseTooLarge
   }
 
-  private func request(method: String, params: JSONValue) async throws -> JSONValue {
+  private func request(method: String, params: JSONValue, timeout: TimeInterval? = nil) async throws
+    -> JSONValue
+  {
     let id = UUID().uuidString
     let body = JSONValue.object([
       "jsonrpc": .string("2.0"), "id": .string(id), "method": .string(method), "params": params,
     ])
-    let request = try makeRequest(body: body)
+    let timeout = Self.boundedTimeout(timeout ?? requestTimeout)
+    let request = try makeRequest(body: body, timeout: timeout)
     do {
       let response = try await withTaskCancellationHandler {
         try await withThrowingTaskGroup(of: MCPWireResponse.self) { group in
           let session = session
-          let timeout = requestTimeout
           group.addTask {
             try await Self.transport(request: request, session: session, matchingID: id)
           }
@@ -371,7 +376,19 @@ actor MCPClient {
         state.tools = []
         state.message = error.localizedDescription
       }
-      if case MCPError.timeout = error { await cancelRemote(id: id) }
+      if Task.isCancelled { throw CancellationError() }
+      // URLSession's request timeout and our absolute deadline can complete in
+      // either order. Both mean the same unknown action outcome, without replay.
+      let deadlineReached: Bool
+      if case MCPError.timeout = error {
+        deadlineReached = true
+      } else {
+        deadlineReached = (error as? URLError)?.code == .timedOut
+      }
+      if deadlineReached {
+        await cancelRemote(id: id)
+        throw MCPError.timeout
+      }
       throw error
     }
   }
@@ -387,14 +404,31 @@ actor MCPClient {
   }
 
   private func cancelRemote(id: String) async {
-    try? await notification(
-      method: "notifications/cancelled",
-      params: .object([
+    let body = JSONValue.object([
+      "jsonrpc": .string("2.0"), "method": .string("notifications/cancelled"),
+      "params": .object([
         "requestId": .string(id), "reason": .string("User cancellation or request deadline"),
-      ]))
+      ]),
+    ])
+    // Best effort must not add the normal 45-second request budget after a
+    // short tool deadline. Bound this notification independently of its peer.
+    guard let request = try? makeRequest(body: body, timeout: 1) else { return }
+    let session = session
+    await withTaskGroup(of: Void.self) { group in
+      group.addTask {
+        if let (bytes, _) = try? await session.bytes(for: request) { bytes.task.cancel() }
+      }
+      group.addTask { try? await Task.sleep(for: .seconds(1)) }
+      _ = await group.next()
+      group.cancelAll()
+    }
   }
 
-  private func makeRequest(body: JSONValue?) throws -> URLRequest {
+  private static func boundedTimeout(_ value: TimeInterval) -> TimeInterval {
+    value.isFinite ? min(max(value, 1), 120) : 45
+  }
+
+  private func makeRequest(body: JSONValue?, timeout: TimeInterval? = nil) throws -> URLRequest {
     let url = configuration.url
     guard let scheme = url.scheme, let host = url.host, !host.isEmpty,
       scheme == "https"
@@ -403,7 +437,7 @@ actor MCPClient {
     else { throw MCPError.invalidEndpoint }
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
-    request.timeoutInterval = requestTimeout
+    request.timeoutInterval = timeout ?? requestTimeout
     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
     request.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
     request.setValue(protocolVersion, forHTTPHeaderField: "MCP-Protocol-Version")

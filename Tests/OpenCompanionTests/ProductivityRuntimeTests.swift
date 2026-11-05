@@ -105,16 +105,34 @@ struct ProductivityRuntimeTests {
   }
 
   @Test func mcpDeadlineIsBoundedAndSendsCancellation() async throws {
-    let fixture = MCPFixture(slowCall: true)
-    let client = fixture.client(timeout: 1)
+    let fixture = MCPFixture(slowCall: true, slowCancellation: true)
+    let client = fixture.client()
     _ = try await client.connect()
     let started = ContinuousClock.now
     do {
-      _ = try await client.callTool(name: "counter", arguments: .object(["count": .number(2)]))
+      _ = try await client.callTool(
+        name: "counter", arguments: .object(["count": .number(2)]), timeout: 1)
       Issue.record("The slow fixture unexpectedly completed before its deadline.")
     } catch MCPError.timeout {}
+    // The action and even an unresponsive cancellation endpoint stay bounded;
+    // URLSession startup and capability discovery are outside this tool clock.
     #expect(started.duration(to: .now) < .seconds(3))
-    #expect(fixture.methods().contains("notifications/cancelled"))
+    let callIDs = fixture.requestIDs(for: "tools/call")
+    #expect(callIDs.count == 1)
+    #expect(fixture.cancelledRequestIDs() == callIDs)
+  }
+
+  @Test func nativeTransportTimeoutUsesTheSameDeadlineErrorAndCancelsWithoutReplay() async throws {
+    let fixture = MCPFixture(nativeTimeoutCall: true)
+    let client = fixture.client()
+    _ = try await client.connect()
+    do {
+      _ = try await client.callTool(name: "counter", arguments: .object(["count": .number(2)]))
+      Issue.record("The injected native transport timeout unexpectedly succeeded.")
+    } catch MCPError.timeout {}
+    let callIDs = fixture.requestIDs(for: "tools/call")
+    #expect(callIDs.count == 1)
+    #expect(fixture.cancelledRequestIDs() == callIDs)
   }
 
   @MainActor @Test func restartingSchedulerConfigurationPreservesActiveWork() async throws {
@@ -207,16 +225,21 @@ private final class MCPFixture: @unchecked Sendable {
   let sse: Bool
   let expireCall: Bool
   let slowCall: Bool
+  let slowCancellation: Bool
+  let nativeTimeoutCall: Bool
   let unsupportedSchema: Bool
 
   init(
     sse: Bool = false, expireCall: Bool = false, slowCall: Bool = false,
+    slowCancellation: Bool = false, nativeTimeoutCall: Bool = false,
     unsupportedSchema: Bool = false
   ) {
     url = URL(string: "https://mcp-fixture.invalid/\(UUID().uuidString)")!
     self.sse = sse
     self.expireCall = expireCall
     self.slowCall = slowCall
+    self.slowCancellation = slowCancellation
+    self.nativeTimeoutCall = nativeTimeoutCall
     self.unsupportedSchema = unsupportedSchema
     MCPFixtureRegistry.shared.register(self)
   }
@@ -240,6 +263,27 @@ private final class MCPFixture: @unchecked Sendable {
     }
   }
 
+  func requestIDs(for method: String) -> [String] {
+    requests().compactMap { request in
+      guard let body = request.httpBody,
+        let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+        object["method"] as? String == method
+      else { return nil }
+      return object["id"] as? String
+    }
+  }
+
+  func cancelledRequestIDs() -> [String] {
+    requests().compactMap { request in
+      guard let body = request.httpBody,
+        let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+        object["method"] as? String == "notifications/cancelled",
+        let params = object["params"] as? [String: Any]
+      else { return nil }
+      return params["requestId"] as? String
+    }
+  }
+
   func response(to request: URLRequest) throws -> (Int, [String: String], Data, Bool) {
     lock.withLock { received.append(request) }
     if request.httpMethod == "DELETE" { return (204, [:], Data(), false) }
@@ -250,7 +294,9 @@ private final class MCPFixture: @unchecked Sendable {
       return (202, [:], Data(), false)
     }
     guard let method = object["method"] as? String else { throw URLError(.badServerResponse) }
-    if method.hasPrefix("notifications/") { return (202, [:], Data(), false) }
+    if method.hasPrefix("notifications/") {
+      return (202, [:], Data(), slowCancellation && method == "notifications/cancelled")
+    }
     let id = object["id"] as? String ?? "missing"
     let result: [String: Any]
     switch method {
@@ -279,6 +325,7 @@ private final class MCPFixture: @unchecked Sendable {
         result = ["tools": [["name": "echo", "inputSchema": ["type": "object"]]]]
       }
     case "tools/call":
+      if nativeTimeoutCall { throw URLError(.timedOut) }
       if expireCall { return (404, ["Content-Type": "application/json"], Data(), false) }
       result = [
         "content": [["type": "text", "text": "Observed fixture result"]], "isError": false,

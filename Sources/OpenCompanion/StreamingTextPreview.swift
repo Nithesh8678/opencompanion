@@ -23,12 +23,13 @@ struct ProviderTextStreamDecoder: Sendable {
   mutating func append(
     _ delta: String,
     onUnit: @Sendable (ProviderUnit) async throws -> Void,
-    onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil
+    onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil,
+    onRejectedLine: (@Sendable (Data) async -> Void)? = nil
   ) async throws {
     try Task.checkCancellation()
     for byte in delta.utf8 {
       if byte == 10 {
-        if let unit = try finishLine() {
+        if let unit = try await finishLine(onRejectedLine: onRejectedLine) {
           try await deliver(unit, onUnit: onUnit, onText: onText)
         }
       } else {
@@ -48,15 +49,21 @@ struct ProviderTextStreamDecoder: Sendable {
 
   mutating func finish(
     onUnit: @Sendable (ProviderUnit) async throws -> Void,
-    onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil
+    onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil,
+    onRejectedLine: (@Sendable (Data) async -> Void)? = nil
   ) async throws {
     try Task.checkCancellation()
-    if let unit = try finishLine() {
+    if let unit = try await finishLine(onRejectedLine: onRejectedLine) {
       try await deliver(unit, onUnit: onUnit, onText: onText)
     }
   }
 
-  private mutating func finishLine() throws -> ProviderUnit? {
+  private mutating func finishLine(
+    onRejectedLine: (@Sendable (Data) async -> Void)?
+  ) async throws -> ProviderUnit? {
+    // Explicit public-fixture diagnostics only. Normal traffic has no callback
+    // and does not retain a rejected response outside this bounded decoder.
+    let diagnosticLine = onRejectedLine == nil ? nil : Data(line)
     let value = String(decoding: line, as: UTF8.self)
       .trimmingCharacters(in: .whitespacesAndNewlines)
     line.removeAll(keepingCapacity: true)
@@ -67,6 +74,7 @@ struct ProviderTextStreamDecoder: Sendable {
     do {
       unit = try JSONDecoder().decode(ProviderUnit.self, from: Data(value.utf8))
     } catch {
+      if let onRejectedLine, let diagnosticLine { await onRejectedLine(diagnosticLine) }
       throw ProviderError.message(
         "Model output did not match the line protocol. Accepted earlier content was retained.")
     }

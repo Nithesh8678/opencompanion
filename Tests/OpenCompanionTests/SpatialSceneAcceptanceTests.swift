@@ -125,6 +125,57 @@ struct SpatialSceneAcceptanceTests {
     #expect(checks("brushed-dc-motor", remote).contains("motor-assembled-axial-extents"))
   }
 
+  @Test func pendulumAcceptsConnectedSolidPartsUnderComposedParentTransforms() throws {
+    #expect(checks("simple-pendulum", try pendulum()) == [])
+    #expect(
+      checks(
+        "simple-pendulum",
+        try pendulum(
+          group: .init(
+            position: .init(x: 3, y: -2, z: 1),
+            rotationDegrees: .init(x: 25, y: 60, z: 17),
+            scale: .init(x: 1.6, y: 0.8, z: 1.1)))) == [])
+  }
+
+  @Test func pendulumRejectsDisconnectedAndOverlongRodEvenWhenItCrossesBothParts() throws {
+    var short = try pendulum()
+    let rod = try #require(short.nodes.firstIndex { $0.id == "piece-b" })
+    short.nodes[rod].spatial3D?.geometry = .cylinder(radius: 0.05, height: 0.4)
+    #expect(checks("simple-pendulum", short).contains("pendulum-rod-connects-parts"))
+    var excessive = try pendulum()
+    excessive.nodes[rod].spatial3D?.geometry = .cylinder(radius: 0.05, height: 6)
+    #expect(checks("simple-pendulum", excessive).contains("pendulum-rod-connects-parts"))
+  }
+
+  @Test func pendulumRejectsAnimationEvenWhenItsRestPoseIsConnected() throws {
+    var animated = try pendulum()
+    #expect(checks("simple-pendulum", animated).isEmpty)
+    animated.animations = [
+      .init(id: "public-spin", targetID: "piece-b", behavior: .rotate, speed: 45, axis3D: .z)
+    ]
+    animated = try animated.validated()
+    #expect(checks("simple-pendulum", animated) == ["pendulum-static"])
+  }
+
+  @Test func pendulumRejectsHollowBobWrongSemanticRolesAndInvisibleParts() throws {
+    var hollow = try pendulum()
+    let bob = try #require(hollow.nodes.firstIndex { $0.id == "piece-c" })
+    hollow.nodes[bob].spatial3D?.geometry = .tube(innerRadius: 0.2, outerRadius: 0.45, height: 0.9)
+    #expect(checks("simple-pendulum", hollow).contains("pendulum-part-roles"))
+    var mislabeled = try pendulum()
+    let supportLabel = try #require(mislabeled.nodes.firstIndex { $0.id == "label-piece-a" })
+    let bobLabel = try #require(mislabeled.nodes.firstIndex { $0.id == "label-piece-c" })
+    mislabeled.nodes[supportLabel].text = "Round Bob"
+    mislabeled.nodes[bobLabel].text = "Fixed Support"
+    #expect(checks("simple-pendulum", mislabeled).contains("pendulum-part-roles"))
+    var hidden = try pendulum()
+    hidden.nodes[bob].opacity = 0
+    #expect(checks("simple-pendulum", hidden).contains("pendulum-part-roles"))
+    var transparent = try pendulum()
+    transparent.nodes[bob].fill = "#4488CC00"
+    #expect(checks("simple-pendulum", transparent).contains("pendulum-visible-parts"))
+  }
+
   private func checks(_ id: String, _ document: SceneDocument) -> [String] {
     SpatialSceneContentOracle.unmetChecks(caseID: id, document: document)
   }
@@ -165,6 +216,21 @@ struct SpatialSceneAcceptanceTests {
         position: .init(x: 0, y: -0.94, z: 0)),
       label("Curved housing", target: "part-a"), label("Rotor", target: "part-b"),
       label("Output shaft", target: "part-c"), label("Commutator", target: "part-d"),
+    ]).validated()
+  }
+
+  private func pendulum(group: Transform3D = .identity) throws -> SceneDocument {
+    try SceneDocument(nodes: [
+      .init(id: "root", kind: .group, spatial3D: .init(transform: group)),
+      mesh(
+        "piece-a", .box(width: 2, height: 0.4, depth: 0.6, chamferRadius: 0.03),
+        position: .init(x: 0, y: 1.7, z: 0)),
+      mesh(
+        "piece-b", .cylinder(radius: 0.05, height: 2.8),
+        position: .init(x: 0, y: 0.3, z: 0)),
+      mesh("piece-c", .sphere(radius: 0.45), position: .init(x: 0, y: -1, z: 0)),
+      label("Fixed Support", target: "piece-a"), label("Solid Rod", target: "piece-b"),
+      label("Round Bob", target: "piece-c"),
     ]).validated()
   }
 

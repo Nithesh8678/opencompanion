@@ -79,7 +79,8 @@ actor CodexProvider {
     onUnit: @escaping @Sendable (ProviderUnit) async throws -> Void,
     onText: (@Sendable (ProviderTextPreview) async throws -> Void)? = nil,
     responsePolicy: ResponsePolicy? = nil,
-    outputMode: CodexOutputMode = .ndjson
+    outputMode: CodexOutputMode = .ndjson,
+    onRejectedLine: (@Sendable (Data) async -> Void)? = nil
   ) async throws {
     let requestPolicy =
       responsePolicy
@@ -276,7 +277,8 @@ actor CodexProvider {
             throw ProviderError.message("Codex output exceeded the bounded response budget.")
           }
           if outputMode == .ndjson {
-            try await decoder.append(delta, onUnit: deliverUnit, onText: onText)
+            try await decoder.append(
+              delta, onUnit: deliverUnit, onText: onText, onRejectedLine: onRejectedLine)
           }
         }
         if outputMode.isStructured {
@@ -327,7 +329,8 @@ actor CodexProvider {
           await timing.mark(.finalMessageCompleted)
         }
       } else {
-        try await decoder.finish(onUnit: deliverUnit, onText: onText)
+        try await decoder.finish(
+          onUnit: deliverUnit, onText: onText, onRejectedLine: onRejectedLine)
       }
       let acceptedUnits =
         outputMode.isStructured ? structured.acceptedUnits : decoder.acceptedUnits

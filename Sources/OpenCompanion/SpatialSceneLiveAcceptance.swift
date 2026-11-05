@@ -29,6 +29,11 @@ enum SpatialSceneLiveAcceptance {
         prompt:
           "Create a small interactive 3D ball-and-stick explanation of a water molecule. Show one oxygen atom, two hydrogen atoms and the two bonds in a bent arrangement, with short labels attached to the atoms. Explain that the sizes and bond lengths are illustrative. Build it progressively.",
         minimumMeshes: 5, minimumLabels: 3, concepts: ["oxygen", "hydrogen"]),
+      Case(
+        id: "simple-pendulum",
+        prompt:
+          "Create a small static 3D lesson explaining a simple pendulum in an illustrative rest pose. Show a rectangular fixed support, a solid round bob and a slender solid rod connecting the support to the bob. Attach short Support, Rod and Bob labels to the actual parts. Build the lesson progressively. Keep the geometry static and explain that the dimensions and rest pose are illustrative, not a physical simulation or a measured dynamics result.",
+        minimumMeshes: 3, minimumLabels: 3, concepts: ["support", "rod", "bob"]),
     ]
     let selectedIDs = try SpatialSceneCaseSelection.select(
       arguments: ProcessInfo.processInfo.arguments, knownIDs: cases.map(\.id))
@@ -56,7 +61,8 @@ enum SpatialSceneLiveAcceptance {
           onTiming: { await collector.timing($0) },
           onStructuredProgress: { await collector.structuredProgress($0) },
           onUnit: { try await collector.receive($0) }, responsePolicy: policy,
-          outputMode: outputMode)
+          outputMode: outputMode,
+          onRejectedLine: { await collector.recordRejectedLine($0) })
       } catch {
         failure = error.localizedDescription
       }
@@ -84,6 +90,12 @@ enum SpatialSceneLiveAcceptance {
       let encoder = JSONEncoder()
       encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
       try encoder.encode(document).write(to: directory.appendingPathComponent("public-scene.json"))
+      // This helper supplies only its fixed public prompts, without screen,
+      // history or selected evidence. Normal application requests never opt in.
+      if let rejectedLine = snapshot.rejectedLine {
+        try rejectedLine.write(
+          to: directory.appendingPathComponent("public-rejected-unit.txt"), options: .atomic)
+      }
       var result: [String: Any] = [
         "id": fixture.id, "result": passed ? "passed" : "failed",
         "failure": failure ?? "", "unmetChecks": unmet, "publicPromptOnly": true,
@@ -92,6 +104,10 @@ enum SpatialSceneLiveAcceptance {
         "effort": snapshot.routing?.effort ?? "provider-default",
         "routingReason": snapshot.routing?.reason.rawValue ?? "unreported",
         "sceneUnits": snapshot.sceneUnits, "textUnits": snapshot.textUnits,
+        "connectorUnits": snapshot.connectorUnits,
+        "compiledConnectorCount": snapshot.compiledConnectorCount,
+        "rejectedPublicUnitRecorded": snapshot.rejectedLine != nil,
+        "rejectedPublicUnitUTF8Bytes": snapshot.rejectedLine?.count ?? 0,
         "narrationPreview": snapshot.narrationPreview,
         "narrationPreviewUTF8Bytes": snapshot.narrationPreviewUTF8Bytes,
         "narrationPreviewTruncated": snapshot.narrationPreviewTruncated,
@@ -220,8 +236,71 @@ enum SpatialSceneContentOracle {
     switch caseID {
     case "water-molecule": return water(document: document, poses: poses)
     case "brushed-dc-motor": return motor(document: document, poses: poses)
+    case "simple-pendulum": return pendulum(document: document, poses: poses)
     default: return ["unknown-content-fixture"]
     }
+  }
+
+  private static func pendulum(document: SceneDocument, poses: [ScenePose3D]) -> [String] {
+    guard document.animations.isEmpty else { return ["pendulum-static"] }
+    let support = parts(
+      words: ["support"], document: document, poses: poses,
+      matching: {
+        if case .box = $0 { return true }
+        return false
+      })
+    let rod = parts(
+      words: ["rod"], document: document, poses: poses,
+      matching: {
+        if case .cylinder = $0 { return true }
+        return false
+      })
+    let bob = parts(words: ["bob"], document: document, poses: poses, matching: isSphere)
+    guard support.count == 1, rod.count == 1, bob.count == 1,
+      Set([support[0].node.id, rod[0].node.id, bob[0].node.id]).count == 3
+    else { return ["pendulum-part-roles"] }
+    guard [support[0], rod[0], bob[0]].allSatisfy(pendulumMaterialIsVisible) else {
+      return ["pendulum-visible-parts"]
+    }
+    guard let segment = cylinderSegment(rod[0]) else { return ["pendulum-rod-connects-parts"] }
+    let connected =
+      (pendulumSupport(support[0], contains: segment.0)
+        && pendulumBob(bob[0], contains: segment.1))
+      || (pendulumSupport(support[0], contains: segment.1)
+        && pendulumBob(bob[0], contains: segment.0))
+    return connected ? [] : ["pendulum-rod-connects-parts"]
+  }
+
+  private static func pendulumMaterialIsVisible(_ pose: ScenePose3D) -> Bool {
+    guard pose.effectiveOpacity > 0 else { return false }
+    let material = pose.node.fill == "transparent" ? pose.node.color : pose.node.fill
+    if material == "transparent" { return false }
+    if material.count == 9 { return (UInt8(material.suffix(2), radix: 16) ?? 0) > 0 }
+    return true
+  }
+
+  private static func pendulumSupport(_ pose: ScenePose3D, contains endpoint: SIMD3<Double>) -> Bool
+  {
+    guard case .box(let width, let height, let depth, let chamfer)? = pose.node.spatial3D?.geometry,
+      let inverse = inverseLinear(pose)
+    else { return false }
+    let local = inverse * (endpoint - point(.zero, in: pose))
+    guard finite(local) != nil else { return false }
+    let tolerance = max(width, height, depth) * 0.000_001
+    let core = SIMD3<Double>(
+      max(0, width / 2 - chamfer), max(0, height / 2 - chamfer), max(0, depth / 2 - chamfer))
+    let offset = SIMD3<Double>(
+      max(0, abs(local.x) - core.x), max(0, abs(local.y) - core.y),
+      max(0, abs(local.z) - core.z))
+    return simd_length(offset) <= chamfer + tolerance
+  }
+
+  private static func pendulumBob(_ pose: ScenePose3D, contains endpoint: SIMD3<Double>) -> Bool {
+    guard case .sphere(let radius, _)? = pose.node.spatial3D?.geometry,
+      let inverse = inverseLinear(pose)
+    else { return false }
+    let local = inverse * (endpoint - point(.zero, in: pose))
+    return finite(local) != nil && simd_length(local) <= radius * 1.000_001
   }
 
   private static func water(document: SceneDocument, poses: [ScenePose3D]) -> [String] {
@@ -469,6 +548,9 @@ struct SpatialSceneAcceptanceSnapshot: Sendable {
   let lastRejectedScene: SpatialRejectedSceneSummary?
   let structuredStageProgress: StructuredSpatialStageProgress?
   let sceneUnits: Int
+  let connectorUnits: Int
+  let compiledConnectorCount: Int
+  let rejectedLine: Data?
   let progressiveGeometryUnits: Int
   let firstSceneMS: Double?
   let firstTypedMS: Double?
@@ -532,6 +614,9 @@ actor SpatialSceneAcceptanceCollector {
   private var lastRejectedScene: SpatialRejectedSceneSummary?
   private var structuredStageProgress: StructuredSpatialStageProgress?
   private var sceneUnits = 0
+  private var connectorUnits = 0
+  private var compiledConnectorCount = 0
+  private var rejectedLine: Data?
   private var progressiveGeometryUnits = 0
   private var encounteredMeshIDs: Set<String> = []
   private var firstSceneMS: Double?
@@ -548,6 +633,12 @@ actor SpatialSceneAcceptanceCollector {
   func timing(_ event: CodexTimingEvent) {
     guard timings.count < CodexTimingEvent.Stage.allCases.count else { return }
     timings.append(event)
+  }
+  func recordRejectedLine(_ data: Data) {
+    guard rejectedLine == nil, !data.isEmpty,
+      data.count <= ProviderTextStreamDecoder.maximumLineBytes
+    else { return }
+    rejectedLine = data
   }
   func receive(_ unit: ProviderUnit) throws {
     try Task.checkCancellation()
@@ -579,6 +670,10 @@ actor SpatialSceneAcceptanceCollector {
         throw error
       }
       document = accepted
+      // Count construction only after the whole native transaction succeeds.
+      let connectorCount = unit.connectors?.count ?? 0
+      if connectorCount > 0 { connectorUnits += 1 }
+      compiledConnectorCount += connectorCount
       let meshIDs = Set(
         document.nodes.compactMap { node in
           node.kind == .mesh && node.spatial3D?.geometry != nil ? node.id : nil
@@ -606,6 +701,8 @@ actor SpatialSceneAcceptanceCollector {
       lastRejectedScene: lastRejectedScene,
       structuredStageProgress: structuredStageProgress,
       sceneUnits: sceneUnits,
+      connectorUnits: connectorUnits, compiledConnectorCount: compiledConnectorCount,
+      rejectedLine: rejectedLine,
       progressiveGeometryUnits: progressiveGeometryUnits,
       firstSceneMS: firstSceneMS, firstTypedMS: firstTypedMS, routing: routing, timings: timings)
   }

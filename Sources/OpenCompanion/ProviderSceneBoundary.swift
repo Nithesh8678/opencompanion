@@ -1,8 +1,8 @@
 import CompanionCore
 import Foundation
 
-/// Repairs only newly proposed provider geometry. Stored documents, user edits,
-/// and ordinary SceneDocument transactions retain their strict validation.
+/// Canonicalizes proposed provider geometry and compiles explicit connectors.
+/// Stored documents, user edits and final transactions retain strict validation.
 enum ProviderSceneBoundary {
   static func applying(
     _ unit: ProviderUnit, to document: SceneDocument, baseRevision: Int,
@@ -67,6 +67,22 @@ enum ProviderSceneBoundary {
     for animation in unit.animations ?? [] { try append(.defineAnimation(animation)) }
     for parameter in unit.parameters?.values ?? [String: SceneParameter]().values {
       try append(.defineParameter(parameter))
+    }
+    if let connectors = unit.connectors, !connectors.isEmpty {
+      // Resolve against the complete proposed graph, including annotations
+      // whose target is a connector created by this same atomic transaction.
+      var context = document
+      context.nodes = working
+      // Keep every declaration visible to the static-construction guard, even
+      // when an operation removes or reuses an earlier target's identity.
+      context.animations =
+        document.animations
+        + operations.compactMap { operation in
+          if case .defineAnimation(let animation) = operation { return animation }
+          return nil
+        }
+      let generated = try SpatialConnectorCompiler.compile(connectors, in: context, limits: limits)
+      for node in generated { try append(.create(node)) }
     }
     guard !operations.isEmpty else {
       throw ProviderError.message("The scene unit contained no substantive operations.")

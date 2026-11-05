@@ -5,7 +5,7 @@ import Testing
 @testable import OpenCompanion
 
 struct SpatialSceneLiveDiagnosticsTests {
-  private let known = ["brushed-dc-motor", "water-molecule"]
+  private let known = ["brushed-dc-motor", "water-molecule", "simple-pendulum"]
 
   @Test func formatSelectionIsExplicitAndConflictsNeverPromoteAnExperiment() throws {
     #expect(try SpatialSceneOutputSelection.select(arguments: ["app"]) == .ndjson)
@@ -49,7 +49,7 @@ struct SpatialSceneLiveDiagnosticsTests {
     }
   }
 
-  @Test func absentFilterRetainsBothCasesAndKnownFilterSelectsOnlyThatCase() throws {
+  @Test func absentFilterRetainsSuppliedCasesAndKnownFilterSelectsOnlyThatCase() throws {
     #expect(try SpatialSceneCaseSelection.select(arguments: ["app"], knownIDs: known) == known)
     #expect(
       try SpatialSceneCaseSelection.select(
@@ -59,6 +59,10 @@ struct SpatialSceneLiveDiagnosticsTests {
       try SpatialSceneCaseSelection.select(
         arguments: ["app", "--spatial-scene-case", "brushed-dc-motor"], knownIDs: known)
         == ["brushed-dc-motor"])
+    #expect(
+      try SpatialSceneCaseSelection.select(
+        arguments: ["app", "--spatial-scene-case", "simple-pendulum"], knownIDs: known)
+        == ["simple-pendulum"])
     #expect(
       try SpatialSceneCaseSelection.select(
         arguments: ["app", "--structured-spatial-steps", "--spatial-scene-case", "water-molecule"],
@@ -89,6 +93,21 @@ struct SpatialSceneLiveDiagnosticsTests {
     #expect(!snapshot.narrationPreviewTruncated)
     #expect(snapshot.textUnits == 1 && snapshot.sceneUnits == 0)
     #expect(snapshot.structuredStageProgress == nil)
+  }
+
+  @Test func publicRejectedUnitDiagnosticIsBoundedFirstOnlyAndDoesNotAdmitContent() async {
+    let collector = SpatialSceneAcceptanceCollector(started: ProcessInfo.processInfo.systemUptime)
+    await collector.recordRejectedLine(
+      Data(repeating: 65, count: ProviderTextStreamDecoder.maximumLineBytes + 1))
+    #expect(await collector.snapshot().rejectedLine == nil)
+    let publicUnit = Data(#"{"type":"scene","connectors":[{"unexpected":true}]}"#.utf8)
+    await collector.recordRejectedLine(publicUnit)
+    await collector.recordRejectedLine(Data("later".utf8))
+    let snapshot = await collector.snapshot()
+    #expect(snapshot.rejectedLine == publicUnit)
+    #expect(snapshot.sceneUnits == 0 && snapshot.textUnits == 0)
+    #expect(snapshot.compiledConnectorCount == 0 && snapshot.connectorUnits == 0)
+    #expect(snapshot.document.nodes.isEmpty && snapshot.document.revision == 0)
   }
 
   @Test func stageProgressRetainsSeparatePartialAdmissionCounters() async throws {

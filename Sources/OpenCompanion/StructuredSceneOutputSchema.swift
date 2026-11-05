@@ -21,26 +21,41 @@ enum StructuredSceneOutputSchema {
     let opacity = nullable(number(0, 1))
     let parent = nullable(reference("identifier"))
     let geometry: [String: JSONValue] = [
-      "box": object([
-        "type": literal("box"), "width": spatialDimension, "height": spatialDimension,
-        "depth": spatialDimension, "chamferRadius": number(0, 500),
-      ]),
-      "sphere": object([
-        "type": literal("sphere"), "radius": spatialDimension, "segments": integer(3, 64),
-      ]),
-      "cylinder": object([
-        "type": literal("cylinder"), "radius": spatialDimension, "height": spatialDimension,
-        "segments": integer(3, 64),
-      ]),
-      "torus": object([
-        "type": literal("torus"), "ringRadius": spatialDimension, "pipeRadius": spatialDimension,
-        "ringSegments": integer(3, 64), "pipeSegments": integer(3, 64),
-      ]),
-      "tube": object([
-        "type": literal("tube"), "innerRadius": spatialDimension, "outerRadius": spatialDimension,
-        "height": spatialDimension, "segments": integer(3, 64),
-        "startAngleDegrees": number(-360_000, 360_000), "sweepAngleDegrees": number(1, 360),
-      ]),
+      "box": described(
+        object([
+          "type": literal("box"), "width": spatialDimension, "height": spatialDimension,
+          "depth": spatialDimension, "chamferRadius": number(0, 500),
+        ]),
+        "A solid rectangular block; chamferRadius rounds its edges. It has no hollow interior."
+      ),
+      "sphere": described(
+        object([
+          "type": literal("sphere"), "radius": spatialDimension, "segments": integer(3, 64),
+        ]),
+        "A solid round ball with radius equal in every direction. It has no bore or cutaway opening."
+      ),
+      "cylinder": described(
+        object([
+          "type": literal("cylinder"), "radius": spatialDimension, "height": spatialDimension,
+          "segments": integer(3, 64),
+        ]),
+        "A solid rod or disk along local +Y, with filled circular ends. It has no bore or open sector."
+      ),
+      "torus": described(
+        object([
+          "type": literal("torus"), "ringRadius": spatialDimension, "pipeRadius": spatialDimension,
+          "ringSegments": integer(3, 64), "pipeSegments": integer(3, 64),
+        ]),
+        "A closed ring around local +Y in the XZ plane, with a circular solid cross-section and a central hole."
+      ),
+      "tube": described(
+        object([
+          "type": literal("tube"), "innerRadius": spatialDimension, "outerRadius": spatialDimension,
+          "height": spatialDimension, "segments": integer(3, 64),
+          "startAngleDegrees": number(-360_000, 360_000), "sweepAngleDegrees": number(1, 360),
+        ]),
+        "A hollow cylindrical shell along local +Y. Its bore is empty; sweepAngleDegrees below 360 also removes an angular sector. Use for a hollow shell or requested cutaway, never as a solid ball or rod."
+      ),
     ]
     var definitions: [String: JSONValue] = [
       "identifier": identifier,

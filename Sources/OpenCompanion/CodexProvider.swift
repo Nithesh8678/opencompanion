@@ -29,12 +29,13 @@ actor CodexProvider {
         method: "account/read", id: 2, params: .object(["refreshToken": .bool(false)]))
       let account = try await Self.response(id: 2, iterator: &iterator)
       let authType = account["account"]?["type"]?.string ?? "signedOut"
-      try session.send(
-        method: "model/list", id: 3,
-        params: .object(["includeHidden": .bool(false), "limit": .number(100)]))
-      let catalog = try await Self.response(id: 3, iterator: &iterator)
-      let models = (catalog["data"]?.array ?? []).compactMap { entry -> CodexModel? in
-        guard let id = entry["model"]?.string ?? entry["id"]?.string else { return nil }
+      let catalog = try await Self.modelCatalog(
+        session: session, firstRequestID: 3, iterator: &iterator)
+      let models = catalog.compactMap { entry -> CodexModel? in
+        guard entry["hidden"]?.boolean != true,
+          let id = entry["model"]?.string ?? entry["id"]?.string,
+          !id.isEmpty, id.utf8.prefix(201).count <= 200
+        else { return nil }
         return .init(id: id, displayName: entry["displayName"]?.string ?? id)
       }
       return CodexAccountStatus(authType: authType, models: models)
@@ -124,11 +125,9 @@ actor CodexProvider {
       if model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         || requestPolicy.route == .screenGuidance || requestPolicy.route == .notebook
       {
-        try session.send(
-          method: "model/list", id: 10,
-          params: .object(["includeHidden": .bool(false), "limit": .number(100)]))
-        let catalog = try await Self.response(id: 10, iterator: &iterator)
-        catalogModels = Self.routingModels(catalog["data"]?.array ?? [])
+        let catalog = try await Self.modelCatalog(
+          session: session, firstRequestID: 10, iterator: &iterator)
+        catalogModels = Self.routingModels(catalog)
       }
       let routing = try CodexModelRouting.select(
         configuredModel: model, policy: requestPolicy, preference: guidanceModel,
@@ -410,8 +409,59 @@ actor CodexProvider {
     ]),
     "capabilities": .object(["experimentalApi": .bool(true)]),
   ])
+
+  /// Discover the complete bounded visible catalog before making a selection.
+  /// Never silently choose from a truncated page or an unfinished cursor chain.
+  /// Cursor contents are opaque and are not included in errors or diagnostics.
+  private static func modelCatalog(
+    session: CodexRPCSession, firstRequestID: Int,
+    iterator: inout AsyncThrowingStream<JSONValue, any Error>.Iterator
+  ) async throws -> [JSONValue] {
+    var catalog: [JSONValue] = []
+    var cursor: String?
+    var seenCursors = Set<Data>()
+    for page in 0..<4 {
+      try Task.checkCancellation()
+      var params: [String: JSONValue] = [
+        "includeHidden": .bool(false), "limit": .number(100),
+      ]
+      if let cursor { params["cursor"] = .string(cursor) }
+      let requestID = firstRequestID + page
+      try session.send(method: "model/list", id: requestID, params: .object(params))
+      let result = try await response(id: requestID, iterator: &iterator)
+      try Task.checkCancellation()
+      guard let entries = result["data"]?.array, entries.count <= 100,
+        entries.count <= 400 - catalog.count
+      else {
+        throw ProviderError.message("Codex returned a malformed or oversized model catalog page.")
+      }
+      catalog.append(contentsOf: entries)
+      let next: String
+      switch result["nextCursor"] {
+      // Older app-server responses omit this nullable terminal field.
+      case nil, .null: return catalog
+      case .string(let value):
+        guard !value.isEmpty, value.utf8.prefix(4_097).count <= 4_096,
+          seenCursors.insert(Data(value.utf8)).inserted
+        else {
+          throw ProviderError.message("Codex returned an invalid or repeated model catalog cursor.")
+        }
+        next = value
+      default:
+        throw ProviderError.message("Codex returned a malformed model catalog cursor.")
+      }
+      guard page < 3 else {
+        throw ProviderError.message(
+          "Codex model discovery exceeded four pages or 400 entries. No partial catalog was selected."
+        )
+      }
+      cursor = next
+    }
+    throw ProviderError.message("Codex model discovery ended without a complete catalog.")
+  }
+
   private static func routingModels(_ entries: [JSONValue]) -> [CodexRoutingModel] {
-    entries.prefix(100).compactMap { entry in
+    entries.prefix(400).compactMap { entry in
       guard entry["hidden"]?.boolean != true,
         let model = entry["model"]?.string ?? entry["id"]?.string,
         !model.isEmpty, model.utf8.prefix(201).count <= 200

@@ -335,15 +335,13 @@ import Testing
     #expect(conversation.reason == .conversation && conversation.effort == nil)
   }
 
-  @Test func ambiguousTerraEntriesAndEntriesBeyondTheRequestedCatalogBoundAreExcluded() async throws
-  {
+  @Test func ambiguousTerraEntriesAreExcluded() async throws {
     var models = [
       catalogModel("gpt-5.6-sol", isDefault: true),
       catalogModel("gpt-5.6-terra"), catalogModel("gpt-5.6-terra"),
     ]
     models += (0..<97).map { catalogModel("public-fixture-\($0)") }
-    models.append(catalogModel("gpt-6.1-terra"))
-    #expect(models.count == 101)
+    #expect(models.count == 100)
     try await assertRouting(
       models: models,
       expected: .init(model: "gpt-5.6-sol", effort: "low", reason: .terraUnavailableFallback))

@@ -1,5 +1,6 @@
 import AppKit
 import CompanionCore
+import CoreGraphics
 import Foundation
 import SceneKit
 
@@ -11,8 +12,10 @@ enum ExplanationNarrationAcceptance {
       let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier
     else { throw ProviderError.message("A display and foreground baseline are required.") }
     let physicalPointer = NSEvent.mouseLocation
+    let pointerBaseline = capturePointerSample(appKit: physicalPointer)
     try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
-    let observation = Observation()
+    let observation = Observation(pointerBaseline: pointerBaseline)
+    observation.recordPointer(.baseline, sample: pointerBaseline)
     let originalSpeech = model.configuration.speechEnabled
     let oldSceneReady = model.onSceneReady
     let oldPresent = model.onExplanationPresentationChanged
@@ -25,7 +28,9 @@ enum ExplanationNarrationAcceptance {
     let oldFocusEnd = model.onExplanationFocusEnded
     let cursor = CursorCompanionCoordinator(
       model: model, observePointer: false, preferences: CursorCompanionPreferences())
+    observation.recordPointer(.afterCursorCreation)
     let overlay = ExplanationOverlay(model: model, observeOrbitInput: false) { model.stop() }
+    observation.recordPointer(.afterOverlayCreation)
     let oldVisitBounds = cursor.sceneNodeVisitBounds
     let oldFocusPoint = overlay.onSceneFocusPoint
     let oldOverlayFocusEnd = overlay.onSceneFocusEnded
@@ -151,6 +156,11 @@ enum ExplanationNarrationAcceptance {
         revision: model.explanationPresentation?.document.revision,
         rangeEnd: update.revealedUTF16End, observedUptime: update.observedUptime)
       observation.updates.append(update)
+      if update.kind == .enqueued {
+        observation.recordPointer(.enqueued, stage: stage)
+      } else if update.kind == .started {
+        observation.recordPointer(.started, stage: stage)
+      }
       if update.kind == .cancelled {
         observation.fail("Native synthesis cancelled instead of completing the public fixture.")
       }
@@ -190,7 +200,7 @@ enum ExplanationNarrationAcceptance {
                 model.explanationDisplayDocument?.revision == stage,
                 !observation.finishedStages.contains(stage),
                 NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground,
-                pointerUnchanged(physicalPointer)
+                pointerUnchanged(physicalPointer, observation: observation)
               else {
                 throw ProviderError.message(
                   "Scene focus lost active stage, foreground or physical pointer ownership.")
@@ -285,7 +295,7 @@ enum ExplanationNarrationAcceptance {
               !observation.finishedStages.contains(stage),
               cursor.sceneNodeVisitAuthority == authority,
               NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground,
-              pointerUnchanged(physicalPointer),
+              pointerUnchanged(physicalPointer, observation: observation),
               let currentProjection = canvas.currentSceneFocusProjection,
               currentProjection.targetID == projection.targetID,
               currentProjection.documentID == authority.documentID,
@@ -345,6 +355,7 @@ enum ExplanationNarrationAcceptance {
 
     do {
       let units = fixtureUnits()
+      observation.recordPointer(.beforeFirstAccept)
       try model.accept(units[0], generation: generation, expectedEvidence: nil)
       try model.accept(units[1], generation: generation, expectedEvidence: nil)
       guard model.scene?.revision == 2,
@@ -377,7 +388,7 @@ enum ExplanationNarrationAcceptance {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground else {
           throw ProviderError.message("The explanation changed the foreground baseline.")
         }
-        guard pointerUnchanged(physicalPointer) else {
+        guard pointerUnchanged(physicalPointer, observation: observation) else {
           throw ProviderError.message(
             "The physical pointer baseline changed during authored acceptance.")
         }
@@ -393,7 +404,7 @@ enum ExplanationNarrationAcceptance {
         model.scene == canonical, model.explanationDisplayDocument?.revision == 2,
         !model.voice.hasPendingSpeech,
         NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground,
-        pointerUnchanged(physicalPointer)
+        pointerUnchanged(physicalPointer, observation: observation)
       else {
         throw ProviderError.message(
           "Final narration, native presentation or canonical state differs.")
@@ -419,12 +430,14 @@ enum ExplanationNarrationAcceptance {
       try writeResult(
         observation, output: output, passed: true, failure: nil,
         foregroundPreserved: NSWorkspace.shared.frontmostApplication?.processIdentifier
-          == foreground, physicalPointerUnchanged: pointerUnchanged(physicalPointer))
+          == foreground,
+        physicalPointerUnchanged: pointerUnchanged(physicalPointer, observation: observation))
     } catch {
       try? writeResult(
         observation, output: output, passed: false, failure: error.localizedDescription,
         foregroundPreserved: NSWorkspace.shared.frontmostApplication?.processIdentifier
-          == foreground, physicalPointerUnchanged: pointerUnchanged(physicalPointer))
+          == foreground,
+        physicalPointerUnchanged: pointerUnchanged(physicalPointer, observation: observation))
       throw error
     }
   }
@@ -495,8 +508,79 @@ enum ExplanationNarrationAcceptance {
     stage == 1 ? "blue-sphere" : "amber-box"
   }
 
-  private static func pointerUnchanged(_ baseline: CGPoint) -> Bool {
-    distance(NSEvent.mouseLocation, baseline) <= 0.01
+  @MainActor private static func pointerUnchanged(_ baseline: CGPoint, observation: Observation)
+    -> Bool
+  {
+    let current = NSEvent.mouseLocation
+    let unchanged = distance(current, baseline) <= 0.01
+    if !unchanged {
+      observation.recordPointer(.firstMismatch, appKit: current)
+    }
+    return unchanged
+  }
+
+  private enum PointerCheckpoint: String {
+    case baseline, afterCursorCreation, afterOverlayCreation, beforeFirstAccept
+    case enqueued, started, firstMismatch
+  }
+
+  private struct PointerSample {
+    let uptime: TimeInterval
+    let appKit: CGPoint
+    let quartz: CGPoint?
+    let quartzConvertedToAppKit: CGPoint?
+    let primaryDisplayID: CGDirectDisplayID
+    let primaryQuartzBounds: CGRect
+    let primaryAppKitFrame: CGRect?
+  }
+
+  /// Reads native coordinates only. The CGEvent is never posted; this helper
+  /// neither moves the pointer nor installs a new input observer or permission.
+  @MainActor private static func capturePointerSample(appKit: CGPoint? = nil) -> PointerSample {
+    let uptime = ProcessInfo.processInfo.systemUptime
+    let point = appKit ?? NSEvent.mouseLocation
+    let quartz = CGEvent(source: nil)?.location
+    let displayID = CGMainDisplayID()
+    let quartzBounds = CGDisplayBounds(displayID)
+    let appKitFrame = NSScreen.screens.first {
+      ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+        == displayID
+    }?.frame
+    let converted: CGPoint?
+    if let quartz, let appKitFrame {
+      converted = CGPoint(
+        x: appKitFrame.minX + (quartz.x - quartzBounds.minX),
+        y: appKitFrame.maxY - (quartz.y - quartzBounds.minY))
+    } else {
+      converted = nil
+    }
+    return .init(
+      uptime: uptime, appKit: point, quartz: quartz, quartzConvertedToAppKit: converted,
+      primaryDisplayID: displayID, primaryQuartzBounds: quartzBounds,
+      primaryAppKitFrame: appKitFrame)
+  }
+
+  private static func finiteJSON(_ value: Double?) -> Any {
+    guard let value, value.isFinite else { return NSNull() }
+    return value
+  }
+
+  private static func pointerPointJSON(_ point: CGPoint?) -> Any {
+    guard let point else { return NSNull() }
+    return [
+      "x": finiteJSON(Double(point.x)), "y": finiteJSON(Double(point.y)),
+      "finite": point.x.isFinite && point.y.isFinite,
+    ] as [String: Any]
+  }
+
+  private static func pointerRectJSON(_ rect: CGRect?) -> Any {
+    guard let rect else { return NSNull() }
+    return [
+      "x": finiteJSON(Double(rect.origin.x)), "y": finiteJSON(Double(rect.origin.y)),
+      "width": finiteJSON(Double(rect.width)), "height": finiteJSON(Double(rect.height)),
+      "finite": rect.origin.x.isFinite && rect.origin.y.isFinite
+        && rect.width.isFinite && rect.height.isFinite,
+    ] as [String: Any]
   }
 
   private static func distance(_ a: CGPoint, _ b: CGPoint) -> Double {
@@ -593,6 +677,7 @@ enum ExplanationNarrationAcceptance {
       "audioRecorded": false, "acousticOutputVerified": false, "physicalInputUsed": false,
       "frameRateVerified": false, "foregroundPreserved": foregroundPreserved,
       "physicalPointerUnchanged": physicalPointerUnchanged, "pointerAutomationUsed": false,
+      "pointerDiagnostics": observation.pointerDiagnostics,
       "ownWindowCaptured": !observation.ownCursorCaptureStages.isEmpty,
       "desktopCompositeVerified": false,
       "ownWindowCaptureStages": observation.ownCursorCaptureStages.sorted(),
@@ -625,6 +710,11 @@ enum ExplanationNarrationAcceptance {
 
   @MainActor private final class Observation {
     let started = ProcessInfo.processInfo.systemUptime
+    private let pointerBaseline: PointerSample
+    private var pointerCheckpoints: [[String: Any]] = []
+    private var pointerCheckpointKeys = Set<String>()
+    private var firstPointerMismatchObserved = false
+    private var firstPointerMismatchDistance: Double?
     var presentations: [ExplanationPresentation] = []
     var updates: [VoiceUtteranceUpdate] = []
     var timeline: [[String: Any]] = []
@@ -648,6 +738,62 @@ enum ExplanationNarrationAcceptance {
     var failure: String?
     var snapshotTasks: [Task<Void, Never>] = []
     var snapshotDeadlines: [Int: TimeInterval] = [:]
+
+    init(pointerBaseline: PointerSample) { self.pointerBaseline = pointerBaseline }
+
+    var pointerDiagnostics: [String: Any] {
+      [
+        "checkpointLimit": 12, "checkpointCount": pointerCheckpoints.count,
+        "elapsedOrigin": "pointerBaselineSample",
+        "observationStartOffsetMS": ExplanationNarrationAcceptance.finiteJSON(
+          (started - pointerBaseline.uptime) * 1_000),
+        "baselineAppKit": ExplanationNarrationAcceptance.pointerPointJSON(pointerBaseline.appKit),
+        "firstMismatchObserved": firstPointerMismatchObserved,
+        "firstMismatchDistanceLogicalPoints": ExplanationNarrationAcceptance.finiteJSON(
+          firstPointerMismatchDistance),
+        "firstMismatchDistanceFinite": firstPointerMismatchDistance?.isFinite ?? false,
+        "checkpoints": pointerCheckpoints,
+      ]
+    }
+
+    func recordPointer(
+      _ name: PointerCheckpoint, stage: Int? = nil, sample suppliedSample: PointerSample? = nil,
+      appKit: CGPoint? = nil
+    ) {
+      let key = name.rawValue + (stage.map { ":\($0)" } ?? "")
+      guard !pointerCheckpointKeys.contains(key) else { return }
+      // Reserve the final slot so callback noise cannot hide the first failed
+      // guard. No later sample replaces that guard's original baseline/value.
+      let mismatch = name == .firstMismatch
+      guard pointerCheckpoints.count < (mismatch ? 12 : 11) else { return }
+      let sample =
+        suppliedSample ?? ExplanationNarrationAcceptance.capturePointerSample(appKit: appKit)
+      let delta = ExplanationNarrationAcceptance.distance(sample.appKit, pointerBaseline.appKit)
+      var checkpoint: [String: Any] = [
+        "checkpoint": name.rawValue,
+        "elapsedMS": ExplanationNarrationAcceptance.finiteJSON(
+          (sample.uptime - pointerBaseline.uptime) * 1_000),
+        "appKit": ExplanationNarrationAcceptance.pointerPointJSON(sample.appKit),
+        "quartz": ExplanationNarrationAcceptance.pointerPointJSON(sample.quartz),
+        "quartzConvertedToAppKit": ExplanationNarrationAcceptance.pointerPointJSON(
+          sample.quartzConvertedToAppKit),
+        "primaryDisplayID": sample.primaryDisplayID,
+        "primaryQuartzBounds": ExplanationNarrationAcceptance.pointerRectJSON(
+          sample.primaryQuartzBounds),
+        "primaryAppKitFrame": ExplanationNarrationAcceptance.pointerRectJSON(
+          sample.primaryAppKitFrame),
+        "distanceFromOriginalBaselineLogicalPoints": ExplanationNarrationAcceptance.finiteJSON(
+          delta),
+        "distanceFinite": delta.isFinite,
+      ]
+      if let stage { checkpoint["stage"] = stage }
+      pointerCheckpointKeys.insert(key)
+      pointerCheckpoints.append(checkpoint)
+      if mismatch {
+        firstPointerMismatchObserved = true
+        firstPointerMismatchDistance = delta
+      }
+    }
 
     var finishedStages: Set<Int> { Set(stages(for: .finished)) }
 

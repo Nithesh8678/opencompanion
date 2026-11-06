@@ -7,22 +7,31 @@ enum ManualGuidanceControlsLayout {
   static let size = CGSize(width: 230, height: 54)
 
   static func frame(target: CGRect, visibleFrame: CGRect) -> CGRect? {
-    guard target.origin.x.isFinite, target.origin.y.isFinite,
-      target.width.isFinite, target.height.isFinite, target.width > 0, target.height > 0,
-      visibleFrame.origin.x.isFinite, visibleFrame.origin.y.isFinite,
-      visibleFrame.width.isFinite, visibleFrame.height.isFinite,
-      visibleFrame.width >= size.width + 16, visibleFrame.height >= size.height + 16
+    let values = [target.origin.x, target.origin.y, target.size.width, target.size.height,
+      visibleFrame.origin.x, visibleFrame.origin.y, visibleFrame.size.width, visibleFrame.size.height]
+    guard values.allSatisfy({ $0.isFinite && abs($0) <= 10_000_000 }),
+      target.size.width > 0, target.size.height > 0,
+      target.size.width <= 100_000, target.size.height <= 100_000,
+      visibleFrame.size.width >= size.width + 16,
+      visibleFrame.size.height >= size.height + 16,
+      visibleFrame.size.width <= 100_000, visibleFrame.size.height <= 100_000
     else { return nil }
-    let x = min(
-      max(target.midX - size.width / 2, visibleFrame.minX + 8),
-      visibleFrame.maxX - size.width - 8)
-    let below = target.minY - size.height - 14
-    let y =
-      below >= visibleFrame.minY + 8
-      ? below
-      : min(
-        target.maxY + 14, visibleFrame.maxY - size.height - 8)
-    return CGRect(x: x, y: max(visibleFrame.minY + 8, y), width: size.width, height: size.height)
+    let safe = visibleFrame.insetBy(dx: 8, dy: 8)
+    let origins = [
+      CGPoint(x: target.midX - size.width / 2, y: target.minY - size.height - 14),
+      CGPoint(x: target.midX - size.width / 2, y: target.maxY + 14),
+      CGPoint(x: target.maxX + 14, y: target.midY - size.height / 2),
+      CGPoint(x: target.minX - size.width - 14, y: target.midY - size.height / 2),
+    ]
+    let candidates = origins.map { origin in
+      CGRect(
+        x: min(max(origin.x, safe.minX), safe.maxX - size.width),
+        y: min(max(origin.y, safe.minY), safe.maxY - size.height),
+        width: size.width, height: size.height)
+    }
+    // Prefer the familiar below/above placement, then spare side space. If a
+    // target fills the screen, keep the only Continue/Stop surface available.
+    return candidates.first { !$0.intersects(target) } ?? candidates.first
   }
 }
 
@@ -74,13 +83,12 @@ enum ManualGuidanceControlsLayout {
     panel.level = .floating
     panel.sharingType = .none
     panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-    panel.contentView = NSHostingView(
-      rootView: ManualGuidanceControlsView(
-        proceed: { [weak self] in self?.coordinator?.continueManualStep(id: step.id) },
-        stop: { [weak self] in
-          guard self?.coordinator?.manualStep?.id == step.id else { return }
-          self?.model?.stop()
-        }))
+    panel.contentView = Self.makeContentView(
+      proceed: { [weak self] in self?.coordinator?.continueManualStep(id: step.id) },
+      stop: { [weak self] in
+        guard self?.coordinator?.manualStep?.id == step.id else { return }
+        self?.model?.stop()
+      })
     self.panel = panel
     panel.alphaValue = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 1 : 0
     panel.orderFrontRegardless()
@@ -93,11 +101,25 @@ enum ManualGuidanceControlsLayout {
     }
   }
 
+  static func makeContentView(proceed: @escaping () -> Void, stop: @escaping () -> Void) -> NSView {
+    let view = ManualGuidanceHostingView(
+      rootView: ManualGuidanceControlsView(proceed: proceed, stop: stop))
+    view.frame = CGRect(origin: .zero, size: ManualGuidanceControlsLayout.size)
+    return view
+  }
+
   private func hide() {
     panel?.orderOut(nil)
     panel?.contentView = nil
     panel = nil
   }
+}
+
+/// These mouse controls intentionally live in a window that cannot become key.
+/// Admit the first click instead of waiting for an activation click to precede it.
+private final class ManualGuidanceHostingView<Content: View>: NSHostingView<Content> {
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+  override var needsPanelToBecomeKey: Bool { false }
 }
 
 extension CGRect {

@@ -105,6 +105,16 @@ The new diagnostic directly records the expected height `35.709090909090911` and
 
 After the post-cursor checkpoint, CUA entered the public text **Release QA** once and read it back from the fixture. No native Continue request or checkbox click was observed. The helper terminated at **120,102.065 ms** with `continue-or-next-target-timeout`; it accepted no second or third capture. Final fields retain `persistentNativeMarkVerified=false` and `taskComplete=false`. The retained mark's existing 45-second lease was not extended. Whether the user saw or clicked the Continue control is pending clarification; `NSPanel.isVisible` in the helper is not substituted for that observation.
 
+## Continue-control placement and first-mouse follow-up
+
+A source audit after Run 2 found two valid-target placement defects independently of that timeout. With visible frame `(0,38,1512,912)`, target `(100,970,20,10)` could place the control panel above the usable area; target `(300,60,300,870)` could overlap the panel despite free space on the right. New pre-change tests reproduced six failures across on-screen bounds, disjoint placement, translated placement and negative raw sizes.
+
+Every candidate now clamps both axes to an eight-point usable-screen inset. Placement tries below, above, right and left, choosing a disjoint candidate when available. An unavoidable-overlap fallback keeps Continue/Stop visible. Geometry validates finite positive raw sizes and existing bounded screen/coordinate ranges. Ordinary nearby controls retain their below-first placement.
+
+A native probe mounted the actual production SwiftUI content in an **invisible, non-key AnnotationPanel**, laid it out, and queried the hit views at both button centers. Both returned `acceptsFirstMouse(for:nil)=false`. This is a concrete eligibility observation, not proof of physical click delivery or the prior timeout's cause. [AppKit documents first-mouse handling](https://developer.apple.com/documentation/appkit/nsview/acceptsfirstmouse(for:)). The production control host now explicitly accepts the initial mouse event and does not require its panel to become key. It adds no activation, global input or event forwarding; existing actions still validate the exact guidance lease.
+
+The corrected six-test focused suite and **753-test full suite** passed (681 app, 21 store, 51 core). The native probe posts no events and invokes no actions; it proves eligibility only. Independent source reviews found no remaining critical issue. Signed installation and physical Continue verification remain pending. The preceding timeout and both pre-fix failing logs remain retained privately. All five mark checkpoints and final task acceptance remain required.
+
 ## Remaining acceptance
 
 A fresh task run through the explicit normal-app launcher must establish its own AX trust and satisfy the unchanged mark, input, capture and independent postcondition checks; prior receipts remain preserved. No new-source build or runtime pass is claimed. Even a passing fixture run would establish only this bounded workflow. It would not prove unfamiliar-app reliability, physical speech input, acoustic timing, displayed desktop pixels or exact reference choreography.

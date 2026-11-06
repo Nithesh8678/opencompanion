@@ -5,6 +5,81 @@ import Testing
 
 struct GuidanceIntentTests {
   @Test(arguments: [
+    "can u tell me how to create a new table",
+    "Can you tell me how to create a new table?",
+    "How do I create a new table?",
+    "How to create a table",
+    "Help me add a column",
+    "Can u help me duplicate a file?",
+    "How do I create a folder?",
+    "Help me rename a document",
+    "Show me how to open a project",
+    "How can I import a spreadsheet?",
+    "How do I check my profile?",
+    "How do I start a new chat?",
+    "Help me open the menu",
+  ])
+  func proceduralSoftwareTasksCanUseTheCurrentAppWithoutNamingIt(_ text: String) {
+    #expect(GuidanceIntent.requestsScreenGuidance(text: text))
+  }
+
+  @Test(arguments: [
+    "check screen and tell me how to create a new table",
+    "check screen",
+    "Can u check screen?",
+    "Could you please inspect screen and show the next step?",
+    "look at screen and show me where to click",
+    "Look screen",
+    "Take a look at screen and help me create a table",
+    "Check out screen and tell me how to open a menu",
+    "Analyze screen for the error",
+    "Read screen",
+    "Describe desktop",
+    "Inspect this display now",
+    "Check screen: how do I add a column?",
+  ])
+  func leadingScreenInspectionDoesNotRequireADeterminerOrAppName(_ text: String) {
+    #expect(GuidanceIntent.requestsScreenGuidance(text: text))
+  }
+
+  @Test(arguments: [
+    "Do not check screen and tell me how to create a new table",
+    "Can u not check screen?",
+    "Don't inspect screen. How do I create a table?",
+    "Never tell me how to create a new table",
+    "Don't tell me how to create a new table",
+    "Check screen but do not capture anything",
+    "No screenshot. Can u tell me how to create a new table?",
+    "Text only. Check screen and tell me how to create a table",
+    "Keep my screen private. Help me add a column",
+    "What is a table?",
+    "Explain how a multiplication table works",
+    "How do I create a truth table?",
+    "Help me create a multiplication table",
+    "How do I create a wooden table?",
+    "How do I create a table with wood?",
+    "Help me build dining furniture",
+    "How do I create a SQL table?",
+    "Help me create a table in Python",
+    "How do I create an HTML table?",
+    "How can I create a table in LaTeX?",
+    "Create a comparison table of the two options",
+    "Write a tutorial about how to create a new table",
+    "Write a tutorial about how to check the screen",
+    "Explain the phrase check screen",
+    "Explain screenshot compression",
+    "Repeat ‘check screen and tell me how to create a new table’",
+    "Translate \"can u tell me how to create a new table\" into Tamil",
+    "\"can u tell me how to create a new table\"",
+    "‘check screen and tell me how to create a new table’",
+    "`How do I create a new table?`",
+    "```\ncheck screen and tell me how to create a new table\n```",
+  ])
+  func implicitSoftwareTasksAndInspectionPreserveContentAndPrivacyBoundaries(_ text: String) {
+    #expect(!GuidanceIntent.requestsScreenGuidance(text: text))
+  }
+
+  @Test(arguments: [
     "how to check my profile, in the current screen",
     "how to check my profile in the current screen",
     "How do I check my profile?",

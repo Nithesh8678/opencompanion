@@ -165,6 +165,10 @@ struct ResponseInputPlan: Sendable {
   private let screenGuidanceEnabled: @MainActor () -> Bool
   private let guidanceForegroundPID: @MainActor () -> pid_t?
   private let scopedGuidanceRefresh: (@MainActor (ScreenEvidence) async throws -> ScreenEvidence)?
+  /// Internal acquisition dependency for deterministic acceptance. The normal
+  /// app uses the native preparation/capture transaction below.
+  private let automaticGuidanceCapture:
+    (@MainActor (ScreenGuidanceRequest, UInt64, UInt64, pid_t?) async throws -> ScreenEvidence)?
   private let responseStream: ReasoningTurnStream?
   private let selectedWindowVisibility: @MainActor (ScreenEvidence, CGRect) -> Bool
   private var turnSpeaksAloud = false
@@ -241,6 +245,9 @@ struct ResponseInputPlan: Sendable {
       CursorCompanionPreferences.load().screenGuidanceEnabled
     },
     scopedGuidanceRefresh: (@MainActor (ScreenEvidence) async throws -> ScreenEvidence)? = nil,
+    automaticGuidanceCapture:
+      (@MainActor (ScreenGuidanceRequest, UInt64, UInt64, pid_t?) async throws -> ScreenEvidence)? =
+      nil,
     responseStream: ReasoningTurnStream? = nil,
     selectedWindowVisibility: @escaping @MainActor (ScreenEvidence, CGRect) -> Bool = {
       GuidanceSelectedWindowCheck.permits(evidence: $0, targetRect: $1)
@@ -252,6 +259,7 @@ struct ResponseInputPlan: Sendable {
     self.screenGuidanceEnabled = screenGuidanceEnabled
     self.guidanceForegroundPID = guidanceForegroundPID
     self.scopedGuidanceRefresh = scopedGuidanceRefresh
+    self.automaticGuidanceCapture = automaticGuidanceCapture
     self.responseStream = responseStream
     self.selectedWindowVisibility = selectedWindowVisibility
     if !acceptanceMode {
@@ -580,7 +588,7 @@ struct ResponseInputPlan: Sendable {
               ScreenEvidenceIdentity(selected), generation: current, captureToken: captureToken,
               selectedScope: scope)
           } else {
-            frame = try await self.captureGuidanceEvidence(
+            frame = try await self.prepareAutomaticGuidanceEvidence(
               request: request, generation: current, captureToken: captureToken,
               expectedForegroundPID: expectedGuidanceForegroundPID)
           }
@@ -945,6 +953,65 @@ struct ResponseInputPlan: Sendable {
 
   /// Capture only the current active screen for this explicit guidance turn.
   /// Selected file/memory context stays in the UI and is never part of this payload.
+  private func prepareAutomaticGuidanceEvidence(
+    request: ScreenGuidanceRequest, generation: UInt64, captureToken: UInt64,
+    expectedForegroundPID: pid_t?
+  ) async throws -> ScreenEvidence {
+    guard let acquire = automaticGuidanceCapture else {
+      return try await captureGuidanceEvidence(
+        request: request, generation: generation, captureToken: captureToken,
+        expectedForegroundPID: expectedForegroundPID)
+    }
+    // A supplied acquisition transaction cannot publish after Stop, a replaced
+    // turn, a removed context, or a disabled guidance preference.
+    let owns: @MainActor () -> Bool = { [weak self] in
+      guard let self else { return false }
+      return request.selectedScope == nil && generation == self.generation
+        && self.activeGuidanceRequest == request && request.expires.isFinite
+        && ProcessInfo.processInfo.systemUptime < request.expires
+        && self.screenGuidanceEnabled()
+        && self.captureGate.permits(captureToken, cancelled: Task.isCancelled)
+    }
+    try Task.checkCancellation()
+    guard owns() else { throw CancellationError() }
+    let started = ProcessInfo.processInfo.systemUptime
+    let precedingFrameID = evidence?.frameID
+    let expectedPID = expectedForegroundPID ?? guidanceForegroundPID()
+    setGuidanceStage(.capture, generation: generation)
+    record("guidance.capture.started")
+    let frame = try await acquire(request, generation, captureToken, expectedForegroundPID)
+    try Task.checkCancellation()
+    guard owns() else { throw CancellationError() }
+    let now = ProcessInfo.processInfo.systemUptime
+    let age = now - frame.capturedAt
+    let rect = frame.screenRect
+    guard frame.frameID != precedingFrameID, frame.displayID > 0,
+      frame.windowID == nil, frame.capturedWindowBounds == nil,
+      frame.foregroundPID > 0, frame.foregroundPID == expectedPID,
+      guidanceForegroundPID() == frame.foregroundPID,
+      frame.capturedAt.isFinite, frame.capturedAt >= started,
+      age.isFinite, age >= 0, age < ScreenGuidancePolicy.admissionEvidenceAge,
+      rect.origin.x.isFinite, rect.origin.y.isFinite,
+      abs(rect.origin.x) <= 10_000_000, abs(rect.origin.y) <= 10_000_000,
+      rect.size.width.isFinite, rect.size.height.isFinite,
+      rect.size.width > 0, rect.size.height > 0,
+      rect.size.width <= 100_000, rect.size.height <= 100_000,
+      rect.maxX.isFinite, rect.maxY.isFinite
+    else {
+      throw ProviderError.message("A fresh screen capture is required before screen guidance.")
+    }
+    let size = try ScreenImageGeometry.trustedEncodedPixelSize(frame.image)
+    guard frame.imageWidth > 0, frame.imageHeight > 0,
+      frame.imageWidth == Int(size.width), frame.imageHeight == Int(size.height)
+    else { throw ProviderError.message("The current screenshot could not be verified. Ask again.") }
+    explicitManualEvidence = nil
+    selectedCaptureSelectionID = nil
+    evidence = frame
+    if selectedContext.isEmpty { contextTitle = "Screen: \(frame.foregroundName)" }
+    record("guidance.capture.accepted")
+    return frame
+  }
+
   private func captureGuidanceEvidence(
     request: ScreenGuidanceRequest, generation: UInt64, captureToken: UInt64,
     expectedForegroundPID: pid_t?

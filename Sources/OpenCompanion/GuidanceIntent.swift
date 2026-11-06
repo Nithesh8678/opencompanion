@@ -51,6 +51,8 @@ enum GuidanceIntent {
         !nearby.isDisjoint(with: [
           "share", "sharing", "look", "looking", "take", "taking", "inspect", "inspecting",
           "access", "accessing", "read", "reading", "view", "viewing", "see", "seeing",
+          "check", "checking", "analyze", "analyzing", "analyse", "analysing", "examine",
+          "examining",
         ])
       {
         return false
@@ -58,15 +60,28 @@ enum GuidanceIntent {
     }
 
     let polite: Set<String> = [
-      "please", "can", "could", "would", "will", "you", "i", "want", "need", "to", "just", "kindly",
+      "please", "can", "could", "would", "will", "you", "u", "i", "want", "need", "to", "just",
+      "kindly",
     ]
-    let leading = words.drop(while: { polite.contains($0) }).first ?? words[0]
+    let requestWords = Array(words.drop(while: { polite.contains($0) }))
+    let leading = requestWords.first ?? words[0]
+    // A negated leading request is not a new grant to inspect the desktop,
+    // even when its subordinate clause happens to contain a UI how-to.
+    if ["not", "never", "dont"].contains(leading)
+      || requestWords.starts(with: ["do", "not"]) || requestWords.starts(with: ["don", "t"])
+    {
+      return false
+    }
+    let inspection = requestsScreenInspection(requestWords, screenObjects: screenObjects)
     let current: Set<String> = ["this", "that", "here", "there", "current", "selected"]
     let near = contains(current)
-    let explicitScreen = words.enumerated().contains { index, word in
-      screenObjects.contains(word)
-        && (near || index > 0 && ["my", "your", "the", "on", "current"].contains(words[index - 1]))
-    }
+    let explicitScreen =
+      inspection
+      || words.enumerated().contains { index, word in
+        screenObjects.contains(word)
+          && (near
+            || index > 0 && ["my", "your", "the", "on", "current"].contains(words[index - 1]))
+      }
     let uiObjects: Set<String> = [
       "window", "app", "application", "button", "menu", "dropdown", "dialog", "toolbar",
       "sidebar", "tab", "link", "checkbox", "toggle", "settings", "preferences", "option",
@@ -90,6 +105,7 @@ enum GuidanceIntent {
     ]
     let technicalContent = contains([
       "python", "javascript", "typescript", "swift", "sql", "algorithm", "pseudocode",
+      "html", "css", "latex", "programmatically",
     ])
     let namedSoftwareContext =
       !technicalContent && contains(softwareObjects)
@@ -98,6 +114,12 @@ enum GuidanceIntent {
           && !["a", "an", "the", "my", "our", "your", "this", "that", "life", "general", "theory"]
             .contains(words[index + 1])
       }
+    let conceptualOrPhysicalObject =
+      has(["truth", "table"]) || has(["truth", "tables"])
+      || has(["multiplication", "table"]) || has(["multiplication", "tables"])
+      || has(["times", "table"]) || has(["times", "tables"])
+      || has(["periodic", "table"])
+      || contains(["wood", "wooden", "furniture", "carpentry", "dining"])
 
     // These guards describe the user's requested output, not words found inside
     // evidence. They keep authored tutorials, science lessons and quoted examples
@@ -113,6 +135,13 @@ enum GuidanceIntent {
           "button", "menu", "dialog", "error", "warning", "chart", "table", "selection", "text",
         ])
     if contentLead.contains(leading), !screenReadingRequest { return false }
+    if contentLead.contains(leading),
+      contains([
+        "tutorial", "poem", "story", "essay", "article", "prompt", "script", "example", "sample",
+      ])
+    {
+      return false
+    }
     if contains(["phrase", "sentence", "wording", "quote", "quoted", "transcript", "titled"])
       || has(["show", "me", "why"]) || has(["difference", "between"])
     {
@@ -130,6 +159,8 @@ enum GuidanceIntent {
     if contains(["motor", "engine", "circuit", "lever"]), !uiContext, !namedSoftwareContext {
       return false
     }
+    if conceptualOrPhysicalObject, !uiContext { return false }
+    if inspection { return true }
     if screenReadingRequest,
       ["translate", "summarize", "summarise", "read", "describe", "explain"].contains(leading)
     {
@@ -228,6 +259,14 @@ enum GuidanceIntent {
       return true
     }
     if procedural, actionRequested, uiContext || namedSoftwareContext { return true }
+    // A request to use the current software need not name that software. Keep
+    // direct content creation ("Create a comparison table") distinct from
+    // procedural/help requests, and decline common non-UI meanings of objects.
+    if procedural || helping, actionRequested, contains(softwareObjects),
+      !technicalContent, !authored, !artifact, !conceptualOrPhysicalObject
+    {
+      return true
+    }
     if procedural, near, contains(softwareObjects),
       !requestedActions.isDisjoint(with: ["go", "move", "proceed"])
     {
@@ -255,11 +294,48 @@ enum GuidanceIntent {
     return imperative && (uiContext || namedSoftwareContext || near && !authored)
   }
 
+  /// Match only a leading inspection directive, not an instruction mentioned
+  /// inside authored prose. The tiny prefix grammar allows a bare "screen"
+  /// without making every occurrence of screen vocabulary capture permission.
+  private static func requestsScreenInspection(
+    _ requestWords: [String], screenObjects: Set<String>
+  ) -> Bool {
+    guard let first = requestWords.first else { return false }
+    var index = 1
+    switch first {
+    case "check", "inspect", "examine", "analyze", "analyse", "read", "describe", "view", "see":
+      if first == "check", requestWords.count > index, requestWords[index] == "out" { index += 1 }
+    case "look":
+      if requestWords.count > index, requestWords[index] == "at" { index += 1 }
+    case "take":
+      guard requestWords.count >= 3, requestWords[1] == "a", requestWords[2] == "look" else {
+        return false
+      }
+      index = 3
+      if requestWords.count > index, requestWords[index] == "at" { index += 1 }
+    default: return false
+    }
+    if requestWords.count > index,
+      ["my", "your", "the", "this", "that", "current"].contains(requestWords[index])
+    {
+      index += 1
+    }
+    guard requestWords.count > index, screenObjects.contains(requestWords[index]) else {
+      return false
+    }
+    index += 1
+    guard requestWords.count > index else { return true }
+    return [
+      "and", "then", "for", "to", "before", "after", "so", "how", "what", "where", "why",
+      "which", "please", "now",
+    ].contains(requestWords[index])
+  }
+
   /// Remove paired quoted examples in linear work. Apostrophes inside words
   /// remain available for privacy contractions such as "don't".
   private static func outsideQuotedContent(_ text: String) -> String {
     let characters = Array(text)
-    let closers: Set<Character> = ["\"", "”", "’", "'"]
+    let closers: Set<Character> = ["\"", "”", "’", "'", "`"]
     var remaining: [Character: Int] = [:]
     for character in characters where closers.contains(character) {
       remaining[character, default: 0] += 1
@@ -286,6 +362,7 @@ enum GuidanceIntent {
       let delimiter: Character?
       switch character {
       case "\"": delimiter = "\""
+      case "`": delimiter = "`"
       case "“": delimiter = "”"
       case "‘": delimiter = "’"
       case "'" where !previousWord: delimiter = "'"

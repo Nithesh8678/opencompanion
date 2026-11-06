@@ -1,12 +1,71 @@
 import CompanionCore
+import CoreGraphics
 import Foundation
+import ImageIO
 import Testing
+import UniformTypeIdentifiers
 
 @testable import OpenCompanion
 
 // Each case starts a real Python subprocess. Bound fixture concurrency so cold
 // interpreter startup does not consume another case's protocol watchdog.
 @Suite(.serialized) struct CodexTransportTests {
+  @Test func currentScreenAndItsQuestionReachTheSameCodexTurnWithImageBytesIntact() async throws {
+    let fixture = try makeFixture(completeTurn: true)
+    defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+    let question = "check screen and tell me how to create a new table"
+    let context = "PUBLIC_SCREEN_CONTEXT_MARKER: authored 4 by 3 pixel screen fixture"
+    let image = try authoredScreenJPEG()
+    // Exercise multimodal transport after the host has granted guidance. The
+    // separate routing tests own whether a particular phrase grants capture.
+    let policy = ResponsePolicy.resolve(
+      text: question, screenGuidanceEnabled: true, explicitGuidance: true)
+    let provider = CodexProvider()
+    let receiver = TransportUnitReceiver()
+    let timeout = Task {
+      try await Task.sleep(for: .seconds(5))
+      await receiver.markWatchdogFired()
+      await provider.stop()
+    }
+    defer { timeout.cancel() }
+    try await provider.stream(
+      executable: fixture.path, model: "fixture-default",
+      messages: [.init(role: "user", text: question)], context: context, image: image, scene: nil,
+      onUnit: { unit in await receiver.append(unit.text ?? "") }, responsePolicy: policy)
+    #expect(await receiver.watchdogFired == false)
+    #expect(await receiver.text == "ready")
+
+    // This file is written by the subprocess from its actual stdin, after the
+    // production adapter's JSON encoding and pipe delivery, not by a mock builder.
+    let requests = try String(
+      contentsOf: URL(fileURLWithPath: fixture.path + ".requests"), encoding: .utf8
+    ).split(separator: "\n").map { line in
+      try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+    }
+    let turns = requests.filter { $0["method"] as? String == "turn/start" }
+    #expect(turns.count == 1)
+    let turn = try #require(turns.first)
+    let params = try #require(turn["params"] as? [String: Any])
+    let input = try #require(params["input"] as? [[String: Any]])
+    let text = input.compactMap { item in
+      item["type"] as? String == "text" ? item["text"] as? String : nil
+    }.joined(separator: "\n")
+    #expect(text.contains(question))
+    #expect(text.contains(context))
+    let images = input.filter { $0["type"] as? String == "image" }
+    #expect(images.count == 1)
+    let imageInput = try #require(images.first)
+    let uri = try #require(imageInput["url"] as? String)
+    let prefix = "data:image/jpeg;base64,"
+    #expect(uri.hasPrefix(prefix))
+    let transmitted = try #require(Data(base64Encoded: String(uri.dropFirst(prefix.count))))
+    #expect(transmitted == image)
+    let source = try #require(CGImageSourceCreateWithData(transmitted as CFData, nil))
+    #expect(CGImageSourceGetCount(source) == 1)
+    let decoded = try #require(CGImageSourceCreateImageAtIndex(source, 0, nil))
+    #expect(decoded.width == 4 && decoded.height == 3)
+  }
+
   @Test(arguments: [
     ResponsePolicy.Route.screenGuidance, .conversation, .notebook,
   ])
@@ -704,6 +763,26 @@ import Testing
     }
     // These are decoder/wrapper observation points. Awaited timing observers
     // remain part of wall elapsed time; they are not isolated model-work clocks.
+  }
+
+  private func authoredScreenJPEG() throws -> Data {
+    let bitmap = try #require(
+      CGContext(
+        data: nil, width: 4, height: 3, bitsPerComponent: 8, bytesPerRow: 16,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+    bitmap.setFillColor(CGColor(red: 0.9, green: 0.1, blue: 0.2, alpha: 1))
+    bitmap.fill(CGRect(x: 0, y: 0, width: 4, height: 3))
+    bitmap.setFillColor(CGColor(red: 0.1, green: 0.3, blue: 0.9, alpha: 1))
+    bitmap.fill(CGRect(x: 2, y: 0, width: 2, height: 3))
+    let image = try #require(bitmap.makeImage())
+    let data = NSMutableData()
+    let destination = try #require(
+      CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil))
+    CGImageDestinationAddImage(destination, image, nil)
+    let completed = CGImageDestinationFinalize(destination)
+    #expect(completed)
+    return data as Data
   }
 
   private func makeFixture(

@@ -32,7 +32,9 @@ Settings includes configurable global shortcuts and an optional display-capture 
 
 ### ChatGPT subscription mode
 
-Install the official Codex CLI and sign in with `codex login`. In Settings, select **ChatGPT via Codex**, choose its executable path, and run **Test live connection**. A blank model uses the catalog default; only a completed request verifies access. OpenCompanion uses the documented stdio app-server; it does not read or copy your login tokens. Teaching requests disable external tool capabilities and run in an ephemeral read-only thread. Model usage remains subject to your plan and limits.
+Install the official Codex CLI and sign in with `codex login`. In Settings, select **ChatGPT via Codex**, choose its executable path, and run **Test live connection**. A blank model uses the catalog default for conversation; new visual explanations and the Terra guidance preference select the newest eligible visible Terra model. Discovery follows a bounded paginated catalog, and only a completed request verifies access. OpenCompanion uses the documented stdio app-server; it does not read or copy your login tokens. Teaching requests disable external tool capabilities and run in an ephemeral read-only thread. Model usage remains subject to your plan and limits.
+
+For 6.1 Terra, use Codex CLI 0.159.0 or later; the supported `codex update` command updates compatible standalone installations. Catalog availability depends on the CLI and account. See the [official model requirements](https://learn.chatgpt.com/docs/models) and the [runtime/discovery evidence](docs/TERRA-RUNTIME-UPGRADE.md).
 
 Real completed subscription requests have produced two unrelated12-node diagrams and a retained-ID follow-up edit through the native app adapter. This establishes the tested path; it does not establish latency targets, all models, or production readiness.
 

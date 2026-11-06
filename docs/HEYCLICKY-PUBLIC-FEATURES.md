@@ -58,6 +58,20 @@ All rows below are **PUBLIC CLAIM**, condensed from the [official changelog][cha
 
 **Current versus historical:** Skills (R16) and Suggestions (R20) were paused. Earlier demonstrations remain historical.
 
+### Guidance behavior: official claims rechecked 6 November
+
+These are **PUBLIC CLAIMS** from the [official changelog][changelog], not new reference runtime tests:
+
+| Release / date (2026) | Guidance claim |
+|---|---|
+| 1.0.26 · 19 June | Detects a click on the indicated control and advances to the next step. |
+| 1.0.48 · 25 August | Supports up to 15 steps and retains the goal and completed steps across a manual-work pause and continuation. |
+| 1.0.53 · 2 October | Keeps a progress log, waits for slow pages before looking again, and avoids repeating a just-failed step. |
+
+The 1.0.31 notes (1 July) described two-second highlights and concept drawings clearing after speech. That historical rule predates the new 3D workflow; it does **not** establish current mark expiry or the persistent model/Clear lifecycle. The [recording evidence](EXPLANATION-OVERLAY.md) remains separately scoped. No usable new official-video playback was obtained in this refresh.
+
+OpenCompanion's current `ScreenGuidancePolicy` uses authored limits of **six steps**, a **180-second request lifetime** and a **45-second marked-target lifetime**. These are implementation choices, not recovered reference timings. A resumable 15-step workflow with a completed-step record, slow-page/network handling and verified final result remains an acceptance gap. All 21 whole-product gates remain open.
+
 ## Core product, privacy and commercial boundaries
 
 The [homepage][home] advertises hotkey-invoked screen-aware conversation, teaching and task agents. Its broad any-visible-app claim is marketing, not a measured compatibility matrix. It lists macOS Sonoma 14.2+, Windows 10/11 and one account across platforms. Monthly published plans are Free (25 talk and 25 agent messages), Pro ($20; unlimited talk/dictation and 150 agent messages), and Max ($100; unlimited talk/dictation and 1,000 agent messages). These are time-sensitive vendor terms, not OpenCompanion entitlements or a proposed billing implementation.
@@ -103,7 +117,7 @@ Every checkbox is intentionally **open**. The current implementation or a test u
 
 | Priority / scope | Proposed observable acceptance | Current OpenCompanion boundary |
 |---|---|---|
-| **P0 — full guidance loop** · R01/R07/R15 | [ ] On unfamiliar public fixture apps, ask by speech and text, reveal a hidden destination, click the real intended control, capture the changed scene, then reach and verify the requested result. Include profile, settings, export, menus, keyboard/manual steps, slow loading and genuine ambiguity. | Thirteen authored-image provider cases cover target selection or clarification envelopes. Physical continuation and a general unfamiliar-app success rate remain separate. |
+| **P0 — full guidance loop** · R01/R07/R15/R19 | [ ] On unfamiliar public fixture apps, ask by speech and text, reveal a hidden destination, click the real intended control, capture the changed scene, then reach and verify the requested result. Include profile, settings, export, menus, keyboard/manual steps, slow loading and genuine ambiguity. | Thirteen authored-image provider cases cover target selection or clarification envelopes. Physical continuation, resumable 15-step progress, slow-page/network handling and a general unfamiliar-app success rate remain separate acceptance gaps. |
 | **P0 — input and permission continuity** · R01/R03 | [ ] Repeated physical hold/release, brief-tap cancellation, Stop, sleep/wake, revoked permissions and a signed upgrade preserve a correct observable status and never revive an old turn. | Input/generation code and targeted installed observations exist. Full audio-route and permission lifecycle coverage remains open. |
 | **P0 — no false task success** · R02/R07 | [ ] A visible click, a provider completion and a changed application result each receive separate evidence. Failed or ambiguous effects retain an unknown/failed outcome. | Guidance is advisory; explicit native actions and jobs are separate implementations. A target PNG is not a completed task. |
 | **P1 — conceptual explanation** · R20 | [ ] Explain two unfamiliar mechanisms with useful native diagrams, readable math/labels, locally smooth reveals and a follow-up that edits only the intended part. Answer a simple fact without opening a notebook. | Corrected motor/molecule provider and bounded native visible-surface attachment checks pass. Narrated native focus and typed-receipt caption pacing are implemented; see [scene pointing](SCENE-CURSOR-POINTING.md) for the bounded recovery evidence. Independent label/focus meaning, more held-out concepts including 2D, math layout, follow-up editing and broad speech/reveal correspondence remain open. |
@@ -173,7 +187,7 @@ The next meaningful quality gain is to close the first three P0 rows with physic
 ## Primary source directory
 
 - [Homepage and current pricing][home] — rechecked 5 Nov 2026.
-- [Official changelog][changelog] — rechecked 5 Nov 2026; no later entry observed, version/date labels above.
+- [Official changelog][changelog] — rechecked 6 Nov 2026; guidance claims and historical persistence boundary above; no later entry observed.
 - [Official Mac release][release] and [latest-release redirect][latest-release] — rechecked 5 Nov 2026; [release list][releases] last checked 4 Nov 2026.
 - [Trust][trust] and [privacy policy][privacy] — rechecked 5 Nov 2026; no explicit policy effective date established here.
 - [Creator's historical repository][repository] — checked 4 Nov 2026; private-development notice dated 27 Apr 2026.

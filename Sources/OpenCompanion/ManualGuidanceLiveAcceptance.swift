@@ -1,6 +1,17 @@
 import AppKit
 import ImageIO
 
+struct GuidanceMarkRasterMetrics: Codable, Sendable {
+  let opaqueOutlinePixels: Int
+  let offContourPixels: Int
+  let sidePixels: [Int]
+  let minimumOutlinePixels: Int
+  var verified: Bool {
+    opaqueOutlinePixels >= minimumOutlinePixels && sidePixels.allSatisfy { $0 > 0 }
+      && offContourPixels <= max(4, opaqueOutlinePixels / 5)
+  }
+}
+
 /// Opt-in production capture/model/Continue check against the opaque public
 /// Guidance Fixture only. This helper never types, clicks or records audio.
 enum ManualGuidanceLiveAcceptance {
@@ -8,11 +19,14 @@ enum ManualGuidanceLiveAcceptance {
     case preflight, waitingForPublicFixture, checkingDisplay, checkingObserver
     case preparingInitialCapture, capturingInitialFrame, awaitingInitialModelTarget
     case waitingForManualInput, continuationRequested, capturingContinuation
-    case awaitingNextModelTarget, observingNextTarget, passed, failed, cancelled
+    case awaitingNextModelTarget, observingNextTarget, waitingForCheckboxClick
+    case capturingFinalFrame, awaitingFinalReply, checkingTaskPostcondition, passed, failed,
+      cancelled
   }
 
   @MainActor static func run(
-    model: AppModel, cursor: CursorCompanionCoordinator, output: URL
+    model: AppModel, cursor: CursorCompanionCoordinator, coordinator: ScreenGuidanceCoordinator,
+    output: URL, verifyTaskCompletion: Bool = false
   ) async throws {
     let preflightStarted = ProcessInfo.processInfo.systemUptime
     let entryScene = model.scene
@@ -60,6 +74,7 @@ enum ManualGuidanceLiveAcceptance {
             "automaticDesktopActions": false, "microphoneUsed": false, "audioUsed": false,
             "checkboxActionPerformedByHelper": false, "checkboxCompletionVerified": false,
             "taskComplete": false, "endState": "startup-refused",
+            "taskPostconditionRequired": verifyTaskCompletion,
             "elapsedMS": elapsedMS(since: preflightStarted),
             "fixtureDisplayPoints": displayPoints,
           ], to: output.appendingPathComponent("manual-guidance-live-acceptance.json"))
@@ -142,13 +157,27 @@ enum ManualGuidanceLiveAcceptance {
     let started = ProcessInfo.processInfo.systemUptime
     let traceStart = model.diagnosticEvents.count
     let oldPreparation = model.onPrepareScreenGuidance
+    let oldBeforeContinue = coordinator.onManualContinueWillBegin
     let oldProvider = model.providerMode
     let oldSpeech = model.configuration.speechEnabled
     let oldGuidancePreference = model.guidanceModelPreference
     let oldDisplay = model.selectedDisplay
     let originalScene = model.scene
+    let taskVerifier =
+      verifyTaskCompletion
+      ? GuidanceFixtureTaskAcceptance(
+        model: model, expectedFixturePID: pid, displayID: displayID,
+        screenRect: screen.frame, traceStart: traceStart)
+      : nil
+    var taskReceipt: GuidanceFixtureTaskAcceptance.Receipt?
+    var taskVerificationStarted = false
     var frames: [Int: ScreenEvidence] = [:]
     var stages: [Int: [String: Any]] = [:]
+    var acceptedTargets: [Int: ProviderTarget] = [:]
+    var acceptedGenerations: [Int: UInt64] = [:]
+    var markIDs: [Int: UUID] = [:]
+    var markSamples: [[String: Any]] = []
+    var sampledCheckpoints = Set<String>()
     var requestID: UUID?
     var rejection: String?
     failureCode = "incomplete"
@@ -163,6 +192,7 @@ enum ManualGuidanceLiveAcceptance {
       let names = [
         "guidance.capture.started", "guidance.capture.accepted", "guidance.stage.provider",
         "guidance.manualContinuation.armed", "guidance.manualContinue.requested",
+        "guidance.userClick.observed",
       ]
       observedCounts = Dictionary(uniqueKeysWithValues: names.map { ($0, 0) })
       for event in recentEvents() {
@@ -170,7 +200,15 @@ enum ManualGuidanceLiveAcceptance {
           observedCounts[name, default: 0] += 1
         }
       }
-      if stages[1] != nil {
+      if taskVerificationStarted {
+        if observedCounts["guidance.capture.accepted", default: 0] == 3 {
+          reportPhase(.awaitingFinalReply)
+        } else if observedCounts["guidance.userClick.observed", default: 0] == 1 {
+          reportPhase(.capturingFinalFrame)
+        } else {
+          reportPhase(.waitingForCheckboxClick)
+        }
+      } else if stages[1] != nil {
         reportPhase(.observingNextTarget)
       } else if observedCounts["guidance.manualContinue.requested", default: 0] > 0 {
         if observedCounts["guidance.capture.accepted", default: 0] >= 2 {
@@ -201,15 +239,161 @@ enum ManualGuidanceLiveAcceptance {
         throw ProviderError.message("The public fixture lost foreground or full-display coverage.")
       }
     }
+    func sampleMark(step: Int, checkpoint: String, requireSettled: Bool) throws {
+      let key = "step\(step)-\(checkpoint)"
+      guard !sampledCheckpoints.contains(key), markSamples.count < 5,
+        let evidence = frames[step], let target = acceptedTargets[step],
+        let generation = acceptedGenerations[step], generation == model.taskGeneration,
+        ScreenEvidenceIdentity(evidence).matches(model.evidence)
+      else {
+        throw ProviderError.message("The native mark checkpoint lost its exact turn ownership.")
+      }
+      try checkFixture()
+      let targetRect = CGRect(
+        x: target.x * screen.frame.width, y: target.y * screen.frame.height,
+        width: target.width * screen.frame.width, height: target.height * screen.frame.height)
+      let observations = model.overlay.presentationDiagnostics
+      let observationMetadata = try JSONSerialization.jsonObject(
+        with: JSONEncoder().encode(observations))
+      try writeJSON(
+        [
+          "checkpoint": key, "elapsedMS": elapsedMS(since: started),
+          "retainedMarks": observationMetadata, "localOwnViewOnly": true,
+          "windowServerDesktopVisibilityVerified": false,
+        ],
+        to: output.appendingPathComponent("mark-\(key)-observation.json"))
+      let candidates = observations.filter {
+        $0.ownerGeneration == generation && $0.frameID == evidence.frameID
+          && $0.evidenceRevision == evidence.revision && $0.displayID == displayID
+          && $0.foregroundPID == pid && $0.windowID == nil && $0.sourceRect == screen.frame
+          && $0.targetRect == targetRect && $0.shape == (target.shape ?? "roundedRectangle")
+          && (markIDs[step] == nil || markIDs[step] == $0.id)
+      }
+      guard candidates.count == 1, let mark = candidates.first else {
+        throw ProviderError.message("The exact native target mark was missing or ambiguous.")
+      }
+      let now = ProcessInfo.processInfo.systemUptime
+      let expectedPath = mark.shape == "ellipse" ? targetRect.insetBy(dx: 2, dy: 2) : targetRect
+      let tolerance: CGFloat = mark.shape == "ellipse" ? 1.5 : 0.25
+      let pathMatches = zip(
+        [
+          mark.outlinePathBounds.minX, mark.outlinePathBounds.minY,
+          mark.outlinePathBounds.width, mark.outlinePathBounds.height,
+        ],
+        [expectedPath.minX, expectedPath.minY, expectedPath.width, expectedPath.height]
+      ).allSatisfy { abs($0 - $1) <= tolerance }
+      guard mark.createdAt.isFinite, mark.expiresAt.isFinite, now >= mark.createdAt,
+        now < mark.expiresAt, mark.expiresAt - mark.createdAt <= 45,
+        mark.panelVisible, mark.panelFrame == screen.frame, mark.panelAlpha >= 0.99,
+        mark.panelIgnoresMouseEvents, !mark.panelCanBecomeKey, !mark.panelIsKey,
+        mark.viewMounted, !mark.viewHidden, !mark.rootHidden, mark.rootOpacity >= 0.99,
+        !mark.outlineHidden, mark.outlineOpacity >= 0.99, mark.outlineStrokeEnd >= 0.99,
+        mark.outlineLineWidth > 0, mark.outlineLineWidth <= 6, pathMatches,
+        mark.outlineDashed == (mark.shape == "roundedRectangle"), !mark.labelHidden
+      else {
+        throw ProviderError.message("The retained native mark was hidden, expired or malformed.")
+      }
+      if requireSettled {
+        guard mark.presentationOutlineHidden != true,
+          (mark.presentationOutlineOpacity ?? mark.outlineOpacity) >= 0.99,
+          (mark.presentationOutlineStrokeEnd ?? mark.outlineStrokeEnd) >= 0.99,
+          (mark.presentationLabelOpacity ?? 1) >= 0.99
+        else {
+          throw ProviderError.message("The native mark entrance had not settled at its checkpoint.")
+        }
+      }
+      let raster = try model.overlay.renderMark(id: mark.id)
+      let pixels = try annotationRasterMetrics(
+        raster, expectedTarget: targetRect, shape: mark.shape)
+      let file = "mark-\(key).png"
+      let metadata = try JSONSerialization.jsonObject(with: JSONEncoder().encode(mark))
+      let metrics = try JSONSerialization.jsonObject(with: JSONEncoder().encode(pixels))
+      let sample: [String: Any] = [
+        "checkpoint": key, "step": step, "elapsedMS": elapsedMS(since: started),
+        "mark": metadata, "rasterMetrics": metrics, "rasterVerified": pixels.verified,
+        "rasterFile": file, "rasterScale": raster.scale,
+        "rasterLocalBounds": [
+          raster.localBounds.minX, raster.localBounds.minY,
+          raster.localBounds.width, raster.localBounds.height,
+        ],
+        "rasterPixels": [raster.image.width, raster.image.height],
+        "rasterSource": "retained-own-view-model-layers",
+        "presentationLayerSampleAvailable": mark.presentationOutlineAvailable,
+        "entranceSettledRequired": requireSettled,
+        "cursorFollowingPhysicalPointer": cursor.snapshot.following,
+        "manualContinueEventCount": eventCount("guidance.manualContinue.requested"),
+        "localOwnViewOnly": true, "windowServerDesktopVisibilityVerified": false,
+        "underlyingScreenPixelsSaved": false,
+      ]
+      guard
+        let png = NSBitmapImageRep(cgImage: raster.image).representation(
+          using: .png, properties: [:]),
+        png.count <= 12 * 1_024 * 1_024
+      else { throw ProviderError.message("The bounded own-mark PNG could not be encoded.") }
+      try png.write(to: output.appendingPathComponent(file), options: .atomic)
+      try writeJSON(sample, to: output.appendingPathComponent("mark-\(key).json"))
+      markSamples.append(sample)
+      guard pixels.verified else {
+        throw ProviderError.message(
+          "The own-view annotation raster did not contain its grounded outline.")
+      }
+      // Synchronous local rendering cannot yield to another generation. Check
+      // both capture scope and the retained owner again before accepting proof.
+      try checkFixture()
+      guard generation == model.taskGeneration,
+        model.overlay.presentationDiagnostics.contains(where: {
+          $0.id == mark.id && $0.ownerGeneration == generation && $0.panelVisible
+        })
+      else {
+        throw ProviderError.message("The native mark changed during its own-view observation.")
+      }
+      markIDs[step] = mark.id
+      sampledCheckpoints.insert(key)
+      try marker(
+        "GUIDANCE_MANUAL_MARK_STEP\(step)_\(checkpoint.uppercased().replacingOccurrences(of: "-", with: "_"))"
+      )
+    }
+    func sampleReturnedCursors() throws {
+      for step in [0, 1] {
+        let key = "step\(step)-after-cursor-return"
+        guard !sampledCheckpoints.contains(key), stages[step] != nil,
+          let generation = acceptedGenerations[step], generation == model.taskGeneration,
+          cursor.snapshot.following,
+          recentEvents().contains(where: {
+            $0["event"] == "cursor.guidance.invalidated"
+              && $0["generation"] == String(generation)
+          })
+        else { continue }
+        try sampleMark(step: step, checkpoint: "after-cursor-return", requireSettled: true)
+      }
+    }
     defer {
-      // Diagnostics contain event identifiers, geometry and counts only. Never
-      // serialize a prompt, transcript, OCR labels, screenshot or user library.
+      // JSON contains identifiers, geometry and counts, not prompt/transcript,
+      // OCR or capture pixels. The opt-in PNGs render only these public own-mark
+      // layers; the fixture/desktop screenshot and user library are never saved.
+      let taskMetadata: Any
+      if let taskReceipt,
+        let data = try? JSONEncoder().encode(taskReceipt),
+        let object = try? JSONSerialization.jsonObject(with: data)
+      {
+        taskMetadata = object
+      } else {
+        taskMetadata = NSNull()
+      }
       let result: [String: Any] = [
         "result": passed ? "passed" : "failed", "failureCode": passed ? "" : failureCode,
         "lastPhase": phase.rawValue, "preflight": checks,
         "publicFixtureOnly": true, "actualCapturePath": "AppModel/CaptureService",
-        "actualCaptureVerified": frames.count == 2,
+        "actualCaptureVerified": frames.count == 2
+          && (!verifyTaskCompletion || taskReceipt?.fixturePostconditionVerified == true),
+        "verifiedCaptureCount": frames.count + (taskReceipt == nil ? 0 : 1),
         "stages": stages.keys.sorted().compactMap { stages[$0] },
+        "nativeMarkSamples": markSamples,
+        "nativeMarkCheckpointCount": sampledCheckpoints.count,
+        "persistentNativeMarkVerified": sampledCheckpoints.contains("step0-after-cursor-return")
+          && sampledCheckpoints.contains("step0-before-continue"),
+        "nativeAnnotationRasterScope": "retained-own-view-model-layers-only",
+        "windowServerDesktopVisibilityVerified": false,
         "captureAcceptedEventCount": eventCount("guidance.capture.accepted"),
         "manualContinuationArmedCount": eventCount("guidance.manualContinuation.armed"),
         "manualContinueRequestedCount": eventCount("guidance.manualContinue.requested"),
@@ -219,8 +403,13 @@ enum ManualGuidanceLiveAcceptance {
         "guidanceProviderStatus": String(model.guidanceProviderStatus.prefix(200)),
         "notebookUnchanged": model.scene == originalScene,
         "automaticDesktopActions": false, "microphoneUsed": false, "audioUsed": false,
-        "checkboxActionPerformedByHelper": false, "checkboxCompletionVerified": false,
-        "taskComplete": false, "endState": passed ? "ready-for-checkbox-click" : "failed-check",
+        "checkboxActionPerformedByHelper": false,
+        "checkboxCompletionVerified": taskReceipt?.fixturePostconditionVerified ?? false,
+        "taskPostconditionRequired": verifyTaskCompletion, "taskCompletion": taskMetadata,
+        "taskComplete": passed && taskReceipt?.taskComplete == true,
+        "endState": passed
+          ? (verifyTaskCompletion ? "fixture-task-verified" : "ready-for-checkbox-click")
+          : "failed-check",
         "elapsedMS": elapsedMS(since: started),
         "fixtureDisplayPoints": displayPoints,
       ]
@@ -234,6 +423,7 @@ enum ManualGuidanceLiveAcceptance {
         to: output.appendingPathComponent("manual-guidance-diagnostics.json"))
       model.onScreenGuidanceTargetAccepted = productionTargetObserver
       model.onPrepareScreenGuidance = oldPreparation
+      coordinator.onManualContinueWillBegin = oldBeforeContinue
       model.stop()
       cursor.shutdown()
       model.providerMode = oldProvider
@@ -252,6 +442,26 @@ enum ManualGuidanceLiveAcceptance {
       }
       try await oldPreparation?(generation, expectedPID)
       try checkFixture()
+      try await taskVerifier?.prepareCapture(generation: generation)
+      try checkFixture()
+    }
+    coordinator.onManualContinueWillBegin = { step in
+      oldBeforeContinue?(step)
+      guard rejection == nil else { return }
+      do {
+        try checkFixture()
+        guard step.request.step == 0, step.request.id == requestID,
+          coordinator.manualStep?.id == step.id, step.generation == model.taskGeneration,
+          step.evidence.matches(frames[0]), eventCount("guidance.manualContinue.requested") == 0,
+          ProcessInfo.processInfo.systemUptime < step.expiresAt
+        else { throw ProviderError.message("The pre-Continue observation lost its manual lease.") }
+        try sampleReturnedCursors()
+        guard sampledCheckpoints.contains("step0-after-cursor-return") else {
+          throw ProviderError.message(
+            "Continue preceded the requested post-cursor mark observation.")
+        }
+        try sampleMark(step: 0, checkpoint: "before-continue", requireSettled: true)
+      } catch { rejection = error.localizedDescription }
     }
     model.onScreenGuidanceTargetAccepted = { target, evidence, generation, request in
       guard rejection == nil else { return }
@@ -348,6 +558,9 @@ enum ManualGuidanceLiveAcceptance {
           "readyAtMS": elapsedMS(since: started),
         ]
         frames[request.step] = evidence
+        acceptedTargets[request.step] = target
+        acceptedGenerations[request.step] = generation
+        try sampleMark(step: request.step, checkpoint: "initial", requireSettled: false)
         stages[request.step] = stage
         try writeJSON(stage, to: output.appendingPathComponent("step\(request.step)-ready.json"))
         reportObservedPhase()
@@ -366,6 +579,10 @@ enum ManualGuidanceLiveAcceptance {
     while stages[1] == nil {
       try Task.checkCancellation()
       reportObservedPhase()
+      do { try sampleReturnedCursors() } catch {
+        failureCode = "native-mark-after-cursor-return"
+        throw error
+      }
       if let rejection {
         failureCode = "target-or-continuation-validation"
         throw ProviderError.message(rejection)
@@ -406,9 +623,13 @@ enum ManualGuidanceLiveAcceptance {
       failureCode = "unexpected-notebook-mutation"
       throw ProviderError.message("Screen guidance unexpectedly changed a notebook.")
     }
-    // Leave a bounded observation interval for the next native mark; no click
-    // or checkbox-completion claim is made. Cleanup then stops the whole turn.
-    try await Task.sleep(for: .seconds(2))
+    // Observe the next mark before the two-step check ends or the separate task
+    // check invites the real checkbox action. This never performs that action.
+    let observationEnds = ProcessInfo.processInfo.systemUptime + 2
+    while ProcessInfo.processInfo.systemUptime < observationEnds {
+      try await Task.sleep(for: .milliseconds(100))
+      try sampleReturnedCursors()
+    }
     try checkFixture()
     guard rejection == nil, model.error == nil,
       model.taskGeneration == initialGeneration + 2, model.scene == originalScene,
@@ -418,7 +639,121 @@ enum ManualGuidanceLiveAcceptance {
       throw ProviderError.message(
         "The next checkbox target changed before the acceptance could finish.")
     }
+    guard
+      sampledCheckpoints
+        == Set([
+          "step0-initial", "step0-after-cursor-return", "step0-before-continue",
+          "step1-initial", "step1-after-cursor-return",
+        ])
+    else {
+      failureCode = "native-mark-checkpoints-incomplete"
+      throw ProviderError.message("A required native annotation checkpoint was not observed.")
+    }
+    if verifyTaskCompletion {
+      guard let taskVerifier, let previous = frames[1] else {
+        failureCode = "task-verifier-or-source-missing"
+        throw ProviderError.message("The required task verifier or second capture was missing.")
+      }
+      taskVerificationStarted = true
+      reportObservedPhase()
+      try marker("GUIDANCE_MANUAL_CHECKBOX_READY")
+      failureCode = "task-postcondition-or-provider-validation"
+      taskReceipt = try await taskVerifier.waitForCompletion(
+        initialGeneration: initialGeneration, deadline: deadline,
+        expectedPreviousEvidence: ScreenEvidenceIdentity(previous),
+        onProgress: { reportObservedPhase() })
+      reportPhase(.checkingTaskPostcondition)
+      try checkFixture()
+      guard rejection == nil, let taskReceipt, let first = frames[0],
+        taskReceipt.finalFrameID != first.frameID,
+        taskReceipt.finalEvidenceRevision > first.revision
+      else {
+        throw ProviderError.message("The final task check lost its accepted evidence.")
+      }
+      let data = try JSONEncoder().encode(taskReceipt)
+      try data.write(to: output.appendingPathComponent("task-postcondition.json"), options: .atomic)
+      try marker("GUIDANCE_MANUAL_TASK_POSTCONDITION_VERIFIED")
+    }
     passed = true
+  }
+
+  /// Independent contour/alpha evidence for a local annotation bitmap. The
+  /// expected target is supplied by the existing public-fixture oracle; this
+  /// never samples the captured screenshot or reconstructs a replacement mark.
+  static func annotationRasterMetrics(
+    _ raster: GuidanceMarkRaster, expectedTarget target: CGRect, shape: String
+  ) throws -> GuidanceMarkRasterMetrics {
+    let image = raster.image
+    guard
+      [
+        target.minX, target.minY, target.width, target.height,
+        raster.localBounds.minX, raster.localBounds.minY,
+        raster.localBounds.width, raster.localBounds.height,
+      ].allSatisfy({ $0.isFinite }),
+      target.width > 0, target.height > 0, raster.localBounds.contains(target),
+      raster.scale.isFinite, raster.scale >= 1, raster.scale <= 2,
+      image.width > 0, image.height > 0, image.width <= 8_192, image.height <= 8_192,
+      image.width * image.height <= 2_000_000,
+      image.bitsPerComponent == 8, image.bitsPerPixel == 32,
+      image.alphaInfo == .premultipliedLast,
+      image.bitmapInfo.contains(.byteOrder32Big),
+      image.bytesPerRow >= image.width * 4, image.bytesPerRow <= image.width * 4 + 4_096,
+      abs(Double(image.width) - raster.localBounds.width * raster.scale) <= 1,
+      abs(Double(image.height) - raster.localBounds.height * raster.scale) <= 1,
+      let provider = image.dataProvider, let raw = provider.data,
+      CFDataGetLength(raw) >= image.bytesPerRow * image.height,
+      let bytes = CFDataGetBytePtr(raw), ["roundedRectangle", "ellipse"].contains(shape)
+    else {
+      throw ProviderError.message("The own-mark raster format or target geometry was invalid.")
+    }
+    let scope = target.insetBy(dx: -7, dy: -7)
+    var onContour = 0
+    var offContour = 0
+    var sides = [0, 0, 0, 0]
+    for row in 0..<image.height {
+      for column in 0..<image.width {
+        let offset = row * image.bytesPerRow + column * 4
+        let r = Int(bytes[offset])
+        let g = Int(bytes[offset + 1])
+        let b = Int(bytes[offset + 2])
+        guard bytes[offset + 3] >= 140, r >= 140, r - g >= 70, r - b >= 60 else { continue }
+        // CGImage's first bitmap row is the top row of the already-flipped
+        // own-view render. Applying the CGContext flip again here would mirror
+        // the mark around its asymmetric label-inclusive crop.
+        let p = CGPoint(
+          x: raster.localBounds.minX + (Double(column) + 0.5) / raster.scale,
+          y: raster.localBounds.minY + (Double(row) + 0.5) / raster.scale)
+        guard scope.contains(p) else { continue }
+        let dx = abs(p.x - target.midX)
+        let dy = abs(p.y - target.midY)
+        let distance: Double
+        if shape == "ellipse" {
+          let rx = max(0.25, target.width / 2 - 2)
+          let ry = max(0.25, target.height / 2 - 2)
+          distance = abs(hypot(dx / rx, dy / ry) - 1) * min(rx, ry)
+        } else {
+          let radius = min(8, target.width / 2, target.height / 2)
+          let qx = dx - (target.width / 2 - radius)
+          let qy = dy - (target.height / 2 - radius)
+          distance = abs(hypot(max(qx, 0), max(qy, 0)) + min(max(qx, qy), 0) - radius)
+        }
+        guard distance <= 3.5 + 1 / raster.scale else {
+          offContour += 1
+          continue
+        }
+        onContour += 1
+        let side: Int
+        if dx / target.width >= dy / target.height {
+          side = p.x < target.midX ? 0 : 1
+        } else {
+          side = p.y < target.midY ? 2 : 3
+        }
+        sides[side] += 1
+      }
+    }
+    return GuidanceMarkRasterMetrics(
+      opaqueOutlinePixels: onContour, offContourPixels: offContour, sidePixels: sides,
+      minimumOutlinePixels: Int(min(48, max(12, (target.width + target.height) * 0.1))))
   }
 
   private static func elapsedMS(since started: TimeInterval) -> Double {

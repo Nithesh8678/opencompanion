@@ -1,14 +1,113 @@
 import AppKit
 import Carbon
+import QuartzCore
 import SwiftUI
 
 final class AnnotationPanel: NSPanel {
   override var canBecomeKey: Bool { false }
   override var canBecomeMain: Bool { false }
 }
+
+/// Content-free observation of an existing mark, not WindowServer visibility
+/// evidence. The host token and model turn generation are separate authorities.
+struct GuidanceMarkPresentation: Codable, Sendable {
+  let id: UUID
+  let hostGeneration: UInt64
+  let ownerGeneration: UInt64?
+  let frameID: UUID
+  let evidenceRevision: UInt64
+  let displayID: UInt32
+  let foregroundPID: Int32
+  let windowID: UInt32?
+  let sourceRect: CGRect
+  let targetRect: CGRect
+  let shape: String
+  let createdAt: TimeInterval
+  let expiresAt: TimeInterval
+  let panelFrame: CGRect
+  let panelVisible: Bool
+  let panelAlpha: Double
+  let panelIgnoresMouseEvents: Bool
+  let panelCanBecomeKey: Bool
+  let panelIsKey: Bool
+  let viewMounted: Bool
+  let viewHidden: Bool
+  let rootHidden: Bool
+  let rootOpacity: Double
+  let outlineHidden: Bool
+  let outlineOpacity: Double
+  let outlineStrokeEnd: Double
+  let outlinePathBounds: CGRect
+  let outlineLineWidth: Double
+  let outlineDashed: Bool
+  let presentationOutlineAvailable: Bool
+  let presentationOutlineHidden: Bool?
+  let presentationOutlineOpacity: Double?
+  let presentationOutlineStrokeEnd: Double?
+  let labelFrame: CGRect
+  let labelHidden: Bool
+  let presentationLabelOpacity: Double?
+}
+
+/// A bounded render of the retained annotation's model layers only. It contains
+/// no underlying window pixels, capture evidence, OCR or serialized label text.
+struct GuidanceMarkRaster {
+  let image: CGImage
+  let localBounds: CGRect
+  let scale: Double
+
+  @MainActor static func render(view: GuidanceAnnotationView) throws -> Self {
+    guard let root = view.layer,
+      let outline = root.sublayers?.first(where: { $0.name == "guidance.outline" })
+        as? CAShapeLayer,
+      let path = outline.path,
+      let label = root.sublayers?.first(where: { $0.name == "guidance.label" })
+    else { throw ProviderError.message("The retained guidance layers were unavailable.") }
+    var region = path.boundingBoxOfPath.insetBy(dx: -14, dy: -14)
+    if !label.isHidden { region = region.union(label.frame.insetBy(dx: -12, dy: -12)) }
+    region = region.integral.intersection(view.bounds)
+    guard [region.minX, region.minY, region.width, region.height].allSatisfy({ $0.isFinite }),
+      region.width > 0, region.height > 0, region.width <= 4_096, region.height <= 4_096
+    else { throw ProviderError.message("The own-mark render exceeded its geometry budget.") }
+    let nativeScale = view.window?.backingScaleFactor ?? 1
+    guard nativeScale.isFinite, nativeScale > 0 else {
+      throw ProviderError.message("The own-mark backing scale was unavailable.")
+    }
+    let scale = min(2, max(1, nativeScale))
+    let width = Int(ceil(region.width * scale))
+    let height = Int(ceil(region.height * scale))
+    guard width > 0, height > 0, width <= 8_192, height <= 8_192,
+      width * height <= 2_000_000,
+      let context = CGContext(
+        data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue
+          | CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { throw ProviderError.message("The own-mark bitmap exceeded its pixel budget.") }
+    // Match the flipped annotation view. Pixel-row mapping is also recorded by
+    // the acceptance oracle; no synthetic replacement mark is rendered here.
+    context.scaleBy(x: scale, y: scale)
+    context.translateBy(x: -region.minX, y: region.maxY)
+    context.scaleBy(x: 1, y: -1)
+    root.displayIfNeeded()
+    root.render(in: context)
+    guard let image = context.makeImage() else {
+      throw ProviderError.message("The retained own-mark render failed.")
+    }
+    return Self(image: image, localBounds: region, scale: Double(scale))
+  }
+}
+
 @MainActor final class OverlayHost {
   private struct Mark {
+    let id: UUID
     let panel: NSPanel
+    let evidence: ScreenEvidenceIdentity
+    let ownerGeneration: UInt64?
+    let hostGeneration: UInt64
+    let targetRect: CGRect
+    let shape: String
+    let createdAt: TimeInterval
     let expiresAt: TimeInterval
   }
   private var marks: [Mark] = []
@@ -27,9 +126,11 @@ final class AnnotationPanel: NSPanel {
 
   func show(
     target: ProviderTarget, evidence: ScreenEvidence, showInstruction: Bool = true,
-    append: Bool = false, lifetime: TimeInterval = 45, introDelay: TimeInterval = 0
+    append: Bool = false, lifetime: TimeInterval = 45, introDelay: TimeInterval = 0,
+    ownerGeneration: UInt64? = nil
   ) throws {
-    guard lifetime.isFinite, lifetime > 0, introDelay.isFinite, introDelay >= 0, introDelay <= 2 else {
+    guard lifetime.isFinite, lifetime > 0, introDelay.isFinite, introDelay >= 0, introDelay <= 2
+    else {
       throw ProviderError.message("Screen guidance timing was invalid.")
     }
     let shape = try validatedShape(target: target, evidence: evidence)
@@ -62,7 +163,11 @@ final class AnnotationPanel: NSPanel {
     panel.contentView = annotation
     panel.orderFrontRegardless()
     annotation.animateAppearance(introDelay: introDelay)
-    marks.append(Mark(panel: panel, expiresAt: now + min(45, lifetime)))
+    marks.append(
+      Mark(
+        id: UUID(), panel: panel, evidence: identity, ownerGeneration: ownerGeneration,
+        hostGeneration: generation, targetRect: rect, shape: shape.rawValue,
+        createdAt: now, expiresAt: now + min(45, lifetime)))
     guard expiry == nil else { return }
     let token = generation
     let foregroundPID = evidence.foregroundPID
@@ -86,6 +191,52 @@ final class AnnotationPanel: NSPanel {
         }
       }
     }
+  }
+
+  /// This getter only inspects retained own-window/layer state; it never orders
+  /// a window, changes animations, captures a display or refreshes evidence.
+  var presentationDiagnostics: [GuidanceMarkPresentation] {
+    marks.map { mark in
+      let panel = mark.panel
+      let view = panel.contentView as? GuidanceAnnotationView
+      let root = view?.layer
+      let outline = root?.sublayers?.first { $0.name == "guidance.outline" } as? CAShapeLayer
+      let presented = outline?.presentation()
+      let label = root?.sublayers?.first { $0.name == "guidance.label" }
+      func finite(_ value: Double) -> Double { value.isFinite ? value : 0 }
+      return GuidanceMarkPresentation(
+        id: mark.id, hostGeneration: mark.hostGeneration, ownerGeneration: mark.ownerGeneration,
+        frameID: mark.evidence.frameID, evidenceRevision: mark.evidence.revision,
+        displayID: mark.evidence.displayID, foregroundPID: mark.evidence.foregroundPID,
+        windowID: mark.evidence.windowID, sourceRect: mark.evidence.screenRect,
+        targetRect: mark.targetRect, shape: mark.shape,
+        createdAt: mark.createdAt, expiresAt: mark.expiresAt,
+        panelFrame: panel.frame, panelVisible: panel.isVisible,
+        panelAlpha: finite(Double(panel.alphaValue)),
+        panelIgnoresMouseEvents: panel.ignoresMouseEvents,
+        panelCanBecomeKey: panel.canBecomeKey, panelIsKey: panel.isKeyWindow,
+        viewMounted: view?.window === panel, viewHidden: view?.isHiddenOrHasHiddenAncestor ?? true,
+        rootHidden: root?.isHidden ?? true, rootOpacity: finite(Double(root?.opacity ?? 0)),
+        outlineHidden: outline?.isHidden ?? true,
+        outlineOpacity: finite(Double(outline?.opacity ?? 0)),
+        outlineStrokeEnd: finite(Double(outline?.strokeEnd ?? 0)),
+        outlinePathBounds: outline?.path?.boundingBoxOfPath ?? .zero,
+        outlineLineWidth: finite(Double(outline?.lineWidth ?? 0)),
+        outlineDashed: !(outline?.lineDashPattern?.isEmpty ?? true),
+        presentationOutlineAvailable: presented != nil,
+        presentationOutlineHidden: presented?.isHidden,
+        presentationOutlineOpacity: presented.map { finite(Double($0.opacity)) },
+        presentationOutlineStrokeEnd: presented.map { finite(Double($0.strokeEnd)) },
+        labelFrame: label?.frame ?? .zero, labelHidden: label?.isHidden ?? true,
+        presentationLabelOpacity: (label?.presentation()).map { finite(Double($0.opacity)) })
+    }
+  }
+
+  func renderMark(id: UUID) throws -> GuidanceMarkRaster {
+    guard let mark = marks.first(where: { $0.id == id }),
+      let view = mark.panel.contentView as? GuidanceAnnotationView, view.window === mark.panel
+    else { throw ProviderError.message("The requested guidance mark is no longer mounted.") }
+    return try GuidanceMarkRaster.render(view: view)
   }
 
   func validate(target: ProviderTarget, evidence: ScreenEvidence) throws {

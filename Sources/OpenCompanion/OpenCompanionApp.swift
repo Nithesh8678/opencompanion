@@ -43,11 +43,13 @@ import SwiftUI
     let liveGuidanceAcceptance =
       CommandLine.arguments.contains("--guidance-live-acceptance")
       || CommandLine.arguments.contains("--guidance-manual-live-acceptance")
+      || CommandLine.arguments.contains("--guidance-manual-task-acceptance")
     let acceptanceMode = [
       "--keychain-acceptance", "--smoke-test-codex", "--render-acceptance", "--capture-acceptance",
       "--interaction-acceptance", "--cursor-acceptance", "--cursor-live-acceptance",
       "--guidance-live-acceptance", "--guidance-routing-acceptance",
       "--guidance-manual-live-acceptance",
+      "--guidance-manual-task-acceptance",
       "--spatial-scene-live-acceptance", "--explanation-overlay-acceptance",
       "--explanation-orbit-live-acceptance",
       "--explanation-narration-acceptance",
@@ -298,19 +300,25 @@ import SwiftUI
       }
       return
     }
-    if let index = CommandLine.arguments.firstIndex(of: "--guidance-manual-live-acceptance") {
+    if let index = CommandLine.arguments.firstIndex(where: {
+      ["--guidance-manual-live-acceptance", "--guidance-manual-task-acceptance"].contains($0)
+    }) {
+      let verifiesTask = CommandLine.arguments[index] == "--guidance-manual-task-acceptance"
       Task { @MainActor in
         do {
-          guard index + 1 < CommandLine.arguments.count, let cursor else {
+          guard index + 1 < CommandLine.arguments.count, let cursor, let screenGuidance else {
             throw ProviderError.message(
               "Provide an output directory for manual guidance acceptance.")
           }
           try await ManualGuidanceLiveAcceptance.run(
-            model: model, cursor: cursor,
-            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
-          print("MANUAL_GUIDANCE_LIVE_ACCEPTANCE_PASSED")
+            model: model, cursor: cursor, coordinator: screenGuidance,
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
+            verifyTaskCompletion: verifiesTask)
+          print("MANUAL_GUIDANCE_\(verifiesTask ? "TASK" : "LIVE")_ACCEPTANCE_PASSED")
         } catch {
-          print("MANUAL_GUIDANCE_LIVE_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          print(
+            "MANUAL_GUIDANCE_\(verifiesTask ? "TASK" : "LIVE")_ACCEPTANCE_FAILED: \(error.localizedDescription)"
+          )
           exit(1)
         }
         NSApp.terminate(nil)

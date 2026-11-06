@@ -156,6 +156,10 @@ enum ScreenGuidancePolicy {
   }
 
   @Published private(set) var manualStep: ManualGuidanceStep?
+  /// Optional read-only acceptance observation, after admission/ownership gates
+  /// and before the explicit Continue consumes this exact lease. No input is
+  /// synthesized; a revoked owner is checked again before continuation queues.
+  var onManualContinueWillBegin: ((ManualGuidanceStep) -> Void)?
   private weak var model: AppModel?
   private let observesInput: Bool
   private let now: @MainActor () -> TimeInterval
@@ -168,6 +172,7 @@ enum ScreenGuidancePolicy {
   private var localMouse: Any?
   private var expiryTask: Task<Void, Never>?
   private var continuationTask: Task<Void, Never>?
+  private var notifyingManualContinue = false
   private var subscriptions = Set<AnyCancellable>()
   private var validationScheduled = false
   private var machineAwake = true
@@ -281,13 +286,20 @@ enum ScreenGuidancePolicy {
   /// Consumes only the currently presented lease. Repeated button callbacks,
   /// stale IDs and unrelated pointer events cannot queue another continuation.
   func continueManualStep(id: UUID) {
-    guard continuationTask == nil, manualStep?.id == id, let owner = mark,
+    guard !notifyingManualContinue, continuationTask == nil, let step = manualStep, step.id == id,
+      let owner = mark,
       owner.lease == id, owner.observation == .explicitContinue
     else { return }
     guard owns(owner) else {
       cancel()
       return
     }
+    notifyingManualContinue = true
+    onManualContinueWillBegin?(step)
+    notifyingManualContinue = false
+    guard continuationTask == nil, manualStep?.id == id, mark?.lease == owner.lease,
+      owns(owner)
+    else { return }
     model?.record("guidance.manualContinue.requested")
     queueContinuation(owner)
   }
@@ -331,6 +343,7 @@ enum ScreenGuidancePolicy {
   func shutdown() {
     isShutdown = true
     cancel()
+    onManualContinueWillBegin = nil
     subscriptions.removeAll()
   }
 

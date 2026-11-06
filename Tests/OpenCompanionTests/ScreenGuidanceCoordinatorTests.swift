@@ -6,6 +6,51 @@ import Testing
 /// These exercise the production controller with an authored evidence identity,
 /// a supplied foreground PID/clock, and no desktop observers or real captures.
 @Suite @MainActor struct ScreenGuidanceCoordinatorTests {
+  @Test func beforeContinueObservationOwnsTheLeaseBeforeAnyConsumptionOrRequestedEvent()
+    async throws
+  {
+    let fixture = ManualGuidanceFixture()
+    let coordinator = fixture.coordinator()
+    defer { coordinator.shutdown() }
+    fixture.accept(on: coordinator)
+    let step = try #require(coordinator.manualStep)
+    var observed: [UUID] = []
+    var observedBeforeConsumption = false
+    coordinator.onManualContinueWillBegin = { current in
+      observed.append(current.id)
+      observedBeforeConsumption =
+        coordinator.manualStep == current
+        && !fixture.model.diagnosticEvents.contains {
+          $0["event"] == "guidance.manualContinue.requested"
+        }
+      // An observation cannot recursively consume the lease a second time.
+      coordinator.continueManualStep(id: current.id)
+    }
+    coordinator.continueManualStep(id: UUID())
+    #expect(observed.isEmpty && coordinator.manualStep?.id == step.id)
+    coordinator.continueManualStep(id: step.id)
+    coordinator.continueManualStep(id: step.id)
+    await drainMainQueue()
+    #expect(observed == [step.id] && observedBeforeConsumption)
+    #expect(fixture.receipts.count == 1 && coordinator.manualStep == nil)
+  }
+
+  @Test func anObservationCannotQueueARevokedManualLease() async throws {
+    let fixture = ManualGuidanceFixture()
+    let coordinator = fixture.coordinator()
+    defer { coordinator.shutdown() }
+    fixture.accept(on: coordinator)
+    let id = try #require(coordinator.manualStep?.id)
+    coordinator.onManualContinueWillBegin = { _ in coordinator.cancel() }
+    coordinator.continueManualStep(id: id)
+    await drainMainQueue()
+    #expect(fixture.receipts.isEmpty && coordinator.manualStep == nil)
+    #expect(
+      !fixture.model.diagnosticEvents.contains {
+        $0["event"] == "guidance.manualContinue.requested"
+      })
+  }
+
   @Test func manualActionRetainsItsEvidenceButDoesNotContinueAutomatically() async throws {
     let fixture = ManualGuidanceFixture()
     let coordinator = fixture.coordinator()

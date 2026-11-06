@@ -991,7 +991,7 @@ struct ResponseInputPlan: Sendable {
       try overlay.show(
         target: target, evidence: evidence,
         showInstruction: true,
-        append: true, introDelay: introDelay)
+        append: true, introDelay: introDelay, ownerGeneration: generation)
       acceptedGuidanceTarget = true
       if let request = activeGuidanceRequest, cursorPreferences.screenGuidanceEnabled,
         ProcessInfo.processInfo.systemUptime < request.expires

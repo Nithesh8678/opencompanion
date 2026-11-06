@@ -141,6 +141,23 @@ struct CaptureWindow: Identifiable, Sendable {
   let appName: String
   let pid: pid_t
 }
+
+/// Select from current native metadata before requesting any pixels. An
+/// unavailable explicit source must not acquire a different source's authority.
+enum CaptureSourceSelection {
+  static func displayID(
+    requested: CGDirectDisplayID?, available: [CGDirectDisplayID]
+  ) -> CGDirectDisplayID? {
+    guard let requested else { return available.first }
+    guard requested != 0 else { return nil }
+    return available.first(where: { $0 == requested })
+  }
+
+  static func permitsWindow(requestedPID: pid_t, owningPID: pid_t?, ownPID: pid_t) -> Bool {
+    requestedPID > 0 && requestedPID != ownPID && owningPID == requestedPID
+  }
+}
+
 actor CaptureService {
   static let screenRecordingRepairMessage =
     "Screen Recording is unavailable to this running OpenCompanion app. Open System Settings → Privacy & Security → Screen Recording. If OpenCompanion is already enabled, remove that old entry and add /Applications/OpenCompanion.app again. Enable it, then quit and reopen OpenCompanion. Screen access is used only for requested screen guidance or Add screen context."
@@ -170,8 +187,9 @@ actor CaptureService {
     let content = try await SCShareableContent.excludingDesktopWindows(
       false, onScreenWindowsOnly: true)
     guard
-      let display = content.displays.first(where: { $0.displayID == displayID })
-        ?? content.displays.first,
+      let selectedID = CaptureSourceSelection.displayID(
+        requested: displayID, available: content.displays.map(\.displayID)),
+      let display = content.displays.first(where: { $0.displayID == selectedID }),
       let rect = screens[display.displayID]
     else { throw ProviderError.message("The selected display is unavailable.") }
     try Task.checkCancellation()
@@ -185,7 +203,9 @@ actor CaptureService {
     let filter: SCContentFilter
     if let windowID {
       guard let window = content.windows.first(where: { $0.windowID == windowID }),
-        window.owningApplication?.processID != ProcessInfo.processInfo.processIdentifier,
+        CaptureSourceSelection.permitsWindow(
+          requestedPID: foregroundPID, owningPID: window.owningApplication?.processID,
+          ownPID: ProcessInfo.processInfo.processIdentifier),
         window.owningApplication?.bundleIdentifier != Bundle.main.bundleIdentifier
       else { throw ProviderError.message("Selected window is unavailable.") }
       filter = SCContentFilter(desktopIndependentWindow: window)

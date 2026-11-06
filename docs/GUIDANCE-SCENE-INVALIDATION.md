@@ -51,7 +51,7 @@ This validates one real notification through the exact observer class outside th
 ## Remaining limits
 
 - Same-PID window switches, movement/resize, navigation and programmatic reflow are not detected by this observer. It does not yet implement a native focused-window/layout observer.
-- Changes to a selected frame **before observation is armed** can remain undetected while the frame is still inside the existing 15-second admission window. A recent timestamp alone is not proof of unchanged content.
+- At this historical observer checkpoint, changes before observation was armed could remain undetected within the 15-second admission window. The later [selected-evidence refresh](GUIDANCE-SELECTED-FRESHNESS.md) replaces selected pixels in exactly the original scope before provider input. Changes during inference/waiting, same-PID layout changes and native metadata/capture races remain open; a recent timestamp alone is not proof of unchanged content.
 - A future window observer must preserve the intended target mouse-down → menu/window transition → mouse-up sequence without admitting stale geometry or losing a legitimate fresh-capture continuation. This checkpoint does not solve that ordering problem by inferring success.
 - Broader native monitor availability, actual scroll delivery, installed-host event ordering, permission changes, mixed-scale displays, Spaces and physical interactions still need acceptance. A source rectangle and event filter do not prove all app content changes were observed.
 - Full multi-step task completion, wrong-click/no-effect recovery, general unfamiliar-app success, low latency and HeyClicky parity remain unproven.

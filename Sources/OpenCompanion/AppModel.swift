@@ -542,11 +542,13 @@ struct ResponseInputPlan: Sendable {
             frame.semanticText + (savedGuidanceContext.isEmpty ? "" : "\n\n" + savedGuidanceContext)
           turnImage = frame.image
           turnEvidence = ScreenEvidenceIdentity(frame)
+        } else if policy.route == .screenGuidance, let selectedFrame = inputPlan.evidenceIdentity {
+          let frame = try await self.prepareSelectedGuidanceEvidence(
+            selectedFrame, generation: current, captureToken: captureToken)
+          turnContext = frame.semanticText
+          turnImage = frame.image
+          turnEvidence = ScreenEvidenceIdentity(frame)
         } else {
-          if policy.route == .screenGuidance, let selectedFrame = inputPlan.evidenceIdentity {
-            try await self.prepareSelectedGuidanceEvidence(
-              selectedFrame, generation: current, captureToken: captureToken)
-          }
           turnContext = inputPlan.context
           turnImage = inputPlan.image
           turnEvidence = inputPlan.evidenceIdentity
@@ -823,20 +825,22 @@ struct ResponseInputPlan: Sendable {
     return result.isEmpty ? fallback : result
   }
 
-  /// Restore only the application of a deliberately selected capture. Preparing
-  /// its presentation never replaces a window or region with a broader frame.
-  private func prepareSelectedGuidanceEvidence(
-    _ selectedFrame: ScreenEvidenceIdentity, generation: UInt64, captureToken: UInt64
-  ) async throws {
+  /// A deliberately selected capture defines scope, not indefinitely current
+  /// pixels. Refresh that same scope before the model receives this request.
+  func prepareSelectedGuidanceEvidence(
+    _ selectedFrame: ScreenEvidenceIdentity, generation: UInt64, captureToken: UInt64,
+    refresh: (@MainActor (ScreenEvidence) async throws -> ScreenEvidence)? = nil
+  ) async throws -> ScreenEvidence {
     try Task.checkCancellation()
     guard generation == self.generation,
       captureGate.permits(captureToken, cancelled: Task.isCancelled),
-      explicitManualEvidence == selectedFrame, selectedFrame.matches(evidence),
-      CursorCompanionPreferences.load().screenGuidanceEnabled
+      explicitManualEvidence == selectedFrame, let source = evidence, selectedFrame.matches(source),
+      screenGuidanceEnabled()
     else { throw CancellationError() }
     try monitorGuidanceScene(
       generation: generation, foregroundPID: selectedFrame.foregroundPID,
       sourceRect: selectedFrame.screenRect)
+    guard let scope = guidanceSceneScope else { throw CancellationError() }
     let ownPID = ProcessInfo.processInfo.processIdentifier
     if let prepare = onPrepareScreenGuidance {
       try await prepare(generation, selectedFrame.foregroundPID)
@@ -847,12 +851,30 @@ struct ResponseInputPlan: Sendable {
     guard generation == self.generation,
       captureGate.permits(captureToken, cancelled: Task.isCancelled),
       explicitManualEvidence == selectedFrame, selectedFrame.matches(evidence),
-      CursorCompanionPreferences.load().screenGuidanceEnabled
+      guidanceSceneScope == scope, screenGuidanceEnabled()
     else { throw CancellationError() }
-    guard NSWorkspace.shared.frontmostApplication?.processIdentifier == selectedFrame.foregroundPID
-    else {
-      throw ProviderError.message("The active app changed. Ask for screen guidance again.")
+    try requireGuidanceForeground(selectedFrame.foregroundPID)
+    setGuidanceStage(.capture, generation: generation)
+    record("guidance.selectedCapture.refresh.started")
+    let stillOwned: @MainActor () -> Bool = { [weak self] in
+      guard let self else { return false }
+      return generation == self.generation
+        && self.captureGate.permits(captureToken, cancelled: Task.isCancelled)
+        && self.explicitManualEvidence == selectedFrame && selectedFrame.matches(self.evidence)
+        && self.guidanceSceneScope == scope
+        && self.screenGuidanceEnabled()
     }
+    let fresh = try await SelectedGuidanceEvidenceRefresh.capture(
+      original: source,
+      refresh: refresh ?? { [self] original in try await refreshGuidanceEvidence(original) },
+      stillOwned: stillOwned)
+    try Task.checkCancellation()
+    try requireGuidanceForeground(selectedFrame.foregroundPID)
+    guard stillOwned(), publishSelectedCapture(fresh, token: captureToken) else {
+      throw CancellationError()
+    }
+    record("guidance.selectedCapture.refresh.accepted")
+    return fresh
   }
 
   /// Capture only the current active screen for this explicit guidance turn.

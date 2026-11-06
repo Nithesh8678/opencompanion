@@ -177,6 +177,94 @@ import Testing
     expectNoNativeTargetOrTransport(model)
   }
 
+  @Test(
+    arguments: [
+      "can u tell me how to create a new table? Don't screenshot.",
+      "can u tell me how to create a new table? Don’t screenshot.",
+      "check screen and tell me how to create a new table. Don't screenshot.",
+      "check screen and tell me how to create a new table. Don’t screenshot.",
+      "Do not check my screen. How do I create a table?",
+      "Don’t analyze my screen. How do I create a table?",
+      "How do I create a table without inspecting my screen?",
+      "Help me create a table, but do not start capturing anything.",
+    ], [false, true])
+  func trailingScreenshotOptOutPreventsCaptureAndImagePayloadForTypedAndAuthoredPTT(
+    _ text: String, _ voiceCompletion: Bool
+  ) async throws {
+    let probe = AutomaticGuidanceInputProbe()
+    let fixture = makeModel(probe: probe)
+    let model = fixture.model
+    defer { model.stop() }
+    let old = try evidence(marker: "UNSELECTED_SCREEN_CONTEXT", red: 0.8, blue: 0.1)
+    model.evidence = old
+    #expect(!GuidanceIntent.requestsScreenGuidance(text: text))
+
+    try submit(text, voiceCompletion: voiceCompletion, fixture: fixture, probe: probe)
+    try await until { probe.inputs.count == 1 && !model.busy }
+
+    let input = try #require(probe.inputs.first)
+    #expect(probe.acquisitions.isEmpty)
+    #expect(input.responsePolicy.route == .conversation)
+    #expect(input.image == nil && input.scene == nil)
+    #expect(!input.context.contains(old.semanticText))
+    #expect(!input.context.contains(old.groundingCandidates[0].id))
+    #expect(input.messages.last?.text == text)
+    #expect(model.activeGuidanceRequest == nil && model.error == nil)
+    #expect(probe.speechStarts == 0)
+    expectNoNativeTargetOrTransport(model)
+  }
+
+  @Test(
+    arguments: [
+      "can u tell me how to create a new table? Don't screenshot.",
+      "can u tell me how to create a new table? Don’t screenshot.",
+      "Do not check my screen. How do I create a table?",
+      "Don’t analyze my screen. How do I create a table?",
+      "How do I create a table without inspecting my screen?",
+      "Help me create a table, but do not start capturing anything.",
+    ], [false, true])
+  func trailingScreenshotOptOutAlsoExcludesAnExistingManualScreenAttachment(
+    _ text: String, _ screenDerivedStrokes: Bool
+  ) async throws {
+    let probe = AutomaticGuidanceInputProbe()
+    let fixture = makeModel(probe: probe)
+    let model = fixture.model
+    defer { model.stop() }
+    let selected = try evidence(marker: "SELECTED_SCREEN_SEMANTICS", red: 0.8, blue: 0.1)
+    model.selectedContext = "INDEPENDENT_PUBLIC_FILE_MEMORY_CONTEXT"
+    let published = model.publishSelectedCapture(
+      selected, token: model.capturePublicationRevision,
+      strokes: screenDerivedStrokes ? "[[0.2,0.4],[0.3,0.5]]" : "")
+    #expect(published)
+    let selectionID = try #require(model.selectedCaptureSelectionID)
+    let selectedContext = model.selectedContext
+    model.input = text
+
+    model.send()
+    try await until { probe.inputs.count == 1 && !model.busy }
+
+    let input = try #require(probe.inputs.first)
+    #expect(probe.acquisitions.isEmpty)
+    #expect(input.responsePolicy.route == .conversation)
+    #expect(input.image == nil && input.scene == nil)
+    #expect(!input.context.contains(selected.semanticText))
+    #expect(!input.context.contains(selected.groundingCandidates[0].id))
+    if screenDerivedStrokes {
+      #expect(selectedContext.contains("User-drawn spatial context"))
+      #expect(input.context.isEmpty)
+    } else {
+      #expect(input.context == "INDEPENDENT_PUBLIC_FILE_MEMORY_CONTEXT")
+    }
+    // Per-request suppression must not destroy the user's independent selected
+    // attachment or silently replace its capture authorization in the UI.
+    #expect(ScreenEvidenceIdentity(selected).matches(model.evidence))
+    #expect(model.selectedCaptureSelectionID == selectionID)
+    #expect(model.selectedContext == selectedContext)
+    #expect(model.activeGuidanceRequest == nil && model.error == nil)
+    #expect(probe.speechStarts == 0)
+    expectNoNativeTargetOrTransport(model)
+  }
+
   private func makeModel(
     probe: AutomaticGuidanceInputProbe, barrier: AutomaticGuidanceAcquisitionBarrier? = nil
   ) -> AutomaticGuidanceFixture {

@@ -40,8 +40,15 @@ struct ResponseInputPlan: Sendable {
 
   static func resolve(
     policy: ResponsePolicy, voiceOnly: Bool, selectedContext: String,
-    evidence: ScreenEvidence?, explicitManualEvidence: ScreenEvidenceIdentity?
+    evidence: ScreenEvidence?, explicitManualEvidence: ScreenEvidenceIdentity?,
+    selectedContextIsScreenDerived: Bool = false
   ) -> Self {
+    if !policy.permitsScreenEvidence {
+      return .init(
+        requiresFreshGuidanceCapture: false,
+        context: voiceOnly || selectedContextIsScreenDerived ? "" : selectedContext,
+        image: nil, evidenceIdentity: nil)
+    }
     if policy.route == .screenGuidance {
       if !voiceOnly, let evidence, explicitManualEvidence?.matches(evidence) == true {
         return .init(
@@ -220,6 +227,7 @@ struct ResponseInputPlan: Sendable {
   /// Assigned only by successful explicit captures. Cancelling pending work
   /// does not remove the scope of an attachment that is still selected.
   private var explicitManualEvidence: ScreenEvidenceIdentity?
+  private var selectedContextIsScreenDerived = false
   private(set) var selectedCaptureSelectionID: UUID?
   private var invalidatedManualGuidanceScope = false
   private var undoStack: [SceneDocument] = []
@@ -475,7 +483,8 @@ struct ResponseInputPlan: Sendable {
       hasNotebook: scene != nil)
     let inputPlan = ResponseInputPlan.resolve(
       policy: policy, voiceOnly: voiceOnly, selectedContext: selectedContext, evidence: evidence,
-      explicitManualEvidence: explicitManualEvidence)
+      explicitManualEvidence: explicitManualEvidence,
+      selectedContextIsScreenDerived: selectedContextIsScreenDerived)
     guard
       !(policy.route == .screenGuidance && !voiceOnly
         && inputPlan.requiresFreshGuidanceCapture && invalidatedManualGuidanceScope)
@@ -2003,6 +2012,7 @@ struct ResponseInputPlan: Sendable {
     spatialSelector.cancel()
     evidence = nil
     selectedContext = ""
+    selectedContextIsScreenDerived = false
     contextTitle = ""
     overlay.clear()
     return captureGate.generation
@@ -2057,6 +2067,7 @@ struct ResponseInputPlan: Sendable {
     evidence = frame
     if !strokes.isEmpty {
       selectedContext = "User-drawn spatial context (normalized top-left points): " + strokes
+      selectedContextIsScreenDerived = true
     }
     if selectedContext.isEmpty { contextTitle = "Screen: \(frame.foregroundName)" }
     return true

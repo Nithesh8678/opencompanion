@@ -174,6 +174,7 @@ actor ReasoningProvider {
       ?? ResponsePolicy.resolve(
         text: messages.last(where: { $0.role == "user" })?.text ?? "",
         screenGuidanceEnabled: image != nil, inNotebook: scene != nil, hasNotebook: scene != nil)
+    let permittedImage = requestPolicy.permitsScreenEvidence ? image : nil
     guard !configuration.model.trimmingCharacters(in: .whitespaces).isEmpty else {
       throw ProviderError.message("Choose a model in Settings, then run the connection test.")
     }
@@ -208,7 +209,7 @@ actor ReasoningProvider {
           + String(context.prefix(48000)),
       ])
     }
-    if let image {
+    if let image = permittedImage {
       history.append([
         "role": "user",
         "content": [

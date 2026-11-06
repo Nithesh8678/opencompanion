@@ -66,6 +66,53 @@ import UniformTypeIdentifiers
     #expect(decoded.width == 4 && decoded.height == 3)
   }
 
+  @Test(arguments: [true, false])
+  func screenOptOutDropsSuppliedImageButKeepsQuestionAndIndependentContext(
+    _ suppliedPolicy: Bool
+  ) async throws {
+    let fixture = try makeFixture(completeTurn: true)
+    defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+    let question = "Do not look at my screen. Tell me how to create a new table in text only."
+    let context = "PUBLIC_INDEPENDENT_DOCUMENT_CONTEXT: table-creation notes"
+    let policy = ResponsePolicy.resolve(text: question, screenGuidanceEnabled: true)
+    #expect(policy.route == .conversation && !policy.permitsScreenEvidence)
+    let image = try authoredScreenJPEG()
+    let provider = CodexProvider()
+    let receiver = TransportUnitReceiver()
+    let timeout = Task {
+      try await Task.sleep(for: .seconds(5))
+      await receiver.markWatchdogFired()
+      await provider.stop()
+    }
+    defer { timeout.cancel() }
+    // Deliberately supply a real image despite the opt-out: the transport must
+    // protect the boundary for both explicit and locally resolved policies.
+    try await provider.stream(
+      executable: fixture.path, model: "fixture-default",
+      messages: [.init(role: "user", text: question)], context: context, image: image, scene: nil,
+      onUnit: { unit in await receiver.append(unit.text ?? "") },
+      responsePolicy: suppliedPolicy ? policy : nil)
+    #expect(await receiver.watchdogFired == false)
+    #expect(await receiver.text == "ready")
+    let requests = try String(
+      contentsOf: URL(fileURLWithPath: fixture.path + ".requests"), encoding: .utf8
+    ).split(separator: "\n").map { line in
+      try #require(JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+    }
+    let turns = requests.filter { $0["method"] as? String == "turn/start" }
+    #expect(turns.count == 1)
+    let params = try #require(turns.first?["params"] as? [String: Any])
+    let input = try #require(params["input"] as? [[String: Any]])
+    let text = input.compactMap { item in
+      item["type"] as? String == "text" ? item["text"] as? String : nil
+    }.joined(separator: "\n")
+    #expect(text.contains(question) && text.contains(context))
+    #expect(!input.contains { $0["type"] as? String == "image" })
+    let serializedInput = try JSONSerialization.data(withJSONObject: input)
+    let wireText = String(decoding: serializedInput, as: UTF8.self)
+    #expect(!wireText.contains("data:image/") && !wireText.contains(image.base64EncodedString()))
+  }
+
   @Test(arguments: [
     ResponsePolicy.Route.screenGuidance, .conversation, .notebook,
   ])

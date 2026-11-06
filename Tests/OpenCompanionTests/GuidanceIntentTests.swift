@@ -5,6 +5,33 @@ import Testing
 
 struct GuidanceIntentTests {
   @Test(arguments: [
+    "Can u tell me how to create a new table? Don’t screenshot.",
+    "Can u tell me how to create a new table? Don't screenshot.",
+    "How do I create a table? Do not screenshot.",
+    "Check screen and help me add a column. Never screenshot.",
+    "Help me create a folder without screenshotting.",
+    "How do I create a table? No screenshotting.",
+    "How do I create a table? This must not be screenshotted.",
+    "How do I create a table? Don't take screenshots.",
+    "How do I create a table? Don't screen-shot.",
+    "How do I create a table? Do not screen shot.",
+    "How do I create a table? I don't want this to be screen-shotted.",
+    "How do I create a table without screen shots?",
+  ])
+  func trailingScreenshotActionRestrictionsOverrideEarlierGuidanceRequests(_ text: String) {
+    #expect(!GuidanceIntent.requestsScreenGuidance(text: text))
+  }
+
+  @Test(arguments: [
+    "Check screen and tell me why screenshot is not working",
+    "Why is this screenshot not working?",
+    "Check screen and explain the message ‘Don’t screenshot.’",
+  ])
+  func screenshotVocabularyDoesNotCreateAnUnrelatedOrQuotedPrivacyVeto(_ text: String) {
+    #expect(GuidanceIntent.requestsScreenGuidance(text: text))
+  }
+
+  @Test(arguments: [
     "can u tell me how to create a new table",
     "Can you tell me how to create a new table?",
     "How do I create a new table?",

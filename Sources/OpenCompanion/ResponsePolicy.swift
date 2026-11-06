@@ -10,7 +10,14 @@ struct ResponsePolicy: Sendable, Equatable {
   static let maximumTextBytes = 32_000
   let route: Route
   let includesExistingNotebook: Bool
+  let permitsScreenEvidence: Bool
   var allowsNotebook: Bool { route == .notebook }
+
+  init(route: Route, includesExistingNotebook: Bool, permitsScreenEvidence: Bool = true) {
+    self.route = route
+    self.includesExistingNotebook = includesExistingNotebook
+    self.permitsScreenEvidence = permitsScreenEvidence
+  }
 
   /// Trusted per-turn instructions. Keep this separate from selected evidence,
   /// which is always untrusted data. The host independently enforces the route.
@@ -31,14 +38,21 @@ struct ResponsePolicy: Sendable, Equatable {
     text: String, screenGuidanceEnabled: Bool, explicitGuidance: Bool = false,
     inNotebook: Bool = false, hasNotebook: Bool = false
   ) -> Self {
-    let conversation = Self(route: .conversation, includesExistingNotebook: false)
     guard text.utf8.prefix(maximumTextBytes + 1).count <= maximumTextBytes else {
-      return conversation
+      return Self(
+        route: .conversation, includesExistingNotebook: false, permitsScreenEvidence: false)
     }
     let request = unquoted(text)
     let words = request.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
-    guard !words.isEmpty else { return conversation }
+    guard !words.isEmpty else {
+      return Self(
+        route: .conversation, includesExistingNotebook: false, permitsScreenEvidence: false)
+    }
     let tokens = Tokens(words)
+    let permitsScreenEvidence = !tokens.screenPrivate
+    let conversation = Self(
+      route: .conversation, includesExistingNotebook: false,
+      permitsScreenEvidence: permitsScreenEvidence)
     if tokens.textOnly { return conversation }
 
     // Resolve UI help before visual vocabulary: drawing a chart in an app can
@@ -47,7 +61,7 @@ struct ResponsePolicy: Sendable, Equatable {
     if guidance {
       return Self(
         route: screenGuidanceEnabled && !tokens.screenPrivate ? .screenGuidance : .conversation,
-        includesExistingNotebook: false)
+        includesExistingNotebook: false, permitsScreenEvidence: permitsScreenEvidence)
     }
     guard !tokens.forbidsNotebook else { return conversation }
     guard !tokens.isDefinition else { return conversation }
@@ -60,10 +74,14 @@ struct ResponsePolicy: Sendable, Equatable {
     guard !positiveWords.isEmpty else { return conversation }
     let requestTokens = Tokens(positiveWords)
     if inNotebook, hasNotebook, requestTokens.requestsNotebookEdit {
-      return Self(route: .notebook, includesExistingNotebook: true)
+      return Self(
+        route: .notebook, includesExistingNotebook: true,
+        permitsScreenEvidence: permitsScreenEvidence)
     }
     if requestTokens.requestsVisual || requestTokens.requestsMechanismTeaching {
-      return Self(route: .notebook, includesExistingNotebook: false)
+      return Self(
+        route: .notebook, includesExistingNotebook: false,
+        permitsScreenEvidence: permitsScreenEvidence)
     }
     return conversation
   }
@@ -88,7 +106,7 @@ struct ResponsePolicy: Sendable, Equatable {
     let characters = Array(text)
     // Count future closing delimiters once. Scanning the remaining suffix for
     // each unmatched opening quote would make adversarial input quadratic.
-    let delimiters: Set<Character> = ["\"", "”", "’", "'"]
+    let delimiters: Set<Character> = ["\"", "”", "’", "'", "`"]
     var remaining: [Character: Int] = [:]
     for character in characters where delimiters.contains(character) {
       remaining[character, default: 0] += 1
@@ -115,6 +133,7 @@ struct ResponsePolicy: Sendable, Equatable {
       let delimiter: Character?
       switch character {
       case "\"": delimiter = "\""
+      case "`": delimiter = "`"
       case "“": delimiter = "”"
       case "‘": delimiter = "’"
       case "'" where !previousIsWord: delimiter = "'"
@@ -160,6 +179,7 @@ struct ResponsePolicy: Sendable, Equatable {
     var screenPrivate: Bool {
       if [
         ["no", "screenshot"], ["no", "screenshots"], ["no", "screen", "capture"],
+        ["no", "screen"],
         ["no", "capture"], ["no", "screen", "recording"],
         ["without", "capturing"], ["without", "sharing"], ["without", "looking"],
         ["without", "taking"], ["without", "seeing"], ["without", "reading"],
@@ -174,7 +194,51 @@ struct ResponsePolicy: Sendable, Equatable {
       }
       return negates([
         "capture", "share", "look", "take", "record", "inspect", "see", "read", "access", "view",
-      ])
+        "screenshot", "screenshots", "screenshotting", "screenshotted",
+      ]) || negatesScreenShot() || negatesScreenInspection()
+    }
+
+    private func negatesScreenInspection() -> Bool {
+      for index in words.indices
+      where ["not", "never", "dont", "without"].contains(words[index])
+        || words[index] == "t" && index > 0 && words[index - 1] == "don"
+      {
+        let nearby = Set(words[(index + 1)..<min(words.count, index + 8)])
+        if !nearby.isDisjoint(with: ["capture", "capturing", "record", "recording"]) {
+          return true
+        }
+        if !nearby.isDisjoint(with: ["screen", "desktop", "display", "screenshot", "screenshots"]),
+          !nearby.isDisjoint(with: [
+            "share", "sharing", "look", "looking", "take", "taking", "inspect", "inspecting",
+            "access", "accessing", "read", "reading", "view", "viewing", "see", "seeing",
+            "check", "checking", "analyze", "analyzing", "analyse", "analysing", "examine",
+            "examining",
+          ])
+        {
+          return true
+        }
+      }
+      return false
+    }
+
+    private func negatesScreenShot() -> Bool {
+      for index in words.indices
+      where ["not", "never", "dont", "no", "without"].contains(words[index])
+        || words[index] == "t" && index > 0 && words[index - 1] == "don"
+      {
+        let end = min(words.count, index + 8)
+        if !Set(words[(index + 1)..<end]).isDisjoint(with: [
+          "screenshot", "screenshots", "screenshotting", "screenshotted",
+        ]) {
+          return true
+        }
+        guard index + 2 < end else { continue }
+        for next in (index + 1)..<(end - 1)
+        where words[next] == "screen"
+          && ["shot", "shots", "shotting", "shotted"].contains(words[next + 1])
+        { return true }
+      }
+      return false
     }
 
     var forbidsNotebook: Bool {

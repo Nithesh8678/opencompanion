@@ -143,6 +143,51 @@ struct ResponsePolicyTests {
     let result = policy(text, explicit: true, inNotebook: true, hasNotebook: true)
     #expect(result.route == .conversation)
     #expect(!result.allowsNotebook)
+    #expect(!result.permitsScreenEvidence)
+  }
+
+  @Test(
+    arguments: [
+      "Can u tell me how to create a new table? Don't screenshot.",
+      "Can u tell me how to create a new table? Don’t screenshot.",
+      "Check screen and help create a table, but do not screenshot.",
+      "How do I create a table? Never screenshot anything.",
+      "How do I create a table? No screenshotting.",
+      "Help create a table without screenshotting anything.",
+      "Help create a table but do not start screenshotting.",
+      "Help create a table but don't take any screen shots.",
+      "Help create a table but do not screen-shot anything.",
+      "Do not check my screen. How do I create a table?",
+      "Don't analyze my screen. How do I create a table?",
+      "How do I create a table without examining the desktop?",
+      "How do I create a table without inspecting my screen?",
+      "Help me create a table, but do not start capturing anything.",
+      "Help me create a table, but do not begin screen recording.",
+      "No screen. How do I create a table?",
+    ], [false, true])
+  func trailingScreenshotVerbOptOutAppliesToImplicitAndExplicitGuidance(
+    _ text: String, _ explicit: Bool
+  ) {
+    let result = policy(text, explicit: explicit)
+    #expect(result.route == .conversation)
+    #expect(!result.permitsScreenEvidence)
+  }
+
+  @Test(arguments: [
+    "Check screen and help create a table. ‘Don’t screenshot’",
+    "Check screen and help create a table. `Don't screenshot`",
+    "How do I change the screenshot format when it isn't working?",
+    "Don't check my spelling. How do I create a table?",
+  ])
+  func quotedScreenshotOptOutIsContentAndTroubleshootingDoesNotBecomeAnOptOut(_ text: String) {
+    let result = policy(text)
+    #expect(result.permitsScreenEvidence)
+  }
+
+  @Test func screenOptOutDoesNotForbidAnIndependentVisualButStillExcludesScreens() {
+    let result = policy("No screenshot. Draw a diagram of a lever")
+    #expect(result.route == .notebook && result.allowsNotebook)
+    #expect(!result.permitsScreenEvidence)
   }
 
   @Test func forcedGuidanceStillRequiresEnabledScreenHelpAndRespectsTextOnly() {

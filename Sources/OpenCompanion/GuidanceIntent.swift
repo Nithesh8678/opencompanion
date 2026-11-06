@@ -30,7 +30,7 @@ enum GuidanceIntent {
     ]
     if textOnly.contains(where: has) { return false }
     let privacy: [[String]] = [
-      ["no", "screenshot"], ["no", "screenshots"], ["no", "screen"],
+      ["no", "screenshot"], ["no", "screenshots"], ["no", "screenshotting"], ["no", "screen"],
       ["no", "capture"], ["without", "screenshots"], ["without", "a", "screenshot"],
       ["without", "any", "screenshots"], ["without", "screen", "access"],
       ["screen", "private"], ["desktop", "private"], ["display", "private"],
@@ -42,9 +42,19 @@ enum GuidanceIntent {
         ["not", "never", "dont", "without"].contains(words[index])
         || words[index] == "t" && index > 0 && words[index - 1] == "don"
       guard negation else { continue }
-      let nearby = Set(words[(index + 1)..<min(words.count, index + 8)])
+      let nearbyWords = words[(index + 1)..<min(words.count, index + 8)]
+      let nearby = Set(nearbyWords)
       // Explicit capture/record restrictions remain conservative.
-      if !nearby.isDisjoint(with: ["capture", "capturing", "record", "recording"]) {
+      if !nearby.isDisjoint(with: [
+        "capture", "capturing", "record", "recording",
+        "screenshot", "screenshots", "screenshotting", "screenshotted",
+      ]) {
+        return false
+      }
+      // Hyphens and spaces both tokenize "screen-shot" into two words.
+      if nearbyWords.indices.dropLast().contains(where: {
+        words[$0] == "screen" && ["shot", "shots", "shotting", "shotted"].contains(words[$0 + 1])
+      }) {
         return false
       }
       if !nearby.isDisjoint(with: screenObjects),

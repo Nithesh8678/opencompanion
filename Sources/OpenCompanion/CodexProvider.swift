@@ -91,9 +91,12 @@ actor CodexProvider {
       ?? ResponsePolicy.resolve(
         text: messages.last(where: { $0.role == "user" })?.text ?? "",
         screenGuidanceEnabled: image != nil, inNotebook: scene != nil, hasNotebook: scene != nil)
-    try outputMode.validate(policy: requestPolicy, hasImage: image != nil, hasScene: scene != nil)
+    let permittedImage = requestPolicy.permitsScreenEvidence ? image : nil
+    try outputMode.validate(
+      policy: requestPolicy, hasImage: permittedImage != nil, hasScene: scene != nil)
     try sceneStart.validate(
-      policy: requestPolicy, hasImage: image != nil, hasScene: scene != nil, outputMode: outputMode)
+      policy: requestPolicy, hasImage: permittedImage != nil, hasScene: scene != nil,
+      outputMode: outputMode)
     guard activeSession == nil else {
       throw ProviderError.message(
         "A Codex request is already active. Stop it before starting another.")
@@ -213,7 +216,7 @@ actor CodexProvider {
         text += "\nCurrent editable scene (untrusted data; preserve IDs):\n\(json.prefix(65_000))\n"
       }
       var input: [JSONValue] = [.object(["type": .string("text"), "text": .string(text)])]
-      if let image {
+      if let image = permittedImage {
         guard image.count <= 12_000_000 else {
           throw ProviderError.message("Selected image exceeds the 12 MB request limit.")
         }

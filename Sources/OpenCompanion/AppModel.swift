@@ -140,6 +140,14 @@ struct ResponseInputPlan: Sendable {
   private var guidanceTurnToken: GuidanceTurnToken?
   private var guidanceLoadingTask: Task<Void, Never>?
   private var guidanceStatusReceived = false
+  private let observesGuidanceSceneChanges: Bool
+  private(set) var guidanceSceneScope: GuidanceSceneScope?
+  private var guidanceSceneExpiryTask: Task<Void, Never>?
+  private lazy var guidanceSceneObserver = GuidanceSceneObserver(
+    observeSystemEvents: observesGuidanceSceneChanges
+  ) { [weak self] scope, reason in
+    self?.guidanceSceneDidChange(scope: scope, reason: reason)
+  }
   let capture = CaptureService()
   let provider = ReasoningProvider()
   var codex: CodexProvider?
@@ -202,6 +210,7 @@ struct ResponseInputPlan: Sendable {
   /// Assigned only by successful explicit captures. Cancelling pending work
   /// does not remove the scope of an attachment that is still selected.
   private var explicitManualEvidence: ScreenEvidenceIdentity?
+  private var invalidatedManualGuidanceScope = false
   private var undoStack: [SceneDocument] = []
   private var redoStack: [SceneDocument] = []
   private var timer: Timer?
@@ -217,6 +226,7 @@ struct ResponseInputPlan: Sendable {
   init(
     acceptanceMode: Bool = false, store: LocalStore? = nil,
     voice suppliedVoice: VoiceService? = nil,
+    observeGuidanceSceneChanges: Bool? = nil,
     guidanceForegroundPID: @escaping @MainActor () -> pid_t? = {
       NSWorkspace.shared.frontmostApplication?.processIdentifier
     },
@@ -226,6 +236,7 @@ struct ResponseInputPlan: Sendable {
   ) {
     self.voice = suppliedVoice ?? VoiceService()
     self.store = store
+    self.observesGuidanceSceneChanges = observeGuidanceSceneChanges ?? !acceptanceMode
     self.screenGuidanceEnabled = screenGuidanceEnabled
     self.guidanceForegroundPID = guidanceForegroundPID
     if !acceptanceMode {
@@ -336,7 +347,9 @@ struct ResponseInputPlan: Sendable {
         let pid =
           (notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?
           .processIdentifier
-        Task { @MainActor [weak self] in
+        // The observer's .main queue preserves the recorded activation order;
+        // deferred tasks must not clear a newer guide after a rapid round trip.
+        MainActor.assumeIsolated {
           guard let self, let pid, pid != ProcessInfo.processInfo.processIdentifier else { return }
           self.lastExternalPID = pid
           self.overlay.clear()
@@ -440,6 +453,14 @@ struct ResponseInputPlan: Sendable {
     let inputPlan = ResponseInputPlan.resolve(
       policy: policy, voiceOnly: voiceOnly, selectedContext: selectedContext, evidence: evidence,
       explicitManualEvidence: explicitManualEvidence)
+    guard
+      !(policy.route == .screenGuidance && !voiceOnly
+        && inputPlan.requiresFreshGuidanceCapture && invalidatedManualGuidanceScope)
+    else {
+      notice =
+        "The selected screen context changed. Recapture that window or region, or remove screen context before asking for current-screen guidance."
+      return
+    }
     // Preserve only explicitly selected capture scope. A prior automatic
     // guidance image is not a user-selected attachment for a later question.
     let automaticGuidance =
@@ -585,6 +606,11 @@ struct ResponseInputPlan: Sendable {
             fallbackSummary: String(
               (self.guidanceNarration ?? "A fresh screen check is needed.").prefix(480)))
           self.scheduleGuidanceLoadingCheck(token: workflowToken, generation: current)
+        }
+        if policy.route == .screenGuidance, !self.acceptedGuidanceTarget,
+          self.guidanceSession.workflow?.phase != .loading
+        {
+          self.endGuidanceSceneObservation()
         }
         self.busy = false
         if self.state != "Speaking" {
@@ -743,6 +769,7 @@ struct ResponseInputPlan: Sendable {
   /// speech, notebook content, or a retry. Stale work cannot alter a newer turn.
   func finishTurnFailure(error: Error, generation: UInt64, policy: ResponsePolicy) {
     guard generation == self.generation else { return }
+    endGuidanceSceneObservation()
     cancelExplanationPlayback(stopSpeech: true)
     overlay.clear()
     activeGuidanceRequest = nil
@@ -807,6 +834,9 @@ struct ResponseInputPlan: Sendable {
       explicitManualEvidence == selectedFrame, selectedFrame.matches(evidence),
       CursorCompanionPreferences.load().screenGuidanceEnabled
     else { throw CancellationError() }
+    try monitorGuidanceScene(
+      generation: generation, foregroundPID: selectedFrame.foregroundPID,
+      sourceRect: selectedFrame.screenRect)
     let ownPID = ProcessInfo.processInfo.processIdentifier
     if let prepare = onPrepareScreenGuidance {
       try await prepare(generation, selectedFrame.foregroundPID)
@@ -843,6 +873,24 @@ struct ResponseInputPlan: Sendable {
       throw ProviderError.message("The active app changed. Ask for screen guidance again.")
     }
     let intendedPID = initialForeground == ownPID ? lastExternalPID : (initialForeground ?? 0)
+    // Choose the source once before preparation can yield. A later pointer
+    // movement cannot silently move this request to another display.
+    let screens = Dictionary(
+      uniqueKeysWithValues: NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, CGRect)? in
+        guard
+          let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+            as? NSNumber
+        else { return nil }
+        return (number.uint32Value, screen.frame)
+      })
+    let pointer = NSEvent.mouseLocation
+    guard
+      let displayID = screens.first(where: { $0.value.contains(pointer) })?.key
+        ?? selectedDisplay.flatMap({ screens[$0] == nil ? nil : $0 }),
+      let sourceRect = screens[displayID]
+    else { throw ProviderError.message("No active display is available for screen guidance.") }
+    try monitorGuidanceScene(
+      generation: generation, foregroundPID: intendedPID, sourceRect: sourceRect)
     if let prepare = onPrepareScreenGuidance, intendedPID > 0, intendedPID != ownPID {
       try await prepare(generation, intendedPID)
       try Task.checkCancellation()
@@ -855,19 +903,6 @@ struct ResponseInputPlan: Sendable {
     } else if initialForeground == ownPID {
       throw ProviderError.message("Switch to the app you want help with, then ask again.")
     }
-    let screens = Dictionary(
-      uniqueKeysWithValues: NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, CGRect)? in
-        guard
-          let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
-            as? NSNumber
-        else { return nil }
-        return (number.uint32Value, screen.frame)
-      })
-    let pointer = NSEvent.mouseLocation
-    guard
-      let displayID = screens.first(where: { $0.value.contains(pointer) })?.key
-        ?? selectedDisplay.flatMap({ screens[$0] == nil ? nil : $0 })
-    else { throw ProviderError.message("No active display is available for screen guidance.") }
     let foreground = NSWorkspace.shared.frontmostApplication
     let previous = NSRunningApplication(processIdentifier: lastExternalPID)
     let app = foreground?.processIdentifier == ownPID ? previous : (foreground ?? previous)
@@ -900,6 +935,77 @@ struct ResponseInputPlan: Sendable {
     if selectedContext.isEmpty { contextTitle = "Screen: \(frame.foregroundName)" }
     record("guidance.capture.accepted")
     return frame
+  }
+
+  /// Active request metadata only. This never captures pixels or expands a
+  /// selected region/window. Arm before the first preparation/capture await.
+  func monitorGuidanceScene(
+    generation: UInt64, foregroundPID: pid_t, sourceRect: CGRect
+  ) throws {
+    guard generation == self.generation, responsePolicy.route == .screenGuidance,
+      busy, foregroundPID != ProcessInfo.processInfo.processIdentifier
+    else { throw CancellationError() }
+    endGuidanceSceneObservation()
+    guard
+      let scope = guidanceSceneObserver.arm(
+        generation: generation, foregroundPID: foregroundPID, sourceRect: sourceRect)
+    else {
+      throw ProviderError.message(
+        "Screen-change observation is unavailable for this guidance request. Recheck the selected app and screen."
+      )
+    }
+    guidanceSceneScope = scope
+    let deadline =
+      activeGuidanceRequest?.expires
+      ?? ProcessInfo.processInfo.systemUptime + ScreenGuidancePolicy.maximumRequestLifetime
+    let delay = max(
+      0,
+      min(
+        ScreenGuidancePolicy.maximumRequestLifetime,
+        deadline - ProcessInfo.processInfo.systemUptime))
+    guidanceSceneExpiryTask = Task { @MainActor [weak self] in
+      do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+      guard let self, self.guidanceSceneScope == scope else { return }
+      self.guidanceSceneDidChange(scope: scope, reason: .expired)
+    }
+  }
+
+  /// A scene change revokes old inference and marks, while semantic progress
+  /// remains resumable. No event is interpreted as successful user action.
+  func guidanceSceneDidChange(scope: GuidanceSceneScope, reason: GuidanceSceneChange) {
+    guard scope == guidanceSceneScope, scope.generation == generation,
+      responsePolicy.route == .screenGuidance
+    else { return }
+    let selectedCaptureChanged = explicitManualEvidence != nil
+    stop()
+    invalidatedManualGuidanceScope = selectedCaptureChanged
+    explicitManualEvidence = nil
+    evidence = nil
+    if selectedContext.isEmpty {
+      contextTitle = selectedCaptureChanged ? "Screen context changed — recapture or remove" : ""
+    }
+    overlay.clear()
+    if selectedCaptureChanged {
+      notice =
+        "The selected screen context changed. Recapture it or remove screen context to continue."
+    } else {
+      switch reason {
+      case .scroll: notice = "The screen scrolled. Recheck guidance using a fresh screen."
+      case .foregroundChanged:
+        notice = "The active app changed. Resume guidance for a fresh screen check."
+      case .expired: notice = "Guidance screen tracking expired. Resume for a fresh screen check."
+      case .displayChanged:
+        notice = "The display arrangement changed. Recheck guidance using a fresh screen."
+      }
+    }
+    record("guidance.scene.invalidated.\(reason.rawValue)")
+  }
+
+  private func endGuidanceSceneObservation() {
+    guidanceSceneExpiryTask?.cancel()
+    guidanceSceneExpiryTask = nil
+    guidanceSceneScope = nil
+    guidanceSceneObserver.disarm()
   }
 
   var guidanceProgressTitle: String? {
@@ -1410,6 +1516,7 @@ struct ResponseInputPlan: Sendable {
   }
 
   private func cancelActiveTurn() {
+    endGuidanceSceneObservation()
     guidanceLoadingTask?.cancel()
     guidanceLoadingTask = nil
     guidanceTurnToken = nil
@@ -1631,6 +1738,11 @@ struct ResponseInputPlan: Sendable {
   /// Display rearrangement changes the coordinate authority even if an older
   /// screenshot is young and its former foreground application is still active.
   func invalidateScreenEvidence() {
+    if let scope = guidanceSceneScope {
+      guidanceSceneDidChange(scope: scope, reason: .displayChanged)
+      record("capture.displayTopologyInvalidated")
+      return
+    }
     invalidateCapture()
     explicitManualEvidence = nil
     cancelWindowPicker()
@@ -1644,6 +1756,7 @@ struct ResponseInputPlan: Sendable {
     record("capture.displayTopologyInvalidated")
   }
   @discardableResult private func beginContextSelection() -> UInt64 {
+    invalidatedManualGuidanceScope = false
     invalidateCapture()
     explicitManualEvidence = nil
     cancelWindowPicker()
@@ -1678,13 +1791,7 @@ struct ResponseInputPlan: Sendable {
           displayID: displayID, foregroundPID: window?.pid ?? app?.processIdentifier ?? 0,
           foregroundName: window?.appName ?? app?.localizedName ?? "Desktop", region: region,
           windowID: window?.id, screens: screens)
-        guard captureGate.permits(token, cancelled: Task.isCancelled) else { return }
-        explicitManualEvidence = ScreenEvidenceIdentity(frame)
-        evidence = frame
-        if !strokes.isEmpty {
-          selectedContext = "User-drawn spatial context (normalized top-left points): " + strokes
-        }
-        if selectedContext.isEmpty { contextTitle = "Screen: \(frame.foregroundName)" }
+        guard publishSelectedCapture(frame, token: token, strokes: strokes) else { return }
         notice = "One screen frame selected. It will be sent with your next question."
         state = "Ready"
         captureTask = nil
@@ -1698,7 +1805,23 @@ struct ResponseInputPlan: Sendable {
       }
     }
   }
+  /// Single publication boundary for the host's explicit capture result. A
+  /// cancelled or replaced selection cannot restore old screen authority.
+  @discardableResult func publishSelectedCapture(
+    _ frame: ScreenEvidence, token: UInt64, strokes: String = ""
+  ) -> Bool {
+    guard captureGate.permits(token, cancelled: Task.isCancelled) else { return false }
+    explicitManualEvidence = ScreenEvidenceIdentity(frame)
+    invalidatedManualGuidanceScope = false
+    evidence = frame
+    if !strokes.isEmpty {
+      selectedContext = "User-drawn spatial context (normalized top-left points): " + strokes
+    }
+    if selectedContext.isEmpty { contextTitle = "Screen: \(frame.foregroundName)" }
+    return true
+  }
   func clearContext() {
+    invalidatedManualGuidanceScope = false
     _ = beginContextSelection()
     if state == "Observing" {
       state = "Ready"

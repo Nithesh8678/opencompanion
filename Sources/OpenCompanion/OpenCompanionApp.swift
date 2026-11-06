@@ -55,7 +55,9 @@ import SwiftUI
       "--explanation-orbit-live-acceptance",
       "--explanation-narration-acceptance",
     ].contains(where: CommandLine.arguments.contains)
-    model = AppModel(acceptanceMode: acceptanceMode)
+    model = AppModel(
+      acceptanceMode: acceptanceMode,
+      observeGuidanceSceneChanges: !acceptanceMode || liveGuidanceAcceptance)
     model.onOpen = { [weak self] in self?.openRequestedSurface() }
     model.onCompanionRequested = { [weak self] in
       self?.utilityWindow?.orderOut(nil)
@@ -619,7 +621,8 @@ import SwiftUI
     let submenu = NSMenu(title: "Developer")
     submenu.addItem(
       withTitle: "Check public screen guidance…", action: #selector(checkPublicGuidance),
-      keyEquivalent: "").target = self
+      keyEquivalent: ""
+    ).target = self
     item.submenu = submenu
     menu.addItem(item)
   }
@@ -629,7 +632,8 @@ import SwiftUI
     do {
       guidanceCheckProcess = try GuidanceAcceptanceLauncher.launch(
         work: .init(
-          busy: model.busy || model.activeGuidanceRequest != nil || utilityWindow?.isVisible == true,
+          busy: model.busy || model.activeGuidanceRequest != nil
+            || utilityWindow?.isVisible == true,
           listening: model.listening,
           pendingSpeech: model.voice.hasPendingSpeech,
           explanationVisible: model.presentingExplanation || explanationPanel?.isVisible == true

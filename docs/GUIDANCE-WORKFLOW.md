@@ -9,6 +9,7 @@ This checkpoint follows the user-supplied `MASTER-BUILD-PROMPT.txt` and `WORKFLO
 - Pause revokes runtime ownership and cancels current capture, response, speech and marks. Resume/Recheck creates a new request/check and uses fresh current-screen capture. Saved progress contains no screenshot, frame/candidate ID, PID, coordinates, generation, lease or usable deadline.
 - Native Home and both Chat surfaces share a compact progress card. It exposes Pause, Resume, Recheck and Stop without opening Notebook or changing hover-only notch presentation. Model-reported completion is explicitly distinguished from independent verification.
 - The optional bounded `guidanceStatus` unit distinguishes progress, unchanged, loading, uncertainty and model-reported completion. Existing target and text units remain supported. Loading can request bounded fresh checks while the same foreground/evidence/request still owns the task; it performs no input and never repeats an action automatically.
+- Active-scene metadata invalidation now revokes old inference and marks after an app activation round trip, in-scope scrolling or display topology change, retaining semantic progress and preventing typed selected-scope widening. [Current source, verification and limits](GUIDANCE-SCENE-INVALIDATION.md).
 - Supporting marks remain native and retained. An optional assessment from an old model-input frame cannot be relabeled as current after a target has been independently re-grounded. State/content validation precedes primary visual admission.
 - SQLite v5 adds guidance tombstones. Dedicated insert-only creation and exact-record CAS updates prevent stale writers from resurrecting or overwriting a deleted guide. Restore reads the latest payload and leaves it paused; opening history never captures or rearms a saved target.
 
@@ -44,7 +45,7 @@ This checkpoint does not complete the supplied specification. Remaining acceptan
 
 - A successful real-browser three-step walkthrough and native-app result, with fresh postconditions, wrong-click/no-effect recovery and slow loading.
 - Hover-specific interaction/tooltip verification and the broader typed event envelope, sequence/deduplication and annotation vocabulary described in the supplied protocol.
-- Material scroll/navigation/window-layout invalidation during inference and while a mark waits, across mixed-scale displays and Spaces.
+- Native delivery of the new app-switch/scroll invalidation across mixed-scale displays and Spaces; same-PID window movement/switching, programmatic reflow/navigation and changes before a selected-frame guide is armed remain unverified or unimplemented.
 - Guidance-specific speech-beat/mark alignment from actual playback callbacks, interruption and audio-route/device cases. Local draw timing is not acoustic evidence.
 - At least 30 warm trials per declared profile, separate cold/failure cases, accuracy/success rate and release-to-useful-output P50/P95. The supplied latency values are goals; none is presented as a measured vendor promise or current result.
 - Held-out cross-app acceptance, permission denial/recovery, first-word preservation and complete accessibility/keyboard alternatives.

@@ -1,6 +1,6 @@
 # Selected-scope guidance continuation
 
-This source checkpoint connects explicitly selected screen guidance to the active request and resumable workflow. The final full suite passed **875 tests**: 782 application tests across 93 suites, 28 store tests and 65 core tests. New signed build, installation, exact-source CI and native full-task verification remain pending. It extends the [selected freshness contract](GUIDANCE-SELECTED-FRESHNESS.md) without treating a saved screenshot as current evidence.
+This source checkpoint connects explicitly selected screen guidance to the active request and resumable workflow. The final full suite passed **875 tests**: 782 application tests across 93 suites, 28 store tests and 65 core tests. Clean certificate-signed source `68c644e4815ed21b21bf7a41e71065be1603d44c` is installed and open as the single canonical app. [Exact-source CI 42260511282](https://github.com/Nithesh8678/opencompanion/actions/runs/42260511282) passed native tests/build and protocol checks. Native full-task verification remains pending. It extends the [selected freshness contract](GUIDANCE-SELECTED-FRESHNESS.md) without treating a saved screenshot as current evidence.
 
 ## Request ownership and capture ownership
 
@@ -23,6 +23,10 @@ When the retained binding is missing, restored from storage or no longer owned, 
 
 Saved workflow records contain semantic goals, action observations and model assessments. They exclude images, screen/candidate identities, selection IDs, live PIDs, coordinates and usable capture/target leases. A restored workflow therefore needs an explicit new scope choice.
 
+## Signed installation
+
+The source revision is `68c644e4815ed21b21bf7a41e71065be1603d44c`; installed executable SHA-256 is `5748c67c6fbf108d97d7569129dd77fca7a873ba1385f06d5c6180aca89fc8ba`. Info.plist and build/install receipts agree. Independent verification passed strict deep signing, retained team `BPR2T4D656`, one canonical `/Applications/OpenCompanion.app`, no installer-managed temporary bundles and an empty cleanup-issues list. Native UI reopened the normal app, with no expanded dashboard. The source is pushed to public `main`. [Exact-source GitHub validation](https://github.com/Nithesh8678/opencompanion/actions/runs/42260511282) passed native tests/build and protocol checks.
+
 ## Integration tests and evidence limits
 
 `ReasoningTurnInput` is the immutable messages/context/image/scene/policy snapshot assembled immediately before provider dispatch. An optional injected `ReasoningTurnStream` receives that same snapshot and invokes the real unit/preview admission callbacks. Production dispatch retains the configured provider path when no responder is supplied; the seam adds no default model or transport change.
@@ -31,4 +35,6 @@ Authored tests inject scoped capture results and a status/text responder to exer
 
 These are caller-injected capture/provider tests, not real ScreenCaptureKit capture, model transport, external input, microphone or native mark-visibility evidence. The full-send tests emit no target units and create no annotation windows; they do not prove the native target callback/controls path or completion of an external task. Those boundaries still require installed end-to-end acceptance.
 
-Native capture races, same-PID layout/window changes, mixed-display behavior, unfamiliar-app reliability, complete multi-step outcomes and recovery remain open. No latency or performance improvement is established. All **21 whole-product parity gates remain open**.
+The final independent source review found no new blocker. App activation and desktop-independent window capture do not prove that a selected window is frontmost or unoccluded among that app's windows. Native capture races, same-PID layout/window changes, mixed-display behavior, unfamiliar-app reliability, complete multi-step outcomes and recovery remain open.
+
+The next visibility check must distinguish two overlapping windows from the same PID. Current preparation, overlay validation and coordinator ownership compare the foreground PID; exact selected-window capture alone does not close this gap. The locally inspected public AppKit SDK offers `NSWindow.windowNumber(at:belowWindowWithWindowNumber:)` to sample mouse-hit ownership at a global point. This is a proposed verifier, not implemented here: use an exclusion value of zero, because excluding an assistant window also excludes every window above it. It needs native tests with the actual passive panels, a same-PID covering window, partial occlusion, moved/closed windows and mixed-scale displays. A sampled point check still cannot prove the whole control is visible or make verification and input atomic. No latency or performance improvement is established. All **21 whole-product parity gates remain open**.

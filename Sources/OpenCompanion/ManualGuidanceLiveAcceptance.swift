@@ -4,21 +4,95 @@ import ImageIO
 /// Opt-in production capture/model/Continue check against the opaque public
 /// Guidance Fixture only. This helper never types, clicks or records audio.
 enum ManualGuidanceLiveAcceptance {
+  private enum Phase: String {
+    case preflight, waitingForPublicFixture, checkingDisplay, checkingObserver
+    case preparingInitialCapture, capturingInitialFrame, awaitingInitialModelTarget
+    case waitingForManualInput, continuationRequested, capturingContinuation
+    case awaitingNextModelTarget, observingNextTarget, passed, failed, cancelled
+  }
+
   @MainActor static func run(
     model: AppModel, cursor: CursorCompanionCoordinator, output: URL
   ) async throws {
+    let preflightStarted = ProcessInfo.processInfo.systemUptime
+    let entryScene = model.scene
+    var phase = Phase.preflight
+    var failureCode = "startup-output-unavailable"
+    var passed = false
+    var activePathEntered = false
+    var displayPoints: [Double] = []
+    var checks: [String: Bool] = [:]
+    var observedCounts: [String: Int] = [:]
+
+    func reportPhase(_ next: Phase) {
+      guard next != phase || next == .preflight else { return }
+      phase = next
+      try? writeJSON(
+        [
+          "phase": next.rawValue, "terminal": [.passed, .failed, .cancelled].contains(next),
+          "failureCode": [.failed, .cancelled].contains(next) ? failureCode : "",
+          "elapsedMS": elapsedMS(since: preflightStarted), "preflight": checks,
+          "observedEventCounts": observedCounts, "fixtureDisplayPoints": displayPoints,
+          "publicFixtureOnly": true, "automaticDesktopActions": false,
+        ], to: output.appendingPathComponent("manual-guidance-phase.json"))
+      // FileHandle writes directly to the descriptor: unlike print/stdio, these
+      // newline markers need no buffered-stdout flush to reach the UI driver.
+      try? marker("GUIDANCE_MANUAL_PHASE_\(next.rawValue.uppercased())")
+    }
+
+    // This exists before foreground waiting or any capture/model work. Startup
+    // refusals must leave a terminal receipt too, without inventing progress.
+    defer {
+      let lastPhase = phase
+      if !activePathEntered {
+        if Task.isCancelled { failureCode = "startup-cancelled" }
+        try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        try? writeJSON(
+          [
+            "result": "failed", "failureCode": failureCode, "lastPhase": lastPhase.rawValue,
+            "preflight": checks, "publicFixtureOnly": true,
+            "actualCapturePath": NSNull(), "actualCaptureVerified": false,
+            "captureAttempted": false, "providerPhaseObserved": false, "stages": [],
+            "captureAcceptedEventCount": 0, "manualContinuationArmedCount": 0,
+            "manualContinueRequestedCount": 0, "clickObservedCount": 0,
+            "nativeContinueRequestedFreshCheck": false, "providerReportedError": false,
+            "notebookUnchanged": model.scene == entryScene,
+            "automaticDesktopActions": false, "microphoneUsed": false, "audioUsed": false,
+            "checkboxActionPerformedByHelper": false, "checkboxCompletionVerified": false,
+            "taskComplete": false, "endState": "startup-refused",
+            "elapsedMS": elapsedMS(since: preflightStarted),
+            "fixtureDisplayPoints": displayPoints,
+          ], to: output.appendingPathComponent("manual-guidance-live-acceptance.json"))
+      }
+      let interrupted = Task.isCancelled || failureCode == "generation-cancelled-or-replaced"
+      reportPhase(passed ? .passed : (interrupted ? .cancelled : .failed))
+      try? marker(
+        "GUIDANCE_MANUAL_TERMINAL_\(passed ? "PASSED" : "FAILED")_\(passed ? "complete" : failureCode)"
+      )
+    }
+    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+    failureCode = "startup-incomplete"
+    reportPhase(.preflight)
     try Task.checkCancellation()
+    checks["screenGuidanceEnabled"] = CursorCompanionPreferences.load().screenGuidanceEnabled
+    guard checks["screenGuidanceEnabled"] == true else {
+      failureCode = "startup-screen-guidance-disabled"
+      throw ProviderError.message(
+        "Manual guidance startup: screen guidance is disabled. Enable it before this explicit check."
+      )
+    }
     // The UI driver can invoke a background app's AX controls without making
     // that app foreground. Wait for a real user focus change; never activate an
     // app or capture unrelated content to make this acceptance pass.
-    try FileHandle.standardOutput.write(
-      contentsOf: Data("GUIDANCE_MANUAL_WAITING_FOR_PUBLIC_FIXTURE\n".utf8))
+    reportPhase(.waitingForPublicFixture)
+    try marker("GUIDANCE_MANUAL_WAITING_FOR_PUBLIC_FIXTURE")
     let foregroundDeadline = ProcessInfo.processInfo.systemUptime + 90
     while NSWorkspace.shared.frontmostApplication?.bundleIdentifier
       != "org.opencompanion.fixture.guidance"
     {
       try Task.checkCancellation()
       guard ProcessInfo.processInfo.systemUptime < foregroundDeadline else {
+        failureCode = "startup-public-fixture-foreground-timeout"
         throw ProviderError.message(
           "Manual guidance startup: the public Guidance Fixture did not become foreground within 90 seconds."
         )
@@ -28,28 +102,41 @@ enum ManualGuidanceLiveAcceptance {
     guard let fixture = NSWorkspace.shared.frontmostApplication,
       fixture.bundleIdentifier == "org.opencompanion.fixture.guidance"
     else {
+      failureCode = "startup-public-fixture-not-foreground"
       throw ProviderError.message(
         "Manual guidance startup: the public Guidance Fixture must be foreground.")
     }
+    checks["foregroundIsPublicFixture"] = true
+    reportPhase(.checkingDisplay)
     guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }),
       let displayNumber = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
         as? NSNumber
     else {
+      failureCode = "startup-pointer-display-unavailable"
       throw ProviderError.message(
         "Manual guidance startup: the pointer must be on a display with valid native display geometry."
       )
     }
+    checks["pointerDisplayAvailable"] = true
+    if screen.frame.width.isFinite, screen.frame.height.isFinite {
+      displayPoints = [Double(screen.frame.width), Double(screen.frame.height)]
+    }
     guard fixtureCoversDisplay(pid: fixture.processIdentifier, screen: screen) else {
+      failureCode = "startup-public-fixture-display-not-covered"
       throw ProviderError.message(
         "Manual guidance startup: the public Guidance Fixture must cover the pointer display.")
     }
+    checks["fullDisplayFixtureCoverage"] = true
+    reportPhase(.checkingObserver)
     guard let productionTargetObserver = model.onScreenGuidanceTargetAccepted
     else {
+      failureCode = "startup-target-observer-missing"
       throw ProviderError.message(
         "Manual guidance startup: the production guidance target observer is not installed."
       )
     }
-    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+    checks["productionTargetObserverInstalled"] = true
+    activePathEntered = true
     let displayID = displayNumber.uint32Value
     let pid = fixture.processIdentifier
     let started = ProcessInfo.processInfo.systemUptime
@@ -64,14 +151,44 @@ enum ManualGuidanceLiveAcceptance {
     var stages: [Int: [String: Any]] = [:]
     var requestID: UUID?
     var rejection: String?
-    var failureCode = "incomplete"
-    var passed = false
+    failureCode = "incomplete"
 
     func recentEvents() -> [[String: String]] {
       Array(model.diagnosticEvents.dropFirst(traceStart).suffix(2_000))
     }
     func eventCount(_ name: String) -> Int {
       recentEvents().filter { $0["event"] == name }.count
+    }
+    func reportObservedPhase() {
+      let names = [
+        "guidance.capture.started", "guidance.capture.accepted", "guidance.stage.provider",
+        "guidance.manualContinuation.armed", "guidance.manualContinue.requested",
+      ]
+      observedCounts = Dictionary(uniqueKeysWithValues: names.map { ($0, 0) })
+      for event in recentEvents() {
+        if let name = event["event"], observedCounts[name] != nil {
+          observedCounts[name, default: 0] += 1
+        }
+      }
+      if stages[1] != nil {
+        reportPhase(.observingNextTarget)
+      } else if observedCounts["guidance.manualContinue.requested", default: 0] > 0 {
+        if observedCounts["guidance.capture.accepted", default: 0] >= 2 {
+          reportPhase(.awaitingNextModelTarget)
+        } else if observedCounts["guidance.capture.started", default: 0] >= 2 {
+          reportPhase(.capturingContinuation)
+        } else {
+          reportPhase(.continuationRequested)
+        }
+      } else if stages[0] != nil {
+        reportPhase(.waitingForManualInput)
+      } else if observedCounts["guidance.capture.accepted", default: 0] > 0 {
+        reportPhase(.awaitingInitialModelTarget)
+      } else if observedCounts["guidance.capture.started", default: 0] > 0 {
+        reportPhase(.capturingInitialFrame)
+      } else {
+        reportPhase(.preparingInitialCapture)
+      }
     }
     func checkFixture() throws {
       try Task.checkCancellation()
@@ -89,6 +206,7 @@ enum ManualGuidanceLiveAcceptance {
       // serialize a prompt, transcript, OCR labels, screenshot or user library.
       let result: [String: Any] = [
         "result": passed ? "passed" : "failed", "failureCode": passed ? "" : failureCode,
+        "lastPhase": phase.rawValue, "preflight": checks,
         "publicFixtureOnly": true, "actualCapturePath": "AppModel/CaptureService",
         "actualCaptureVerified": frames.count == 2,
         "stages": stages.keys.sorted().compactMap { stages[$0] },
@@ -103,8 +221,8 @@ enum ManualGuidanceLiveAcceptance {
         "automaticDesktopActions": false, "microphoneUsed": false, "audioUsed": false,
         "checkboxActionPerformedByHelper": false, "checkboxCompletionVerified": false,
         "taskComplete": false, "endState": passed ? "ready-for-checkbox-click" : "failed-check",
-        "elapsedMS": (ProcessInfo.processInfo.systemUptime - started) * 1_000,
-        "fixtureDisplayPoints": [screen.frame.width, screen.frame.height],
+        "elapsedMS": elapsedMS(since: started),
+        "fixtureDisplayPoints": displayPoints,
       ]
       try? writeJSON(
         result, to: output.appendingPathComponent("manual-guidance-live-acceptance.json"))
@@ -227,17 +345,18 @@ enum ManualGuidanceLiveAcceptance {
           "instructionCharacterCount": target.instruction.count,
           "manualInputVisibleInCapture": containsInput,
           "nativeContinueControlsVisible": request.step == 0,
-          "readyAtMS": (ProcessInfo.processInfo.systemUptime - started) * 1_000,
+          "readyAtMS": elapsedMS(since: started),
         ]
         frames[request.step] = evidence
         stages[request.step] = stage
         try writeJSON(stage, to: output.appendingPathComponent("step\(request.step)-ready.json"))
-        try FileHandle.standardOutput.write(
-          contentsOf: Data("GUIDANCE_MANUAL_STEP\(request.step)_READY\n".utf8))
+        reportObservedPhase()
+        try marker("GUIDANCE_MANUAL_STEP\(request.step)_READY")
       } catch {
         rejection = error.localizedDescription
       }
     }
+    reportPhase(.preparingInitialCapture)
     cursor.pointerMoved(to: CGPoint(x: screen.frame.midX - 160, y: screen.frame.midY))
     model.beginScreenGuidance(
       "Guide me through typing Release QA into the visible Table name field, then turning off Protect data.",
@@ -246,6 +365,7 @@ enum ManualGuidanceLiveAcceptance {
     let deadline = started + 120
     while stages[1] == nil {
       try Task.checkCancellation()
+      reportObservedPhase()
       if let rejection {
         failureCode = "target-or-continuation-validation"
         throw ProviderError.message(rejection)
@@ -276,6 +396,7 @@ enum ManualGuidanceLiveAcceptance {
       }
       try await Task.sleep(for: .milliseconds(100))
     }
+    reportObservedPhase()
     if let rejection {
       failureCode = "target-or-continuation-validation"
       throw ProviderError.message(rejection)
@@ -298,6 +419,15 @@ enum ManualGuidanceLiveAcceptance {
         "The next checkbox target changed before the acceptance could finish.")
     }
     passed = true
+  }
+
+  private static func elapsedMS(since started: TimeInterval) -> Double {
+    let value = (ProcessInfo.processInfo.systemUptime - started) * 1_000
+    return value.isFinite ? max(0, value) : 0
+  }
+
+  private static func marker(_ value: String) throws {
+    try FileHandle.standardOutput.write(contentsOf: Data((value + "\n").utf8))
   }
 
   private static func normalizedText(_ text: String) -> String {

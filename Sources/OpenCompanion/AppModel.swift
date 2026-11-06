@@ -166,6 +166,7 @@ struct ResponseInputPlan: Sendable {
   private let guidanceForegroundPID: @MainActor () -> pid_t?
   private let scopedGuidanceRefresh: (@MainActor (ScreenEvidence) async throws -> ScreenEvidence)?
   private let responseStream: ReasoningTurnStream?
+  private let selectedWindowVisibility: @MainActor (ScreenEvidence, CGRect) -> Bool
   private var turnSpeaksAloud = false
   private var generation: UInt64 = 0
   var taskGeneration: UInt64 { generation }
@@ -240,7 +241,10 @@ struct ResponseInputPlan: Sendable {
       CursorCompanionPreferences.load().screenGuidanceEnabled
     },
     scopedGuidanceRefresh: (@MainActor (ScreenEvidence) async throws -> ScreenEvidence)? = nil,
-    responseStream: ReasoningTurnStream? = nil
+    responseStream: ReasoningTurnStream? = nil,
+    selectedWindowVisibility: @escaping @MainActor (ScreenEvidence, CGRect) -> Bool = {
+      GuidanceSelectedWindowCheck.permits(evidence: $0, targetRect: $1)
+    }
   ) {
     self.voice = suppliedVoice ?? VoiceService()
     self.store = store
@@ -249,6 +253,7 @@ struct ResponseInputPlan: Sendable {
     self.guidanceForegroundPID = guidanceForegroundPID
     self.scopedGuidanceRefresh = scopedGuidanceRefresh
     self.responseStream = responseStream
+    self.selectedWindowVisibility = selectedWindowVisibility
     if !acceptanceMode {
       if store == nil {
         do {
@@ -1481,6 +1486,16 @@ struct ResponseInputPlan: Sendable {
         try guidanceSession.validateAction(
           token: token, instruction: String(target.instruction.prefix(480)),
           label: target.label, kind: target.advanceOn == "click" ? .click : .manual)
+      }
+      if evidence.windowID != nil {
+        guard let rect = ScreenGuidancePolicy.targetRect(target, in: evidence.screenRect),
+          selectedWindowVisibility(evidence, rect)
+        else {
+          throw ProviderError.message(
+            "The target could not be verified in the selected window. Bring that window forward and recheck this guide."
+          )
+        }
+        record("guidance.window.admission.accepted")
       }
       try overlay.validate(target: target, evidence: evidence)
       let introDelay = onCursorTargetAccepted?(generation, target, evidence) ?? 0

@@ -183,9 +183,11 @@ enum ScreenGuidancePolicy {
   private let now: @MainActor () -> TimeInterval
   private let foregroundPID: @MainActor () -> pid_t?
   private let settle: @MainActor () async throws -> Void
+  private let windowVisibility: @MainActor (ScreenEvidence, CGRect) -> Bool
   private let onContinue: ContinuationHandler?
   private var preferences: CursorCompanionPreferences
   private var mark: Mark?
+  private var selectedWindowClick = SelectedWindowClickHandoff()
   private var globalMouse: Any?
   private var localMouse: Any?
   private var expiryTask: Task<Void, Never>?
@@ -206,6 +208,9 @@ enum ScreenGuidancePolicy {
     settle: @escaping @MainActor () async throws -> Void = {
       try await Task.sleep(for: .milliseconds(300))
     },
+    windowVisibility: @escaping @MainActor (ScreenEvidence, CGRect) -> Bool = { evidence, rect in
+      GuidanceSelectedWindowCheck.permits(evidence: evidence, targetRect: rect)
+    },
     onContinue: ContinuationHandler? = nil
   ) {
     self.model = model
@@ -213,6 +218,7 @@ enum ScreenGuidancePolicy {
     self.now = now
     self.foregroundPID = foregroundPID
     self.settle = settle
+    self.windowVisibility = windowVisibility
     self.onContinue = onContinue
     // Isolated acceptance fixtures do not consult saved preferences or observe
     // external application input/lifecycle events.
@@ -256,6 +262,7 @@ enum ScreenGuidancePolicy {
         now: currentTime),
       let rect = ScreenGuidancePolicy.targetRect(target, in: evidence.screenRect)
     else { return }
+    if request.selectedScope?.windowID != nil, !windowVisibility(evidence, rect) { return }
     let owner = Mark(
       lease: UUID(), rect: rect, evidence: ScreenEvidenceIdentity(evidence),
       generation: generation, request: request, admittedAt: currentTime,
@@ -275,23 +282,20 @@ enum ScreenGuidancePolicy {
     scheduleExpiry(for: owner)
     guard !isManual, observesInput else { return }
     let lease = owner.lease
-    globalMouse = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+    let edges: NSEvent.EventTypeMask = [.leftMouseDown, .leftMouseUp]
+    globalMouse = NSEvent.addGlobalMonitorForEvents(matching: edges) { [weak self] event in
       // Use the actual edge's recorded location. A later live pointer sample can
       // already have moved away from the control by the time this handler runs.
       MainActor.assumeIsolated {
-        let point = ScreenGuidancePolicy.appKitPoint(
-          quartz: event.cgEvent?.location, mainTop: NSScreen.screens.first?.frame.maxY)
-        self?.mouseUp(at: point, lease: lease)
+        self?.receiveMouseEvent(event, lease: lease)
       }
     }
-    localMouse = NSEvent.addLocalMonitorForEvents(matching: .leftMouseUp) { [weak self] event in
+    localMouse = NSEvent.addLocalMonitorForEvents(matching: edges) { [weak self] event in
       MainActor.assumeIsolated {
         // A click delivered to one of our own nonactivating windows must not
         // count as a click through to an external app underneath that window.
         if event.window == nil {
-          let point = ScreenGuidancePolicy.appKitPoint(
-            quartz: event.cgEvent?.location, mainTop: NSScreen.screens.first?.frame.maxY)
-          self?.mouseUp(at: point, lease: lease)
+          self?.receiveMouseEvent(event, lease: lease)
         }
       }
       return event
@@ -352,6 +356,7 @@ enum ScreenGuidancePolicy {
 
   func cancel() {
     mark = nil
+    selectedWindowClick.clear()
     manualStep = nil
     removeClickMonitors()
     expiryTask?.cancel()
@@ -368,7 +373,56 @@ enum ScreenGuidancePolicy {
     subscriptions.removeAll()
   }
 
-  private func mouseUp(at point: CGPoint?, lease: UUID) {
+  /// The read-only lease also scopes authored metadata ingestion. Neither the
+  /// getter nor the receive methods install observers or synthesize input.
+  var clickObservationLeaseID: UUID? {
+    mark?.observation == .click ? mark?.lease : nil
+  }
+
+  private func receiveMouseEvent(_ event: NSEvent, lease: UUID) {
+    let cgEvent = event.cgEvent
+    let point = ScreenGuidancePolicy.appKitPoint(
+      quartz: cgEvent?.location, mainTop: NSScreen.screens.first?.frame.maxY)
+    let rawPID = cgEvent?.getIntegerValueField(.eventTargetUnixProcessID) ?? 0
+    let targetPID: pid_t? = rawPID == 0 ? nil : (pid_t(exactly: rawPID) ?? -1)
+    // Field 92 is public: the window that can handle this event. Field 91 is
+    // intentionally not a fallback; it does not establish input destination.
+    let rawWindow =
+      cgEvent?.getIntegerValueField(
+        .mouseEventWindowUnderMousePointerThatCanHandleThisEvent) ?? 0
+    let handlingWindowID = rawWindow > 0 ? CGWindowID(exactly: rawWindow) : nil
+    if event.type == .leftMouseDown {
+      receiveMouseDown(
+        at: point, timestamp: event.timestamp, eventTargetPID: targetPID,
+        handlingWindowID: handlingWindowID, lease: lease)
+    } else if event.type == .leftMouseUp {
+      receiveMouseUp(
+        at: point, timestamp: event.timestamp, eventTargetPID: targetPID,
+        handlingWindowID: handlingWindowID, lease: lease)
+    }
+  }
+
+  func receiveMouseDown(
+    at point: CGPoint?, timestamp: TimeInterval, eventTargetPID: pid_t?,
+    handlingWindowID: CGWindowID?, lease: UUID
+  ) {
+    guard continuationTask == nil, let owner = mark, owner.lease == lease,
+      owner.observation == .click, owner.request.selectedScope?.windowID != nil
+    else { return }
+    guard owns(owner), let authority = selectedWindowAuthority(owner) else {
+      selectedWindowClick.clear()
+      cancel()
+      return
+    }
+    selectedWindowClick.receiveDown(
+      authority: authority, point: point, timestamp: timestamp,
+      eventTargetPID: eventTargetPID, handlingWindowID: handlingWindowID)
+  }
+
+  func receiveMouseUp(
+    at point: CGPoint?, timestamp: TimeInterval, eventTargetPID: pid_t?,
+    handlingWindowID: CGWindowID?, lease: UUID
+  ) {
     guard continuationTask == nil, let owner = mark, owner.lease == lease,
       owner.observation == .click
     else { return }
@@ -378,7 +432,16 @@ enum ScreenGuidancePolicy {
       cancel()
       return
     }
+    if owner.request.selectedScope?.windowID != nil {
+      guard let authority = selectedWindowAuthority(owner),
+        selectedWindowClick.receiveUp(
+          authority: authority, point: point, timestamp: timestamp, eventTargetPID: eventTargetPID)
+      else { return }
+    }
     guard let point, point.x.isFinite, point.y.isFinite, owner.rect.contains(point) else { return }
+    // The up's handling window is deliberately not required to equal the down
+    // destination: a same-app menu may already have opened. No live window hit
+    // query is performed here or during the subsequent settle interval.
     onUserClickObserved?(
       .init(
         point: point, targetRect: owner.rect, frameID: owner.evidence.frameID,
@@ -388,10 +451,22 @@ enum ScreenGuidancePolicy {
     queueContinuation(owner)
   }
 
+  private func selectedWindowAuthority(_ owner: Mark) -> SelectedWindowClickHandoff.Authority? {
+    guard let windowID = owner.request.selectedScope?.windowID else { return nil }
+    return .init(
+      lease: owner.lease, frameID: owner.evidence.frameID, generation: owner.generation,
+      requestID: owner.request.id, step: owner.request.step,
+      foregroundPID: owner.evidence.foregroundPID, windowID: windowID,
+      targetRect: owner.rect, admittedAt: owner.admittedAt,
+      deadline: min(
+        owner.request.expires, owner.admittedAt + ScreenGuidancePolicy.markedTargetLifetime))
+  }
+
   private func queueContinuation(_ owner: Mark) {
     // Clear presentation and observation before yielding. The retained private
     // lease protects the settle interval against cancellation and replacement.
     manualStep = nil
+    selectedWindowClick.clear()
     removeClickMonitors()
     expiryTask?.cancel()
     expiryTask = nil

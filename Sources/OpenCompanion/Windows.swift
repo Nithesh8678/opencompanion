@@ -236,6 +236,7 @@ struct GuidanceMarkRaster {
     let panel = AnnotationPanel(
       contentRect: display, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
       defer: false)
+    panel.identifier = NSUserInterfaceItemIdentifier("org.opencompanion.guidance.annotation")
     panel.isOpaque = false
     panel.backgroundColor = .clear
     panel.hasShadow = false

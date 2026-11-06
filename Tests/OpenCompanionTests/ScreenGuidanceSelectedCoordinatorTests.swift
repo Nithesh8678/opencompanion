@@ -172,6 +172,7 @@ import Testing
   func coordinator() -> ScreenGuidanceCoordinator {
     ScreenGuidanceCoordinator(
       model: model, observeInput: false, now: { 100 }, foregroundPID: { 424_242 }, settle: {},
+      windowVisibility: { _, _ in true },
       onContinue: { [weak self] request, evidence, generation, observation in
         self?.receipts.append(
           Receipt(

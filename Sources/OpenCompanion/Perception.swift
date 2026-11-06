@@ -12,6 +12,8 @@ struct ScreenEvidence: Sendable {
   var foregroundName: String
   var screenRect: CGRect
   var windowID: CGWindowID? = nil
+  /// Whole native window extent at capture, before any selected-region crop.
+  var capturedWindowBounds: CGRect? = nil
   var image: Data
   var semanticText: String
   var groundingCandidates: [ScreenGroundingCandidate] = []
@@ -26,6 +28,7 @@ struct ScreenEvidenceIdentity: Sendable, Equatable {
   let displayID: CGDirectDisplayID
   let foregroundPID: pid_t
   let windowID: CGWindowID?
+  let capturedWindowBounds: CGRect?
   let screenRect: CGRect
 
   init(_ evidence: ScreenEvidence) {
@@ -34,6 +37,7 @@ struct ScreenEvidenceIdentity: Sendable, Equatable {
     displayID = evidence.displayID
     foregroundPID = evidence.foregroundPID
     windowID = evidence.windowID
+    capturedWindowBounds = evidence.capturedWindowBounds
     screenRect = evidence.screenRect
   }
 
@@ -200,6 +204,7 @@ actor CaptureService {
         || $0.bundleIdentifier == (Bundle.main.bundleIdentifier ?? "org.opencompanion.mac")
     }
     var sourceRect = rect
+    var capturedWindowBounds: CGRect?
     let filter: SCContentFilter
     if let windowID {
       guard let window = content.windows.first(where: { $0.windowID == windowID }),
@@ -213,6 +218,7 @@ actor CaptureService {
       sourceRect = CGRect(
         x: window.frame.minX, y: primaryTop - window.frame.maxY, width: window.frame.width,
         height: window.frame.height)
+      capturedWindowBounds = sourceRect
     } else {
       filter = SCContentFilter(display: display, excludingApplications: own, exceptingWindows: [])
     }
@@ -279,7 +285,8 @@ actor CaptureService {
     return ScreenEvidence(
       frameID: frameID, revision: revision, capturedAt: capturedAt,
       displayID: display.displayID, foregroundPID: foregroundPID, foregroundName: foregroundName,
-      screenRect: sourceRect, windowID: windowID, image: data,
+      screenRect: sourceRect, windowID: windowID, capturedWindowBounds: capturedWindowBounds,
+      image: data,
       semanticText: context.text, groundingCandidates: context.candidates,
       imageWidth: imageWidth, imageHeight: imageHeight
     )

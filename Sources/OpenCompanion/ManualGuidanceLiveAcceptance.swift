@@ -191,7 +191,23 @@ enum ManualGuidanceLiveAcceptance {
     var requestID: UUID?
     var rejection: String?
     var fixtureStateFailure: String?
+    var receivedTargets: [[String: Any]] = []
+    var receivedTargetCount = 0
+    var failedTargetOrdinal: Int?
     failureCode = "incomplete"
+
+    func persistReceivedTargets() {
+      let url = output.appendingPathComponent("received-target-diagnostics.json")
+      try? writeJSON(
+        [
+          "publicFixtureOnly": true, "maximumSummaries": 24,
+          "receivedTargetCount": receivedTargetCount,
+          "omittedSummaryCount": max(0, receivedTargetCount - receivedTargets.count),
+          "failedTargetOrdinal": failedTargetOrdinal.map { $0 as Any } ?? NSNull(),
+          "failureCode": failureCode, "targets": receivedTargets,
+        ], to: url)
+      try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
 
     func recentEvents() -> [[String: String]] {
       Array(model.diagnosticEvents.dropFirst(traceStart).suffix(2_000))
@@ -270,7 +286,9 @@ enum ManualGuidanceLiveAcceptance {
         [
           "checkpoint": key, "elapsedMS": elapsedMS(since: started),
           "retainedMarks": observationMetadata, "localOwnViewOnly": true,
-          "expectedTargetRect": [targetRect.minX, targetRect.minY, targetRect.width, targetRect.height],
+          "expectedTargetRect": [
+            targetRect.minX, targetRect.minY, targetRect.width, targetRect.height,
+          ],
           "expectedOwnerGeneration": generation, "expectedFrameID": evidence.frameID.uuidString,
           "expectedEvidenceRevision": evidence.revision, "expectedDisplayID": displayID,
           "expectedForegroundPID": pid, "expectedShape": target.shape ?? "roundedRectangle",
@@ -281,7 +299,8 @@ enum ManualGuidanceLiveAcceptance {
         $0.ownerGeneration == generation && $0.frameID == evidence.frameID
           && $0.evidenceRevision == evidence.revision && $0.displayID == displayID
           && $0.foregroundPID == pid && $0.windowID == nil && $0.sourceRect == screen.frame
-          && retainedTargetMatches($0.targetRect, expected: targetRect, displaySize: screen.frame.size)
+          && retainedTargetMatches(
+            $0.targetRect, expected: targetRect, displaySize: screen.frame.size)
           && $0.shape == (target.shape ?? "roundedRectangle")
           && (markIDs[step] == nil || markIDs[step] == $0.id)
       }
@@ -439,6 +458,7 @@ enum ManualGuidanceLiveAcceptance {
           "generation": model.taskGeneration, "providerReportedError": model.error != nil,
         ],
         to: output.appendingPathComponent("manual-guidance-diagnostics.json"))
+      persistReceivedTargets()
       model.onScreenGuidanceTargetAccepted = productionTargetObserver
       model.onPrepareScreenGuidance = oldPreparation
       coordinator.onManualContinueWillBegin = oldBeforeContinue
@@ -493,8 +513,52 @@ enum ManualGuidanceLiveAcceptance {
     }
     model.onScreenGuidanceTargetAccepted = { target, evidence, generation, request in
       guard rejection == nil else { return }
+      receivedTargetCount += 1
+      let ordinal = receivedTargetCount
+      let geometry = [target.x, target.y, target.width, target.height]
+      let expected = fieldRect(displaySize: screen.frame.size)
+      let expectedValues = [expected.minX, expected.minY, expected.width, expected.height]
+      let resolvedValues = [
+        target.x * screen.frame.width, target.y * screen.frame.height,
+        target.width * screen.frame.width, target.height * screen.frame.height,
+      ]
+      var summary: [String: Any] = [
+        "ordinal": ordinal, "step": request.step, "generation": generation,
+        "advanceOn": target.advanceOn.map {
+          String(decoding: $0.utf8.prefix(80), as: UTF8.self) as Any
+        } ?? NSNull(),
+        "awaitUser": target.awaitUser.map { $0 as Any } ?? NSNull(),
+        "shape": target.shape.map {
+          String(decoding: $0.utf8.prefix(80), as: UTF8.self) as Any
+        } ?? NSNull(),
+        "normalizedGeometryFinite": geometry.allSatisfy(\.isFinite),
+        "normalizedGeometry": geometry.map { $0.isFinite ? $0 as Any : NSNull() },
+        "expectedFieldRect": expectedValues.allSatisfy(\.isFinite)
+          ? expectedValues as Any : NSNull(),
+        "resolvedTargetRect": resolvedValues.allSatisfy(\.isFinite)
+          ? resolvedValues as Any : NSNull(),
+        "sourceForegroundMatches": evidence.foregroundPID == pid,
+        "sourceDisplayMatches": evidence.displayID == displayID,
+        "sourceWindowScopeMatches": evidence.windowID == nil,
+        "sourceRectMatches": evidence.screenRect == screen.frame,
+        "sourceFrameMatchesModel": ScreenEvidenceIdentity(evidence).matches(model.evidence),
+        "generationMatchesModel": generation == model.taskGeneration,
+        "containsInput": NSNull(),
+        "groundedField": grounded(
+          target, in: expected, displaySize: screen.frame.size),
+        "groundedProtection": groundedProtection(target, displaySize: screen.frame.size),
+        "outcome": "received",
+      ]
+      let summaryIndex = receivedTargets.count < 24 ? receivedTargets.count : nil
+      if summaryIndex != nil { receivedTargets.append(summary) }
+      var targetCheck = "fixture-context"
+      defer {
+        if let summaryIndex { receivedTargets[summaryIndex] = summary }
+        persistReceivedTargets()
+      }
       do {
         try checkFixture()
+        targetCheck = "public-source-ownership"
         guard evidence.foregroundPID == pid, evidence.displayID == displayID,
           evidence.windowID == nil, evidence.screenRect == screen.frame,
           ScreenEvidenceIdentity(evidence).matches(model.evidence),
@@ -503,10 +567,15 @@ enum ManualGuidanceLiveAcceptance {
         else {
           throw ProviderError.message("The accepted target did not own the public display capture.")
         }
+        targetCheck = "image-header"
         let pixels = try verifiedImageDimensions(evidence)
         let visibleLabels = evidence.groundingCandidates.filter { $0.source == .ocr }.map {
           normalizedText($0.label)
         }
+        targetCheck = "visible-public-form"
+        summary["tableNameVisible"] = visibleLabels.contains(where: { $0.contains("tablename") })
+        summary["protectDataVisible"] = visibleLabels.contains(where: { $0.contains("protectdata") }
+        )
         guard visibleLabels.contains(where: { $0.contains("tablename") }),
           visibleLabels.contains(where: { $0.contains("protectdata") })
         else {
@@ -516,21 +585,34 @@ enum ManualGuidanceLiveAcceptance {
         let containsInput = evidence.groundingCandidates.contains {
           $0.source == .ocr && normalizedText($0.label).contains("releaseqa")
         }
+        summary["containsInput"] = containsInput
         switch request.step {
         case 0:
+          targetCheck = "request-identity"
           if let requestID, requestID != request.id {
             throw ProviderError.message("The guidance request changed before manual continuation.")
           }
           if stages[0] != nil {
+            targetCheck = "secondary-target-semantics"
             // Production permits supporting, non-awaiting annotations after
             // its one primary manual step. They cannot establish that primary
             // or replace it with a second advancing instruction.
             guard target.advanceOn != "click", target.awaitUser != true else {
               throw ProviderError.message("The first stage emitted a second advancing target.")
             }
+            summary["outcome"] = "forwarded-secondary"
             productionTargetObserver(target, evidence, generation, request)
             return
           }
+          targetCheck = "first-manual-target-predicates"
+          summary["firstManualPredicates"] = [
+            "advanceOnManual": target.advanceOn == "manual",
+            "awaitUserTrue": target.awaitUser == true,
+            "inputAbsent": !containsInput,
+            "groundedField": summary["groundedField"] as? Bool ?? false,
+          ]
+          if let summaryIndex { receivedTargets[summaryIndex] = summary }
+          persistReceivedTargets()
           guard target.advanceOn == "manual", target.awaitUser == true,
             !containsInput,
             grounded(
@@ -541,8 +623,10 @@ enum ManualGuidanceLiveAcceptance {
           }
           requestID = request.id
         case 1:
+          targetCheck = "fresh-checkbox-target"
           // Secondary explanatory marks do not substitute for the next click.
           guard target.advanceOn == "click" else {
+            summary["outcome"] = "forwarded-secondary"
             productionTargetObserver(target, evidence, generation, request)
             return
           }
@@ -558,11 +642,14 @@ enum ManualGuidanceLiveAcceptance {
               "Continue did not produce a fresh, grounded checkbox step after visible typing.")
           }
         default:
+          targetCheck = "unexpected-step"
           throw ProviderError.message("The acceptance advanced beyond the requested two stages.")
         }
+        summary["outcome"] = "forwarded-primary"
         productionTargetObserver(target, evidence, generation, request)
         guard stages[request.step] == nil else { return }
         if request.step == 0 {
+          targetCheck = "native-manual-controls"
           guard eventCount("guidance.manualContinuation.armed") > 0,
             NSApp.windows.contains(where: {
               $0.identifier?.rawValue == "org.opencompanion.guidance.manual" && $0.isVisible
@@ -588,12 +675,17 @@ enum ManualGuidanceLiveAcceptance {
         frames[request.step] = evidence
         acceptedTargets[request.step] = target
         acceptedGenerations[request.step] = generation
+        targetCheck = "native-mark-checkpoint"
         try sampleMark(step: request.step, checkpoint: "initial", requireSettled: false)
         stages[request.step] = stage
         try writeJSON(stage, to: output.appendingPathComponent("step\(request.step)-ready.json"))
         reportObservedPhase()
         try marker("GUIDANCE_MANUAL_STEP\(request.step)_READY")
+        summary["outcome"] = "accepted"
       } catch {
+        summary["outcome"] = "refused"
+        summary["failureReason"] = targetCheck
+        failedTargetOrdinal = ordinal
         rejection = error.localizedDescription
       }
     }
@@ -726,7 +818,9 @@ enum ManualGuidanceLiveAcceptance {
     _ actual: CGRect, expected: CGRect, displaySize: CGSize
   ) -> Bool {
     let actualValues = [actual.origin.x, actual.origin.y, actual.size.width, actual.size.height]
-    let expectedValues = [expected.origin.x, expected.origin.y, expected.size.width, expected.size.height]
+    let expectedValues = [
+      expected.origin.x, expected.origin.y, expected.size.width, expected.size.height,
+    ]
     let values = actualValues + expectedValues + [displaySize.width, displaySize.height]
     guard values.allSatisfy({ $0.isFinite && abs($0) <= 100_000 }),
       actual.size.width > 0, actual.size.height > 0,

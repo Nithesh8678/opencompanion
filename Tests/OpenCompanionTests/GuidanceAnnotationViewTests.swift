@@ -5,6 +5,38 @@ import Testing
 @testable import OpenCompanion
 
 struct GuidanceAnnotationViewTests {
+  @Test func retainedRectangleAllowsOnlyMachinePrecisionDifferences() {
+    let expected = CGRect(x: 293.80000000000007, y: 460.90000000000009, width: 422, height: 36)
+    let display = CGSize(width: 1512, height: 982)
+    let clipped = CGRect(
+      x: expected.minX, y: expected.minY, width: 422.00000000000011, height: 36)
+    #expect(ManualGuidanceLiveAcceptance.retainedTargetMatches(
+      clipped, expected: expected, displaySize: display))
+    #expect(!ManualGuidanceLiveAcceptance.retainedTargetMatches(
+      clipped.offsetBy(dx: 0.000001, dy: 0), expected: expected, displaySize: display))
+    #expect(!ManualGuidanceLiveAcceptance.retainedTargetMatches(
+      clipped.insetBy(dx: 0.000001, dy: 0), expected: expected, displaySize: display))
+  }
+
+  @Test func retainedRectangleRejectsInvalidGeometry() {
+    let expected = CGRect(x: 10, y: 20, width: 100, height: 30)
+    #expect(!ManualGuidanceLiveAcceptance.retainedTargetMatches(
+      expected, expected: expected, displaySize: CGSize(width: CGFloat.infinity, height: 982)))
+    #expect(!ManualGuidanceLiveAcceptance.retainedTargetMatches(
+      .zero, expected: expected, displaySize: CGSize(width: 1512, height: 982)))
+    #expect(!ManualGuidanceLiveAcceptance.retainedTargetMatches(
+      CGRect(x: 10, y: 20, width: -100, height: 30), expected: expected,
+      displaySize: CGSize(width: 1512, height: 982)))
+    #expect(!ManualGuidanceLiveAcceptance.retainedTargetMatches(
+      CGRect(x: 10, y: 20, width: 100, height: -30), expected: expected,
+      displaySize: CGSize(width: 1512, height: 982)))
+    #expect(!ManualGuidanceLiveAcceptance.retainedTargetMatches(
+      expected, expected: expected, displaySize: CGSize(width: 1_000_000, height: 982)))
+    let oversized = CGRect(x: 1_000_000, y: 20, width: 100, height: 30)
+    #expect(!ManualGuidanceLiveAcceptance.retainedTargetMatches(
+      oversized, expected: oversized, displaySize: CGSize(width: 1512, height: 982)))
+  }
+
   @Test func annotationOracleUsesTopBitmapRowsWithoutMirroringItsCrop() throws {
     // This independently authored RGBA bitmap bypasses CALayer.render and the
     // production raster transform. It fixes the pixel-row convention directly.

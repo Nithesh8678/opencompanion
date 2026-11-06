@@ -270,6 +270,10 @@ enum ManualGuidanceLiveAcceptance {
         [
           "checkpoint": key, "elapsedMS": elapsedMS(since: started),
           "retainedMarks": observationMetadata, "localOwnViewOnly": true,
+          "expectedTargetRect": [targetRect.minX, targetRect.minY, targetRect.width, targetRect.height],
+          "expectedOwnerGeneration": generation, "expectedFrameID": evidence.frameID.uuidString,
+          "expectedEvidenceRevision": evidence.revision, "expectedDisplayID": displayID,
+          "expectedForegroundPID": pid, "expectedShape": target.shape ?? "roundedRectangle",
           "windowServerDesktopVisibilityVerified": false,
         ],
         to: output.appendingPathComponent("mark-\(key)-observation.json"))
@@ -277,7 +281,8 @@ enum ManualGuidanceLiveAcceptance {
         $0.ownerGeneration == generation && $0.frameID == evidence.frameID
           && $0.evidenceRevision == evidence.revision && $0.displayID == displayID
           && $0.foregroundPID == pid && $0.windowID == nil && $0.sourceRect == screen.frame
-          && $0.targetRect == targetRect && $0.shape == (target.shape ?? "roundedRectangle")
+          && retainedTargetMatches($0.targetRect, expected: targetRect, displaySize: screen.frame.size)
+          && $0.shape == (target.shape ?? "roundedRectangle")
           && (markIDs[step] == nil || markIDs[step] == $0.id)
       }
       guard candidates.count == 1, let mark = candidates.first else {
@@ -711,6 +716,26 @@ enum ManualGuidanceLiveAcceptance {
       try marker("GUIDANCE_MANUAL_TASK_POSTCONDITION_VERIFIED")
     }
     passed = true
+  }
+
+  /// CGRect intersection can recompute width/height by subtracting endpoints.
+  /// Permit only arithmetic roundoff at display scale, far below one pixel;
+  /// ownership, path bounds and independent raster checks remain separate.
+  static func retainedTargetMatches(
+    _ actual: CGRect, expected: CGRect, displaySize: CGSize
+  ) -> Bool {
+    let actualValues = [actual.origin.x, actual.origin.y, actual.size.width, actual.size.height]
+    let expectedValues = [expected.origin.x, expected.origin.y, expected.size.width, expected.size.height]
+    let values = actualValues + expectedValues + [displaySize.width, displaySize.height]
+    guard values.allSatisfy({ $0.isFinite && abs($0) <= 100_000 }),
+      actual.size.width > 0, actual.size.height > 0,
+      expected.size.width > 0, expected.size.height > 0,
+      displaySize.width > 0, displaySize.height > 0,
+      displaySize.width <= 100_000, displaySize.height <= 100_000
+    else { return false }
+    let scale = max(displaySize.width, displaySize.height)
+    let tolerance = max(1, scale).ulp * 8
+    return zip(actualValues, expectedValues).allSatisfy { abs($0 - $1) <= tolerance }
   }
 
   /// Independent contour/alpha evidence for a local annotation bitmap. The

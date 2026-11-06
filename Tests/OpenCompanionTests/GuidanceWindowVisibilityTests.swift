@@ -66,18 +66,18 @@ struct GuidanceWindowVisibilityTests {
     #expect(!permits([selected], source: outsideCrop))
     for invalid in invalidRects {
       #expect(!permits([selected], target: invalid))
-      #expect(
-        !permits(
-          [selected],
-          source: .init(
-            id: source.id, ownerPID: source.ownerPID,
-            capturedBounds: invalid, sourceRect: source.sourceRect)))
-      #expect(
-        !permits(
-          [selected],
-          source: .init(
-            id: source.id, ownerPID: source.ownerPID,
-            capturedBounds: source.capturedBounds, sourceRect: invalid)))
+      // Keep contextual initializers outside the assertion macro: the fixture
+      // and production call must have identical evaluation across toolchains.
+      let invalidCaptured = GuidanceWindowSource(
+        id: source.id, ownerPID: source.ownerPID,
+        capturedBounds: invalid, sourceRect: source.sourceRect)
+      let invalidCrop = GuidanceWindowSource(
+        id: source.id, ownerPID: source.ownerPID,
+        capturedBounds: source.capturedBounds, sourceRect: invalid)
+      let acceptsInvalidCaptured = permits([selected], source: invalidCaptured)
+      let acceptsInvalidCrop = permits([selected], source: invalidCrop)
+      #expect(!acceptsInvalidCaptured)
+      #expect(!acceptsInvalidCrop)
       #expect(!permits([selected, record(id: 20, bounds: invalid)]))
     }
   }
@@ -91,18 +91,16 @@ struct GuidanceWindowVisibilityTests {
       #expect(!permits([selected, record(id: 20, alpha: alpha)]))
     }
     #expect(!permits([selected], ownPID: 0))
-    #expect(
-      !permits(
-        [selected],
-        source: .init(
-          id: 0, ownerPID: source.ownerPID,
-          capturedBounds: source.capturedBounds, sourceRect: source.sourceRect)))
-    #expect(
-      !permits(
-        [selected],
-        source: .init(
-          id: source.id, ownerPID: -1,
-          capturedBounds: source.capturedBounds, sourceRect: source.sourceRect)))
+    let zeroID = GuidanceWindowSource(
+      id: 0, ownerPID: source.ownerPID,
+      capturedBounds: source.capturedBounds, sourceRect: source.sourceRect)
+    let negativeOwner = GuidanceWindowSource(
+      id: source.id, ownerPID: -1,
+      capturedBounds: source.capturedBounds, sourceRect: source.sourceRect)
+    let acceptsZeroID = permits([selected], source: zeroID)
+    let acceptsNegativeOwner = permits([selected], source: negativeOwner)
+    #expect(!acceptsZeroID)
+    #expect(!acceptsNegativeOwner)
   }
 
   @Test func theSnapshotWorkBudgetHasAnExactBoundary() {

@@ -28,6 +28,7 @@ struct GuidanceMarkPresentation: Codable, Sendable {
   let panelVisible: Bool
   let panelAlpha: Double
   let panelIgnoresMouseEvents: Bool
+  let panelHidesOnDeactivate: Bool
   let panelCanBecomeKey: Bool
   let panelIsKey: Bool
   let viewMounted: Bool
@@ -142,16 +143,7 @@ struct GuidanceMarkRaster {
     // Sequential targets from the same captured scene can remain together.
     // Each mark retains its own deadline, so appending never extends old marks.
     while marks.count >= 8 { Self.remove(marks.removeFirst().panel) }
-    let panel = AnnotationPanel(
-      contentRect: display, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
-      defer: false)
-    panel.isOpaque = false
-    panel.backgroundColor = .clear
-    panel.hasShadow = false
-    panel.ignoresMouseEvents = true
-    panel.isReleasedWhenClosed = false
-    panel.level = .floating
-    panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    let panel = Self.makePanel(display: display)
     let proposed = CGRect(
       x: target.x * display.width, y: target.y * display.height,
       width: target.width * display.width, height: target.height * display.height)
@@ -214,6 +206,7 @@ struct GuidanceMarkRaster {
         panelFrame: panel.frame, panelVisible: panel.isVisible,
         panelAlpha: finite(Double(panel.alphaValue)),
         panelIgnoresMouseEvents: panel.ignoresMouseEvents,
+        panelHidesOnDeactivate: panel.hidesOnDeactivate,
         panelCanBecomeKey: panel.canBecomeKey, panelIsKey: panel.isKeyWindow,
         viewMounted: view?.window === panel, viewHidden: view?.isHiddenOrHasHiddenAncestor ?? true,
         rootHidden: root?.isHidden ?? true, rootOpacity: finite(Double(root?.opacity ?? 0)),
@@ -237,6 +230,21 @@ struct GuidanceMarkRaster {
       let view = mark.panel.contentView as? GuidanceAnnotationView, view.window === mark.panel
     else { throw ProviderError.message("The requested guidance mark is no longer mounted.") }
     return try GuidanceMarkRaster.render(view: view)
+  }
+
+  static func makePanel(display: CGRect) -> AnnotationPanel {
+    let panel = AnnotationPanel(
+      contentRect: display, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
+      defer: false)
+    panel.isOpaque = false
+    panel.backgroundColor = .clear
+    panel.hasShadow = false
+    panel.ignoresMouseEvents = true
+    panel.hidesOnDeactivate = false
+    panel.isReleasedWhenClosed = false
+    panel.level = .floating
+    panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    return panel
   }
 
   func validate(target: ProviderTarget, evidence: ScreenEvidence) throws {

@@ -5,6 +5,16 @@ import Testing
 @testable import OpenCompanion
 
 struct ManualGuidanceControlsTests {
+  @Test @MainActor func passiveMarksDoNotInheritAutomaticAppDeactivationHiding() {
+    _ = NSApplication.shared
+    let panel = OverlayHost.makePanel(display: CGRect(x: -1512, y: 0, width: 1512, height: 982))
+    defer { panel.close() }
+    #expect(!panel.hidesOnDeactivate)
+    #expect(panel.ignoresMouseEvents && !panel.canBecomeKey && !panel.canBecomeMain)
+    #expect(!panel.isVisible && !panel.isKeyWindow)
+    #expect(panel.level == .floating)
+  }
+
   @Test @MainActor func hostedButtonsAreEligibleWithoutActivatingTheirPanel() throws {
     _ = NSApplication.shared
     let content = ManualGuidanceControls.makeContentView(proceed: {}, stop: {})

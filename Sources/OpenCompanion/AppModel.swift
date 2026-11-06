@@ -135,6 +135,11 @@ struct ResponseInputPlan: Sendable {
   let browser = BrowserBridge()
   let voice: VoiceService
   let overlay = OverlayHost()
+  let guidanceSession = GuidanceSessionController()
+  private var guidanceSessionSubscription: AnyCancellable?
+  private var guidanceTurnToken: GuidanceTurnToken?
+  private var guidanceLoadingTask: Task<Void, Never>?
+  private var guidanceStatusReceived = false
   let capture = CaptureService()
   let provider = ReasoningProvider()
   var codex: CodexProvider?
@@ -147,6 +152,7 @@ struct ResponseInputPlan: Sendable {
   private var voiceDraftGuard: VoiceDraftGuard?
   private var voiceGuidanceContinuation: ManualGuidanceVoiceContinuation?
   private let screenGuidanceEnabled: @MainActor () -> Bool
+  private let guidanceForegroundPID: @MainActor () -> pid_t?
   private var turnSpeaksAloud = false
   private var generation: UInt64 = 0
   var taskGeneration: UInt64 { generation }
@@ -211,6 +217,9 @@ struct ResponseInputPlan: Sendable {
   init(
     acceptanceMode: Bool = false, store: LocalStore? = nil,
     voice suppliedVoice: VoiceService? = nil,
+    guidanceForegroundPID: @escaping @MainActor () -> pid_t? = {
+      NSWorkspace.shared.frontmostApplication?.processIdentifier
+    },
     screenGuidanceEnabled: @escaping @MainActor () -> Bool = {
       CursorCompanionPreferences.load().screenGuidanceEnabled
     }
@@ -218,6 +227,7 @@ struct ResponseInputPlan: Sendable {
     self.voice = suppliedVoice ?? VoiceService()
     self.store = store
     self.screenGuidanceEnabled = screenGuidanceEnabled
+    self.guidanceForegroundPID = guidanceForegroundPID
     if !acceptanceMode {
       if store == nil {
         do {
@@ -234,6 +244,11 @@ struct ResponseInputPlan: Sendable {
         (try? credentials.load(
           service: "org.opencompanion.provider", account: configuration.endpoint))
         .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+    }
+    if let store = self.store { guidanceSession.setStore(store) }
+    guidanceSession.onPersisted = { [weak self] in Task { await self?.reload() } }
+    guidanceSessionSubscription = guidanceSession.objectWillChange.sink { [weak self] in
+      self?.objectWillChange.send()
     }
     voice.onState = { [weak self] state in
       guard let self else { return }
@@ -408,7 +423,7 @@ struct ResponseInputPlan: Sendable {
     textOverride: String?, voiceOnly: Bool, speakAloud: Bool,
     guidanceRequest: ScreenGuidanceRequest? = nil,
     expectedGuidanceForegroundPID: pid_t? = nil,
-    transcriptText: String? = nil
+    transcriptText: String? = nil, continuingWorkflow: Bool = false
   ) {
     let text = (textOverride ?? input).trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty else { return }
@@ -434,7 +449,24 @@ struct ResponseInputPlan: Sendable {
       (guidanceRequest?.step ?? 0) > 0
       ? messages.last(where: { $0.role == "assistant" }).map { String($0.text.prefix(800)) } : nil
     let sourceGeneration = generation
-    stop()
+    if automaticGuidance == nil { guidanceSession.pause() }
+    cancelActiveTurn()
+    var workflowToken: GuidanceTurnToken?
+    if let request = automaticGuidance {
+      do {
+        if !continuingWorkflow || guidanceSession.workflow == nil {
+          try guidanceSession.start(goal: request.prompt, speakAloud: request.speakAloud)
+        }
+        workflowToken = try guidanceSession.beginCheck()
+      } catch {
+        showError(error)
+        guidanceSession.pause()
+        return
+      }
+    }
+    guidanceTurnToken = workflowToken
+    guidanceStatusReceived = false
+    let savedGuidanceContext = workflowToken == nil ? "" : guidanceSession.plannerContext
     if textOverride == nil { input = "" }
     turnSpeaksAloud = speakAloud
     voiceNotice = nil
@@ -485,7 +517,8 @@ struct ResponseInputPlan: Sendable {
           let frame = try await self.captureGuidanceEvidence(
             request: automaticGuidance, generation: current, captureToken: captureToken,
             expectedForegroundPID: expectedGuidanceForegroundPID)
-          turnContext = frame.semanticText
+          turnContext =
+            frame.semanticText + (savedGuidanceContext.isEmpty ? "" : "\n\n" + savedGuidanceContext)
           turnImage = frame.image
           turnEvidence = ScreenEvidenceIdentity(frame)
         } else {
@@ -546,6 +579,13 @@ struct ResponseInputPlan: Sendable {
           _ = self.onCursorTextPreview?(
             current, ProviderTextPreview(unitID: 0, text: explanation, isComplete: true))
         }
+        if let workflowToken, self.guidanceSession.owns(workflowToken) {
+          try self.guidanceSession.finishTurn(
+            token: workflowToken,
+            fallbackSummary: String(
+              (self.guidanceNarration ?? "A fresh screen check is needed.").prefix(480)))
+          self.scheduleGuidanceLoadingCheck(token: workflowToken, generation: current)
+        }
         self.busy = false
         if self.state != "Speaking" {
           self.state = self.presentingExplanation ? "Thinking" : "Ready"
@@ -573,10 +613,31 @@ struct ResponseInputPlan: Sendable {
 
   /// Slow model output may only advance after one real, same-scope capture
   /// corroborates the old target. Never extend the original frame's timestamp.
-  private func acceptProviderUnit(
+  func acceptProviderUnit(
     _ unit: ProviderUnit, generation: UInt64, expectedEvidence: ScreenEvidenceIdentity?,
     guidanceBinding: ScreenGuidanceTurnBinding?, captureToken: UInt64
   ) async throws {
+    if unit.type == "guidanceStatus", responsePolicy.route == .screenGuidance,
+      let binding = guidanceBinding, binding.hasPresentedPrimary,
+      let frame = evidence, ScreenEvidenceIdentity(binding.current).matches(frame),
+      generation == self.generation, captureGate.permits(captureToken, cancelled: Task.isCancelled),
+      expectedEvidence?.matches(frame) != true
+        || ProcessInfo.processInfo.systemUptime - frame.capturedAt
+          >= ScreenGuidancePolicy.admissionEvidenceAge
+    {
+      guard !guidanceStatusReceived, let assessment = unit.guidance,
+        !assessment.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        assessment.summary.utf8.count <= 2_048
+      else {
+        throw ProviderError.message("Invalid or duplicate screen-guidance assessment.")
+      }
+      try requireGuidanceForeground(binding.source.foregroundPID)
+      guidanceStatusReceived = true
+      // This assessment still belongs to the model's earlier input frame. Do
+      // not rebind it to a newer native-verified target or revoke that target.
+      record("guidance.assessment.staleOmitted")
+      return
+    }
     guard unit.type == "target", responsePolicy.route == .screenGuidance,
       let binding = guidanceBinding, let payload = unit.target
     else {
@@ -655,7 +716,7 @@ struct ResponseInputPlan: Sendable {
   }
 
   private func requireGuidanceForeground(_ pid: pid_t) throws {
-    guard pid > 0, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid else {
+    guard pid > 0, guidanceForegroundPID() == pid else {
       throw ProviderError.message("The active app changed. Ask for screen guidance again.")
     }
   }
@@ -683,7 +744,10 @@ struct ResponseInputPlan: Sendable {
   func finishTurnFailure(error: Error, generation: UInt64, policy: ResponsePolicy) {
     guard generation == self.generation else { return }
     cancelExplanationPlayback(stopSpeech: true)
+    overlay.clear()
     activeGuidanceRequest = nil
+    guidanceSession.pause()
+    guidanceTurnToken = nil
     busy = false
     state = "Ready"
     updateBadge()
@@ -838,6 +902,117 @@ struct ResponseInputPlan: Sendable {
     return frame
   }
 
+  var guidanceProgressTitle: String? {
+    guard let workflow = guidanceSession.workflow else { return nil }
+    let step = workflow.actions.isEmpty ? "Guidance" : "Step \(workflow.actions.count)"
+    let status: String
+    switch workflow.phase {
+    case .ready: status = "Ready to check"
+    case .checking: status = "Checking the screen"
+    case .awaitingUser: status = "Waiting for you"
+    case .loading: status = "Waiting for the page"
+    case .paused: status = "Paused"
+    case .needsAttention: status = "Needs a fresh check"
+    case .modelReportedComplete: status = "Model reports complete"
+    case .independentlyVerified: status = "Result verified"
+    case .abandoned: status = "Stopped"
+    }
+    return "\(step) · \(status)"
+  }
+
+  var guidanceProgressDetail: String {
+    if let error { return String(error.prefix(480)) }
+    if let issue = guidanceSession.persistenceIssue { return issue }
+    if let notice { return String(notice.prefix(480)) }
+    guard let workflow = guidanceSession.workflow else { return "" }
+    if workflow.phase == .modelReportedComplete {
+      return
+        "The model assessed the latest screen. This result has not been independently verified."
+    }
+    if workflow.phase == .awaitingUser, let action = workflow.currentAction {
+      return action.instruction
+    }
+    return workflow.checks.last?.summary ?? workflow.goal
+  }
+
+  var guidanceCanPause: Bool {
+    guard let phase = guidanceSession.workflow?.phase else { return false }
+    return [.ready, .checking, .awaitingUser, .loading, .needsAttention].contains(phase)
+  }
+  var guidanceCanResume: Bool {
+    guard !busy, !listening, let workflow = guidanceSession.workflow else { return false }
+    return workflow.phase == .paused && workflow.canBeginCheck
+  }
+  var guidanceCanRecheck: Bool {
+    guard !busy, !listening, let workflow = guidanceSession.workflow else { return false }
+    return [.awaitingUser, .needsAttention, .modelReportedComplete].contains(workflow.phase)
+  }
+
+  func pauseGuidance() { stop() }
+  func abandonGuidance() {
+    stop()
+    guidanceSession.abandon()
+  }
+  func resumeGuidance() { restartGuidanceFromCurrentScreen() }
+  func recheckGuidance() { restartGuidanceFromCurrentScreen() }
+
+  private func restartGuidanceFromCurrentScreen() {
+    guard screenGuidanceEnabled(), !busy, !listening,
+      let workflow = guidanceSession.workflow,
+      workflow.phase != .abandoned && workflow.phase != .independentlyVerified
+    else { return }
+    stop()
+    guard guidanceSession.workflow?.canBeginCheck == true else {
+      notice = "This guide has reached its check limit. Start a new guide for further help."
+      return
+    }
+    // Resume never restores a saved frame, PID, target or usable lease. This
+    // voice-style explicit route forces current-screen preparation and capture.
+    let request = ScreenGuidanceRequest(
+      prompt: workflow.goal, step: workflow.checks.count, speakAloud: workflow.speakAloud)
+    send(
+      textOverride:
+        "Recheck the current screen and continue this goal using the saved semantic progress. Do not assume any previous instruction succeeded. Original goal: "
+        + workflow.goal,
+      voiceOnly: true, speakAloud: workflow.speakAloud, guidanceRequest: request,
+      transcriptText: "Resume guide", continuingWorkflow: true)
+  }
+
+  private func scheduleGuidanceLoadingCheck(token: GuidanceTurnToken, generation: UInt64) {
+    guard guidanceSession.owns(token), guidanceSession.workflow?.phase == .loading,
+      let request = activeGuidanceRequest, let frame = evidence,
+      ScreenGuidancePolicy.permitsContinuation(step: request.step)
+    else { return }
+    let expectedEvidence = ScreenEvidenceIdentity(frame)
+    guidanceLoadingTask?.cancel()
+    guidanceLoadingTask = Task { @MainActor [weak self] in
+      do { try await Task.sleep(for: .milliseconds(750)) } catch { return }
+      guard let self, self.generation == generation, self.guidanceSession.owns(token),
+        self.guidanceSession.workflow?.phase == .loading
+      else { return }
+      guard self.activeGuidanceRequest == request, expectedEvidence.matches(self.evidence),
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == frame.foregroundPID,
+        ProcessInfo.processInfo.systemUptime < request.expires, self.screenGuidanceEnabled()
+      else {
+        self.stop()
+        self.notice = "The screen or guide changed while loading. Resume for a fresh check."
+        return
+      }
+      self.guidanceLoadingTask = nil
+      let next = ScreenGuidanceRequest(
+        id: request.id, prompt: request.prompt, step: request.step + 1,
+        expires: request.expires, speakAloud: request.speakAloud)
+      self.record("guidance.loading.freshCheck")
+      self.send(
+        textOverride:
+          "The previous fresh screen showed loading. Check this new capture for settlement; do not repeat the user action or assume success. If it is still loading, say so. Original goal: "
+          + request.prompt,
+        voiceOnly: true, speakAloud: request.speakAloud, guidanceRequest: next,
+        expectedGuidanceForegroundPID: frame.foregroundPID,
+        transcriptText: "Check loading page", continuingWorkflow: true)
+    }
+  }
+
   /// An observed user click requests fresh perception, never an automatic click
   /// or an assumption that the previous instruction succeeded.
   func beginScreenGuidance(_ prompt: String, speakAloud: Bool = true) {
@@ -852,11 +1027,20 @@ struct ResponseInputPlan: Sendable {
     observation: ScreenGuidanceContinuationObservation = .click
   ) {
     guard generation == self.generation, activeGuidanceRequest == request,
-      (0..<5).contains(request.step), request.expires.isFinite,
+      ScreenGuidancePolicy.permitsContinuation(step: request.step), request.expires.isFinite,
       ProcessInfo.processInfo.systemUptime < request.expires,
       screenGuidanceEnabled(),
       expectedEvidence.matches(evidence)
     else { return }
+    if let token = guidanceTurnToken, guidanceSession.owns(token) {
+      do {
+        try guidanceSession.observeAction(
+          token: token, kind: observation == .click ? .click : .manualContinue)
+      } catch {
+        showError(error)
+        return
+      }
+    }
     let next = ScreenGuidanceRequest(
       id: request.id, prompt: request.prompt, step: request.step + 1, expires: request.expires,
       speakAloud: request.speakAloud)
@@ -866,7 +1050,7 @@ struct ResponseInputPlan: Sendable {
       textOverride: instruction, voiceOnly: true, speakAloud: request.speakAloud,
       guidanceRequest: next,
       expectedGuidanceForegroundPID: expectedEvidence.foregroundPID,
-      transcriptText: "Continue")
+      transcriptText: "Continue", continuingWorkflow: true)
   }
 
   private func guidanceContinuationText(
@@ -907,6 +1091,36 @@ struct ResponseInputPlan: Sendable {
   {
     guard generation == self.generation else { throw CancellationError() }
     switch unit.type {
+    case "guidanceStatus":
+      guard responsePolicy.route == .screenGuidance, !guidanceStatusReceived,
+        let assessment = unit.guidance,
+        !assessment.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+        assessment.summary.utf8.count <= 2_048
+      else {
+        throw ProviderError.message("Invalid or duplicate screen-guidance assessment.")
+      }
+      guard let evidence, let expectedEvidence, expectedEvidence.matches(evidence),
+        ProcessInfo.processInfo.systemUptime >= evidence.capturedAt,
+        ProcessInfo.processInfo.systemUptime - evidence.capturedAt
+          < ScreenGuidancePolicy.admissionEvidenceAge
+      else {
+        throw ProviderError.message(
+          "The guidance assessment used a changed screen. Recheck the current screen.")
+      }
+      try requireGuidanceForeground(evidence.foregroundPID)
+      guidanceStatusReceived = true
+      if let token = guidanceTurnToken, guidanceSession.owns(token) {
+        let outcome: GuidanceWorkflow.AssessmentOutcome
+        switch assessment.status {
+        case .progress: outcome = .progress
+        case .unchanged: outcome = .unchanged
+        case .loading: outcome = .loading
+        case .uncertain: outcome = .uncertain
+        case .complete: outcome = .goalComplete
+        }
+        try guidanceSession.assess(token: token, outcome: outcome, summary: assessment.summary)
+        record("guidance.assessment.\(assessment.status.rawValue)")
+      }
     case "text":
       guard let text = unit.text, text.utf8.count <= 32000 else {
         throw ProviderError.message("Invalid text unit.")
@@ -996,6 +1210,26 @@ struct ResponseInputPlan: Sendable {
           ProcessInfo.processInfo.systemUptime < request.expires
         else { throw CancellationError() }
       }
+      let primaryAction =
+        target.advanceOn == "click"
+        || (target.advanceOn == "manual" && target.awaitUser == true)
+      if primaryAction, let token = guidanceTurnToken, guidanceSession.owns(token),
+        let workflow = guidanceSession.workflow
+      {
+        guard workflow.actions.count < GuidanceWorkflow.maximumActions,
+          workflow.checks.count < GuidanceWorkflow.maximumChecks,
+          workflow.currentAction?.checkID != token.checkID
+        else {
+          throw ProviderError.message(
+            "This guide reached its action/check limit or emitted a second action. Start a new guide to continue."
+          )
+        }
+      }
+      if primaryAction, let token = guidanceTurnToken, guidanceSession.owns(token) {
+        try guidanceSession.validateAction(
+          token: token, instruction: String(target.instruction.prefix(480)),
+          label: target.label, kind: target.advanceOn == "click" ? .click : .manual)
+      }
       try overlay.validate(target: target, evidence: evidence)
       let introDelay = onCursorTargetAccepted?(generation, target, evidence) ?? 0
       try overlay.show(
@@ -1007,6 +1241,11 @@ struct ResponseInputPlan: Sendable {
         ProcessInfo.processInfo.systemUptime < request.expires
       {
         onScreenGuidanceTargetAccepted?(target, evidence, generation, request)
+      }
+      if primaryAction, let token = guidanceTurnToken, guidanceSession.owns(token) {
+        try guidanceSession.presentAction(
+          token: token, instruction: String(target.instruction.prefix(480)),
+          label: target.label, kind: target.advanceOn == "click" ? .click : .manual)
       }
       messages.append(ChatLine(role: "assistant", text: target.instruction))
       speakNarration(target.instruction)
@@ -1166,6 +1405,14 @@ struct ResponseInputPlan: Sendable {
   }
 
   func stop() {
+    guidanceSession.pause()
+    cancelActiveTurn()
+  }
+
+  private func cancelActiveTurn() {
+    guidanceLoadingTask?.cancel()
+    guidanceLoadingTask = nil
+    guidanceTurnToken = nil
     generation += 1
     cancelExplanationPlayback(stopSpeech: false)
     cursorFailureGeneration = nil
@@ -1231,7 +1478,15 @@ struct ResponseInputPlan: Sendable {
 
   private func beginVoiceInput(mode: VoiceInputMode) {
     let manualStep = mode == .pushToTalk ? onManualGuidanceVoiceStart?() : nil
-    stop()
+    let manualWorkflowToken = manualStep == nil ? nil : guidanceTurnToken
+    if manualStep != nil {
+      cancelActiveTurn()
+      // Only semantic progress is retained. The existing voice handoff still
+      // validates the exact original frame, generation, foreground and lease.
+      guidanceTurnToken = manualWorkflowToken
+    } else {
+      stop()
+    }
     if let manualStep {
       voiceGuidanceContinuation = ManualGuidanceVoiceContinuation(
         step: manualStep, inputGeneration: generation)
@@ -1352,13 +1607,20 @@ struct ResponseInputPlan: Sendable {
       updateBadge()
       return true
     }
+
+    if let token = guidanceTurnToken, guidanceSession.owns(token) {
+      do { try guidanceSession.observeAction(token: token, kind: .manualContinue) } catch {
+        showError(error)
+        return true
+      }
+    }
     record("guidance.voiceContinue.requested")
     send(
       textOverride: guidanceContinuationText(
         request: continuation.step.request, next: next, observation: .explicitContinue),
       voiceOnly: true, speakAloud: next.speakAloud, guidanceRequest: next,
       expectedGuidanceForegroundPID: continuation.step.evidence.foregroundPID,
-      transcriptText: transcript)
+      transcriptText: transcript, continuingWorkflow: true)
     return true
   }
   private func invalidateCapture() {
@@ -1540,6 +1802,25 @@ struct ResponseInputPlan: Sendable {
     }
   }
   @discardableResult func openRecord(_ record: StoredRecord) -> Task<Void, Never>? {
+    if record.kind == "guidance" {
+      newConversation()
+      let expectedGeneration = generation
+      return Task {
+        do {
+          try await guidanceSession.restore(
+            record: record,
+            stillCurrent: { [weak self] in
+              self?.generation == expectedGeneration
+            })
+          guard generation == expectedGeneration else { return }
+          section = "Companion"
+          onOpen?()
+        } catch {
+          guard generation == expectedGeneration, !(error is CancellationError) else { return }
+          showError(error)
+        }
+      }
+    }
     if record.kind == "conversation" {
       newConversation()
       let expectedGeneration = generation
@@ -1588,6 +1869,17 @@ struct ResponseInputPlan: Sendable {
   }
   @discardableResult func deleteRecord(_ id: String) -> Task<Void, Never>? {
     guard let store else { return nil }
+    if records.contains(where: { $0.id == id && $0.kind == "guidance" })
+      || guidanceSession.workflow?.id.uuidString == id
+    {
+      if guidanceSession.workflow?.id.uuidString == id { stop() }
+      return Task {
+        do {
+          try await guidanceSession.delete(id: id)
+          await reload()
+        } catch { showError(error) }
+      }
+    }
     let isConversation =
       id == conversationID || records.contains(where: { $0.id == id && $0.kind == "conversation" })
     // Detach the active transcript before yielding. Any already queued save is
@@ -1645,6 +1937,7 @@ struct ResponseInputPlan: Sendable {
   /// remains available, while the previous chat's attachments lose authority.
   func newConversation() {
     stop()
+    guidanceSession.detach()
     clearContext()
     conversationID = UUID().uuidString
     messages = []

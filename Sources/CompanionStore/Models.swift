@@ -5,6 +5,7 @@ public enum StoreError: Error, LocalizedError, Sendable, Equatable {
   case unsupportedSchema(Int)
   case invalidValue(String)
   case notFound(String)
+  case staleRecord
   case leaseUnavailable
   case staleLease
   case reconciliationRequired
@@ -16,6 +17,7 @@ public enum StoreError: Error, LocalizedError, Sendable, Equatable {
       "This database uses a newer schema (\(version)). Update the app before opening it."
     case .invalidValue(let message): message
     case .notFound(let id): "No saved item was found for \(id)."
+    case .staleRecord: "This saved item changed. Reopen its latest version before saving again."
     case .leaseUnavailable: "This job already has an owner or is not ready to run."
     case .staleLease: "The job lease expired, was cancelled, or changed ownership."
     case .reconciliationRequired:

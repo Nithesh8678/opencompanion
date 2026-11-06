@@ -42,6 +42,7 @@ private func fixtureURL() throws -> URL {
   // Construct a v1 fixture with the real record schema and no later tables.
   do {
     let database = try SQLiteDatabase(url: url)
+    try database.execute("DROP TABLE deleted_guidance")
     try database.execute("DROP TABLE deleted_conversations")
     try database.execute("DROP TABLE routines")
     try database.execute("DROP TABLE action_receipts")

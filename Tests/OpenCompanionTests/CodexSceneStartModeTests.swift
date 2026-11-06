@@ -6,7 +6,8 @@ import Testing
 
 struct CodexSceneStartModeTests {
   @Test func defaultPromptsMatchTheirRecordedContracts() {
-    // Conversation/guidance retain the pre-ablation 969c49b bytes. Notebook
+    // Conversation retains the pre-ablation 969c49b bytes. Guidance includes
+    // bounded workflow assessments and visible checkbox hit-area grounding. Notebook
     // snapshots intentionally include the shared connector/playback grammar
     // clarification; implicit startup must still equal explicit intro-first.
     let cases: [(ResponsePolicy, String)] = [
@@ -16,7 +17,7 @@ struct CodexSceneStartModeTests {
       ),
       (
         .init(route: .screenGuidance, includesExistingNotebook: false),
-        "a975adb04605adf18c0dc80be5b1c5567fb45be703cdc3ccf818a4bac188e934"
+        "32de5de82cfa30416ebaf73f50ad7d816775513b73f757bddada1d12f53d3f45"
       ),
       (
         .init(route: .notebook, includesExistingNotebook: false),

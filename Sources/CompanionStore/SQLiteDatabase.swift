@@ -186,6 +186,17 @@ final class SQLiteDatabase: @unchecked Sendable {
         try execute("PRAGMA user_version = 4")
       }
     }
+    if version < 5 {
+      try transaction {
+        try execute(
+          """
+          CREATE TABLE deleted_guidance (
+              id TEXT PRIMARY KEY NOT NULL, deleted_at REAL NOT NULL
+          )
+          """)
+        try execute("PRAGMA user_version = 5")
+      }
+    }
   }
 }
 

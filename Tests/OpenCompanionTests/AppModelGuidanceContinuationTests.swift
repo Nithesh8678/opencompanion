@@ -16,6 +16,10 @@ import Testing
     model.input = "Keep this unsent draft"
     model.beginScreenGuidance("Guide me through renaming this item", speakAloud: false)
     let request = try #require(model.activeGuidanceRequest)
+    // Authored semantic action; this transcript test never displays a window.
+    let token = try #require(model.guidanceSession.currentToken)
+    try model.guidanceSession.presentAction(
+      token: token, instruction: "Enter the requested name", kind: .manual)
     let frame = evidence()
     model.evidence = frame
     let generation = model.taskGeneration

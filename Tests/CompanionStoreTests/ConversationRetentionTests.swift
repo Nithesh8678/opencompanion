@@ -142,6 +142,7 @@ struct ConversationRetentionTests {
     }
     do {
       let database = try SQLiteDatabase(url: url)
+      try database.execute("DROP TABLE deleted_guidance")
       try database.execute("DROP TABLE deleted_conversations")
       try database.execute("PRAGMA user_version=3")
     }

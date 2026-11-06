@@ -1144,7 +1144,9 @@ private struct CompanionShellView: View {
   private var home: some View {
     VStack(spacing: 0) {
       Spacer(minLength: 4)
-      if active || model.error != nil || model.voiceNotice != nil {
+      if model.guidanceProgressTitle != nil {
+        GuidanceProgressView(model: model, compact: true)
+      } else if active || model.error != nil || model.voiceNotice != nil {
         VStack(spacing: 6) {
           HStack(spacing: 10) {
             Text(model.listening ? "Listening…" : model.state)
@@ -1235,6 +1237,10 @@ private struct CompanionShellView: View {
   private var chat: some View {
     VStack(spacing: 0) {
       CompanionTranscriptView(model: model).padding(.horizontal, 20)
+      if model.guidanceProgressTitle != nil {
+        GuidanceProgressView(model: model)
+          .padding(.horizontal, 18).padding(.bottom, 8)
+      }
       if let error = model.error {
         HStack(alignment: .top, spacing: 8) {
           Image(systemName: "exclamationmark.circle")

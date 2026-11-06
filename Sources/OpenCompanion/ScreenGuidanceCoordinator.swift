@@ -1,10 +1,22 @@
 import AppKit
 import Combine
+import CompanionCore
 
 /// The observation requests fresh perception; neither case proves success.
 enum ScreenGuidanceContinuationObservation: String, Sendable {
   case click
   case explicitContinue
+}
+
+/// Emitted only for a real mouse-up inside the currently owned click target.
+/// The point records interaction, not control activation or task completion.
+struct GuidanceUserClickObservation: Codable, Sendable {
+  let point: CGPoint
+  let targetRect: CGRect
+  let frameID: UUID
+  let generation: UInt64
+  let requestID: UUID
+  let checkStep: Int
 }
 
 struct ManualGuidanceStep: Identifiable, Sendable, Equatable {
@@ -63,7 +75,8 @@ struct ManualGuidanceVoiceContinuation: Sendable {
 /// Geometry and deadlines for passive click observation. A matching point is
 /// evidence of a user click, never proof that the intended action succeeded.
 enum ScreenGuidancePolicy {
-  static let maximumSteps = 6
+  static let maximumSteps = GuidanceWorkflow.maximumActions
+  static let maximumChecks = GuidanceWorkflow.maximumChecks
   static let maximumRequestLifetime: TimeInterval = 180
   static let admissionEvidenceAge: TimeInterval = 15
   static let markedTargetLifetime: TimeInterval = 45
@@ -122,15 +135,15 @@ enum ScreenGuidancePolicy {
   }
 
   /// A final annotation may remain useful, but it cannot offer another step
-  /// after the request's six-step budget has been exhausted.
+  /// when the bounded check budget is exhausted; action admission has its own limit.
   static func permitsContinuation(step: Int) -> Bool {
-    (0..<(maximumSteps - 1)).contains(step)
+    (0..<(maximumChecks - 1)).contains(step)
   }
 
   private static func permitsRequest(
     step: Int, requestExpires: TimeInterval, began: TimeInterval, now: TimeInterval
   ) -> Bool {
-    (0..<maximumSteps).contains(step) && now.isFinite && began.isFinite && requestExpires.isFinite
+    (0..<maximumChecks).contains(step) && now.isFinite && began.isFinite && requestExpires.isFinite
       && began >= 0 && now >= began && requestExpires > now
       && requestExpires - began <= maximumRequestLifetime
   }
@@ -160,6 +173,9 @@ enum ScreenGuidancePolicy {
   /// and before the explicit Continue consumes this exact lease. No input is
   /// synthesized; a revoked owner is checked again before continuation queues.
   var onManualContinueWillBegin: ((ManualGuidanceStep) -> Void)?
+  /// Optional opt-in diagnostic. Outside-target points and keyboard events are
+  /// never delivered; ordinary product operation does not persist this data.
+  var onUserClickObserved: (@MainActor (GuidanceUserClickObservation) -> Void)?
   private weak var model: AppModel?
   private let observesInput: Bool
   private let now: @MainActor () -> TimeInterval
@@ -344,6 +360,7 @@ enum ScreenGuidancePolicy {
     isShutdown = true
     cancel()
     onManualContinueWillBegin = nil
+    onUserClickObserved = nil
     subscriptions.removeAll()
   }
 
@@ -358,6 +375,11 @@ enum ScreenGuidancePolicy {
       return
     }
     guard let point, point.x.isFinite, point.y.isFinite, owner.rect.contains(point) else { return }
+    onUserClickObserved?(
+      .init(
+        point: point, targetRect: owner.rect, frameID: owner.evidence.frameID,
+        generation: owner.generation, requestID: owner.request.id, checkStep: owner.request.step))
+    guard continuationTask == nil, mark?.lease == owner.lease, owns(owner) else { return }
     model?.record("guidance.userClick.observed")
     queueContinuation(owner)
   }

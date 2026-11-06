@@ -5,7 +5,7 @@ import Foundation
 /// claim to schedule execution while the application is quit or the Mac sleeps.
 public actor LocalStore {
   private let database: SQLiteDatabase
-  public static let schemaVersion = 4
+  public static let schemaVersion = 5
 
   public init(url: URL) throws { database = try SQLiteDatabase(url: url) }
 
@@ -14,13 +14,18 @@ public actor LocalStore {
     id: String = UUID().uuidString, kind: String, title: String,
     body: String, payload: Data? = nil
   ) throws -> StoredRecord {
+    guard kind != "guidance" else {
+      throw StoreError.invalidValue("Use the dedicated guidance create or update operation.")
+    }
     if kind == "conversation" {
       guard
         let saved = try saveConversation(id: id, title: title, body: body, payload: payload)
       else { throw StoreError.notFound(id) }
       return saved
     }
-    return try writeRecord(id: id, kind: kind, title: title, body: body, payload: payload)
+    return try database.transaction {
+      try writeRecord(id: id, kind: kind, title: title, body: body, payload: payload)
+    }
   }
 
   /// Updates one conversation rather than retaining a snapshot for every turn.
@@ -53,6 +58,9 @@ public actor LocalStore {
     guard !id.isEmpty, !kind.isEmpty else {
       throw StoreError.invalidValue("Saved content needs an ID and kind.")
     }
+    // Every caller holds BEGIN IMMEDIATE, so another connection cannot insert
+    // or delete protected guidance between this check and the generic upsert.
+    try requireGenericGuidanceAccess(id)
     let now = Date().timeIntervalSince1970
     try database.execute(
       """
@@ -72,6 +80,115 @@ public actor LocalStore {
       throw StoreError.notFound(id)
     }
     return record
+  }
+
+  /// A fresh, explicit identity only. Delayed creates cannot revive a deleted guide.
+  @discardableResult
+  public func createGuidance(id: String, title: String, body: String, payload: Data) throws
+    -> StoredRecord
+  {
+    try Task.checkCancellation()
+    let title = try validateGuidance(id: id, title: title, body: body, payload: payload)
+    return try database.transaction {
+      try Task.checkCancellation()
+      try requireUndeletedGuidance(id)
+      let existing = try database.query(
+        "SELECT 1 FROM records WHERE id=?", [.text(id)], map: { _ in true })
+      guard existing.isEmpty else {
+        throw StoreError.invalidValue("A saved item already uses this guidance ID.")
+      }
+      let now = Date().timeIntervalSince1970
+      try Task.checkCancellation()
+      try database.execute(
+        """
+        INSERT INTO records(id,kind,title,body,payload,created_at,updated_at)
+        VALUES(?,'guidance',?,?,?,?,?)
+        """,
+        [.text(id), .text(title), .text(body), .blob(payload), .real(now), .real(now)])
+      return try record(id: id)
+    }
+  }
+
+  /// Exact full-record CAS under one write transaction. Missing/deleted rows
+  /// fail; this operation never falls back to INSERT or changes the record kind.
+  @discardableResult
+  public func updateGuidance(
+    _ original: StoredRecord, title: String, body: String, payload: Data
+  ) throws -> StoredRecord {
+    try Task.checkCancellation()
+    let title = try validateGuidance(id: original.id, title: title, body: body, payload: payload)
+    guard original.kind == "guidance" else {
+      throw StoreError.invalidValue("Only a saved guidance item can be updated here.")
+    }
+    return try database.transaction {
+      try Task.checkCancellation()
+      try requireUndeletedGuidance(original.id)
+      let current = try record(id: original.id)
+      guard current.kind == "guidance", current == original else { throw StoreError.staleRecord }
+      try Task.checkCancellation()
+      try database.execute(
+        "UPDATE records SET title=?,body=?,payload=?,updated_at=? WHERE id=? AND kind='guidance'",
+        [
+          .text(title), .text(body), .blob(payload), .real(Date().timeIntervalSince1970),
+          .text(original.id),
+        ])
+      return try record(id: original.id)
+    }
+  }
+
+  /// Tombstone even before the first queued create. Only the ID/time remain.
+  public func deleteGuidance(id: String) throws {
+    try Task.checkCancellation()
+    guard !id.isEmpty, id.utf8.count <= 256 else {
+      throw StoreError.invalidValue("A guidance item needs an ID within 256 bytes.")
+    }
+    try database.transaction {
+      try Task.checkCancellation()
+      let kind = try database.query(
+        "SELECT kind FROM records WHERE id=?", [.text(id)], map: { SQLColumn.text($0, 0) }
+      ).first
+      guard kind == nil || kind == "guidance" else {
+        throw StoreError.invalidValue("Guidance cannot delete a different saved item.")
+      }
+      try tombstoneGuidance(id)
+      try database.execute("DELETE FROM records WHERE id=? AND kind='guidance'", [.text(id)])
+    }
+  }
+
+  private func validateGuidance(id: String, title: String, body: String, payload: Data) throws
+    -> String
+  {
+    let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !id.isEmpty, id.utf8.count <= 256, !trimmed.isEmpty,
+      title.utf8.count <= 256, body.utf8.count <= 32 * 1_024, payload.count <= 128 * 1_024
+    else {
+      throw StoreError.invalidValue(
+        "Guidance needs an ID/title within 256 bytes, text within 32 KiB and payload within 128 KiB."
+      )
+    }
+    return trimmed
+  }
+
+  private func requireUndeletedGuidance(_ id: String) throws {
+    let deleted = try database.query(
+      "SELECT 1 FROM deleted_guidance WHERE id=?", [.text(id)], map: { _ in true })
+    guard deleted.isEmpty else { throw StoreError.notFound(id) }
+  }
+
+  private func requireGenericGuidanceAccess(_ id: String) throws {
+    try requireUndeletedGuidance(id)
+    let existing = try database.query(
+      "SELECT kind FROM records WHERE id=?", [.text(id)], map: { SQLColumn.text($0, 0) }
+    ).first
+    guard existing != "guidance" else {
+      throw StoreError.invalidValue("A generic save cannot replace a saved guidance item.")
+    }
+  }
+
+  private func tombstoneGuidance(_ id: String) throws {
+    try database.execute(
+      "INSERT OR IGNORE INTO deleted_guidance(id,deleted_at) VALUES(?,?)",
+      [.text(id), .real(Date().timeIntervalSince1970)])
   }
 
   /// Edit an existing user memory without upserting, changing its scope or
@@ -144,11 +261,13 @@ public actor LocalStore {
 
   public func deleteRecord(id: String) throws {
     try database.transaction {
-      let conversation = try database.query(
-        "SELECT 1 FROM records WHERE id=? AND kind='conversation'", [.text(id)],
-        map: { _ in true })
-      if !conversation.isEmpty {
+      let kind = try database.query(
+        "SELECT kind FROM records WHERE id=?", [.text(id)], map: { SQLColumn.text($0, 0) }
+      ).first
+      if kind == "conversation" {
         try tombstoneConversation(id)
+      } else if kind == "guidance" {
+        try tombstoneGuidance(id)
       }
       try database.execute("DELETE FROM records WHERE id=?", [.text(id)])
     }

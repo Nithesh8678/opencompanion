@@ -221,7 +221,9 @@ import Testing
     #expect(coordinator.manualStep == nil && fixture.receipts.isEmpty)
   }
 
-  @Test(arguments: [-1, 5, 6, Int.max])
+  @Test(arguments: [
+    -1, ScreenGuidancePolicy.maximumChecks - 1, ScreenGuidancePolicy.maximumChecks, Int.max,
+  ])
   func exhaustedOrInvalidStepBudgetCannotOfferManualContinue(_ step: Int) {
     let fixture = ManualGuidanceFixture()
     let coordinator = fixture.coordinator()
@@ -235,7 +237,8 @@ import Testing
     let fixture = ManualGuidanceFixture()
     let coordinator = fixture.coordinator()
     defer { coordinator.shutdown() }
-    fixture.request = ScreenGuidanceRequest(prompt: "Public task", step: 4, expires: 110)
+    fixture.request = ScreenGuidanceRequest(
+      prompt: "Public task", step: ScreenGuidancePolicy.maximumChecks - 2, expires: 110)
     fixture.accept(on: coordinator)
     let id = try #require(coordinator.manualStep?.id)
     #expect(coordinator.manualStep?.expiresAt == 110)
@@ -378,7 +381,7 @@ import Testing
         foregroundPID: foreground, now: now) == nil)
   }
 
-  @Test func copiedHandoffCannotExtendItsLeaseOrSixStepBudget() throws {
+  @Test func copiedHandoffCannotExtendItsLeaseOrCheckBudget() throws {
     let fixture = ManualGuidanceFixture()
     let coordinator = fixture.coordinator()
     defer { coordinator.shutdown() }
@@ -389,7 +392,8 @@ import Testing
       (expiresAt: 281.0, request: fixture.request),
       (
         expiresAt: 145.0,
-        request: ScreenGuidanceRequest(prompt: "Public task", step: 5, expires: 280)
+        request: ScreenGuidanceRequest(
+          prompt: "Public task", step: ScreenGuidancePolicy.maximumChecks - 1, expires: 280)
       ),
       (
         expiresAt: 145.0,

@@ -116,8 +116,8 @@ struct ScreenGuidancePolicyTests {
         step: 5, requestExpires: 280, admittedAt: 100, now: 99))
   }
 
-  @Test func sixStepBoundAndFiniteMonotonicDeadlinesAreMandatory() {
-    for step in [-1, 6, Int.max] {
+  @Test func boundedChecksAndFiniteMonotonicDeadlinesAreMandatory() {
+    for step in [-1, ScreenGuidancePolicy.maximumChecks, Int.max] {
       #expect(
         !ScreenGuidancePolicy.permitsAdmission(
           step: step, requestExpires: 280, capturedAt: 99, now: 100))

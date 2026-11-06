@@ -230,6 +230,10 @@ struct WorkspaceView: View {
   private var companion: some View {
     VStack(spacing: 0) {
       CompanionTranscriptView(model: model)
+      if model.guidanceProgressTitle != nil {
+        GuidanceProgressView(model: model)
+          .padding(.horizontal, 24).padding(.bottom, 10)
+      }
       composer
     }
   }

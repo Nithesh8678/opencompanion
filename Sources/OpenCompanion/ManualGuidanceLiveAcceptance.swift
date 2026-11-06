@@ -168,6 +168,7 @@ enum ManualGuidanceLiveAcceptance {
     let traceStart = model.diagnosticEvents.count
     let oldPreparation = model.onPrepareScreenGuidance
     let oldBeforeContinue = coordinator.onManualContinueWillBegin
+    let oldUserClickObserved = coordinator.onUserClickObserved
     let oldProvider = model.providerMode
     let oldSpeech = model.configuration.speechEnabled
     let oldGuidancePreference = model.guidanceModelPreference
@@ -462,6 +463,7 @@ enum ManualGuidanceLiveAcceptance {
       model.onScreenGuidanceTargetAccepted = productionTargetObserver
       model.onPrepareScreenGuidance = oldPreparation
       coordinator.onManualContinueWillBegin = oldBeforeContinue
+      coordinator.onUserClickObserved = oldUserClickObserved
       model.stop()
       cursor.shutdown()
       model.providerMode = oldProvider
@@ -510,6 +512,41 @@ enum ManualGuidanceLiveAcceptance {
         }
         try sampleMark(step: 0, checkpoint: "before-continue", requireSettled: true)
       } catch { rejection = error.localizedDescription }
+    }
+    coordinator.onUserClickObserved = { observation in
+      oldUserClickObserved?(observation)
+      // Diagnostic only: never advances, rejects or changes the acceptance
+      // oracle. Save no unrelated pointer locations or underlying pixels.
+      guard (try? checkFixture()) != nil,
+        observation.requestID == requestID, observation.generation == model.taskGeneration,
+        let frame = frames[observation.checkStep], frame.frameID == observation.frameID,
+        ScreenEvidenceIdentity(frame).matches(model.evidence),
+        acceptedGenerations[observation.checkStep] == observation.generation,
+        let target = acceptedTargets[observation.checkStep], target.advanceOn == "click",
+        let rect = ScreenGuidancePolicy.targetRect(target, in: frame.screenRect),
+        rect == observation.targetRect, rect.contains(observation.point),
+        observation.point.x.isFinite, observation.point.y.isFinite
+      else { return }
+      let receipt: [String: Any] = [
+        "pointAppKit": [observation.point.x, observation.point.y],
+        "ownedTargetRectAppKit": [rect.minX, rect.minY, rect.width, rect.height],
+        "frameID": observation.frameID.uuidString, "generation": observation.generation,
+        "requestID": observation.requestID.uuidString, "checkStep": observation.checkStep,
+        "publicFixtureOnly": true, "insideOwnedTarget": true,
+        "automaticInput": false, "taskCompletionVerifiedByThisObservation": false,
+        "elapsedMS": elapsedMS(since: started),
+      ]
+      guard let data = try? JSONSerialization.data(withJSONObject: receipt, options: [.sortedKeys]),
+        data.count <= 4_096
+      else { return }
+      let url = output.appendingPathComponent("target-click-observation.json")
+      // The acceptance directory is private. Explicit file permissions also
+      // keep the bounded point receipt private when the parent umask differs.
+      guard
+        FileManager.default.createFile(
+          atPath: url.path, contents: data, attributes: [.posixPermissions: 0o600])
+      else { return }
+      try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
     model.onScreenGuidanceTargetAccepted = { target, evidence, generation, request in
       guard rejection == nil else { return }

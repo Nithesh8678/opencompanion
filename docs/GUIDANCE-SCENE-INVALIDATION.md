@@ -1,6 +1,6 @@
 # Guidance scene invalidation
 
-This source checkpoint adds active-task metadata invalidation to the [guidance workflow](GUIDANCE-WORKFLOW.md). It addresses foreground-app changes and in-scope scrolling during preparation, inference and waiting for user action. It does not establish complete screen freshness, native event delivery or reference parity.
+This source checkpoint adds active-task metadata invalidation to the [guidance workflow](GUIDANCE-WORKFLOW.md). It addresses foreground-app changes and in-scope scrolling during preparation, inference and waiting for user action. It does not establish complete screen freshness or reference parity. One bounded native foreground-event delivery check is recorded below.
 
 ## Current behavior
 
@@ -31,17 +31,29 @@ The observer itself performs no retry or recapture. Existing deliberate Continue
 | Initial focused run | **60 tests passed**, including direct metadata reducer and AppModel ownership/publication fixtures. |
 | Earlier full run | **834 tests passed before** the final display-change and ordered-workspace-callback refinements. This is not a final-source full-suite result. |
 | Final full suite | **834 tests passed**: 741 application tests across 87 suites, 28 store tests and 65 core tests. The run includes the display-change and ordered-workspace-callback refinements and exited 0. |
-| New signed build and canonical installation | Pending at this write. Earlier installed workflow evidence is documented separately. |
-| Native OS event delivery and physical workflow | Pending; tests with `observeSystemEvents: false` do not prove installed monitor delivery. |
+| New signed build and canonical installation | Clean signed source `544c518d667f98ebb8a37234d9ce14ad7a29f6c8` is installed at the single canonical `/Applications/OpenCompanion.app`. Independent source/hash/strict deep signature/team/cleanup checks passed. |
+| Exact-source CI | [42211131014](https://github.com/Nithesh8678/opencompanion/actions/runs/42211131014) passed native tests/build and protocol checks. |
+| Native OS event delivery | One real foreground activation reached the exact observer source in an isolated native component check. Scope, generation and lease matched; monitors were installed and the foreground changed from the public fixture. This is not an installed AppModel/full-workflow run. |
+| Full physical guidance workflow | Pending. The metadata fixtures and the component check do not prove an external task completed. |
 
 The scoped tests cover one-shot A → B → A invalidation, same-PID stability, scroll filtering, negative display origins, disarm/rearm, stale queued leases, callback reentrancy and malformed geometry. Host tests exercise cancellation and publication authority using authored data. They do not establish a successful external task, acoustic timing, WindowServer visibility or a latency distribution.
+
+## Installation and native component boundary
+
+The exact installed executable SHA-256 is `feef7c9198f1e2e51608be827ab3daca58b9e55554b45d5755f8b356ca677bd1`. Build/install receipts and Info.plist agree on source `544c518`; strict deep certificate verification and retained team `BPR2T4D656` pass. Temporary build/staging app bundles are absent, and the installer reports no cleanup issues. The repository is public and the installed-source commit is pushed.
+
+The standalone check compiled the unchanged production `GuidanceSceneObserver.swift` (SHA-256 `bf00b4858a9b4970a46b75e3dfa1733324e02a621062f50cb15eed5b7152299a`) plus a dependency shim copying the existing coordinate conversion. It created no windows and stayed prohibited from activation. It scoped observation to the public Guidance Fixture, read native notification/event metadata and wrote bounded private receipts. It captured no screenshot, called no model, used no audio and posted no input. CUA performed the deliberate fixture-close UI action.
+
+The first wrapper refused at its activation-policy initialization before arming. The corrected wrapper confirmed its already-prohibited policy and installed all monitors, but its first 20-second run timed out while the Mac was locked before the UI trigger. Those results are preserved separately. After the user unlocked, a fresh run received `foregroundChanged` with matching lease/generation/source and a changed foreground. Its 7,089.477 ms elapsed time includes time waiting for the CUA fixture-close action; it is **not** notification latency or a guidance latency benchmark.
+
+This validates one real notification through the exact observer class outside the app bundle. AppModel cancellation/publication remains covered by the authored integration tests. Their combination does not establish native scroll delivery, all installed-host event ordering, menu transitions, the complete task or HeyClicky parity.
 
 ## Remaining limits
 
 - Same-PID window switches, movement/resize, navigation and programmatic reflow are not detected by this observer. It does not yet implement a native focused-window/layout observer.
 - Changes to a selected frame **before observation is armed** can remain undetected while the frame is still inside the existing 15-second admission window. A recent timestamp alone is not proof of unchanged content.
 - A future window observer must preserve the intended target mouse-down → menu/window transition → mouse-up sequence without admitting stale geometry or losing a legitimate fresh-capture continuation. This checkpoint does not solve that ordering problem by inferring success.
-- Native monitor availability, actual event ordering, permission changes, mixed-scale displays, Spaces and physical interactions still need installed acceptance. A source rectangle and event filter do not prove all app content changes were observed.
+- Broader native monitor availability, actual scroll delivery, installed-host event ordering, permission changes, mixed-scale displays, Spaces and physical interactions still need acceptance. A source rectangle and event filter do not prove all app content changes were observed.
 - Full multi-step task completion, wrong-click/no-effect recovery, general unfamiliar-app success, low latency and HeyClicky parity remain unproven.
 
 All **21 whole-product parity gates remain open**. The priority remains a correct closed loop with fresh evidence and a verified external result; this metadata safeguard does not close that workflow gate by itself.

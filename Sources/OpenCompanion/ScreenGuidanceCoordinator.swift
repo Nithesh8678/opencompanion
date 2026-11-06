@@ -58,6 +58,7 @@ struct ManualGuidanceVoiceContinuation: Sendable {
   ) -> ScreenGuidanceRequest? {
     guard Self.isContinueCommand(transcript), generation == inputGeneration,
       step.evidence.matches(evidence), let foregroundPID, foregroundPID > 0,
+      step.request.selectedScope?.matches(evidence) ?? true,
       foregroundPID == step.evidence.foregroundPID,
       now.isFinite, now >= 0, step.expiresAt.isFinite, step.request.expires.isFinite,
       now < step.expiresAt, step.expiresAt <= step.request.expires,
@@ -68,7 +69,8 @@ struct ManualGuidanceVoiceContinuation: Sendable {
     else { return nil }
     return ScreenGuidanceRequest(
       id: step.request.id, prompt: step.request.prompt, step: step.request.step + 1,
-      expires: step.request.expires, speakAloud: step.request.speakAloud)
+      expires: step.request.expires, speakAloud: step.request.speakAloud,
+      selectedScope: step.request.selectedScope)
   }
 }
 
@@ -245,6 +247,8 @@ enum ScreenGuidancePolicy {
       generation == model.taskGeneration,
       evidence.foregroundPID > 0,
       evidence.foregroundPID != ProcessInfo.processInfo.processIdentifier,
+      request.selectedScope?.matches(evidence) ?? true,
+      request.selectedScope.map({ (try? model.currentSelectedGuidanceScope()) == $0 }) ?? true,
       ScreenEvidenceIdentity(evidence).matches(model.evidence),
       foregroundPID() == evidence.foregroundPID,
       ScreenGuidancePolicy.permitsAdmission(
@@ -420,6 +424,8 @@ enum ScreenGuidancePolicy {
     guard !isShutdown, machineAwake, sessionActive, preferences.screenGuidanceEnabled,
       let model, owner.generation == model.taskGeneration,
       owner.evidence.matches(model.evidence),
+      owner.request.selectedScope.map({ (try? model.currentSelectedGuidanceScope()) == $0 })
+        ?? true,
       foregroundPID() == owner.evidence.foregroundPID
     else { return false }
     return ScreenGuidancePolicy.permitsClick(

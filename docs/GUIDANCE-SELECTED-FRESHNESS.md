@@ -1,5 +1,7 @@
 # Selected guidance evidence freshness
 
+This document records the earlier freshness checkpoint. The later [selected-scope continuation report](GUIDANCE-SELECTED-CONTINUATION.md) supersedes its continuation-gap status and carries current installation evidence.
+
 This source checkpoint changes how typed screen guidance uses an explicitly selected screenshot. The selection defines the permitted capture scope; its saved pixels are no longer treated as current model input, even when the selection is less than 15 seconds old. The final local suite passes 855 tests. Clean signed source `dae3fa586e0f6a868c88a4061f707391c996dbc7` is installed as the single canonical app. [Exact-source CI 42257186008](https://github.com/Nithesh8678/opencompanion/actions/runs/42257186008) passed native tests/build and protocol checks. Native selected-scope acceptance remains pending.
 
 ## Before the provider request
@@ -27,9 +29,9 @@ CaptureService also refuses a nonnil requested display that is no longer availab
 
 This intentionally replaces the earlier selected-guidance contract that could reuse a recent selected frame after focus preparation. The broader scene-invalidation safeguards and their historical evidence remain documented separately.
 
-## Known selected-route continuation gap
+## Historical selected-route continuation gap
 
-The selected typed route still creates no active `ScreenGuidanceRequest` or workflow check token: `send` currently ties request creation to `requiresFreshGuidanceCapture`, which is false for an explicit selection. Its first refreshed target can reach native annotation, but cannot arm the coordinator's click or manual Continue lease. This is a source-confirmed missing continuation path, not merely an untested pass.
+At historical source `dae3fa5`, the selected typed route created no active `ScreenGuidanceRequest` or workflow check token: `send` tied request creation to `requiresFreshGuidanceCapture`, which is false for an explicit selection. Its first refreshed target can reach native annotation, but cannot arm the coordinator's click or manual Continue lease. This is a source-confirmed missing continuation path, not merely an untested pass.
 
 The next slice must separate guidance request ownership from capture choice and retain an ephemeral exact selected scope across click/Continue, voice continuation, loading checks and pause/resume. Simply enabling the request would be unsafe: current continuation sends use `voiceOnly: true` and choose the pointer display, silently broadening a selected region/window on step two. An unavailable selection or an out-of-scope next UI must refuse or request new scope authorization. Durable semantic workflow records must continue to exclude coordinates, PIDs, screenshots and live capture leases; restoring one cannot authorize a saved screen scope.
 
@@ -41,4 +43,4 @@ The installed source is `dae3fa586e0f6a868c88a4061f707391c996dbc7`; executable S
 
 Native acceptance still needs to cover ScreenCaptureKit races, movement between window lookup and capture, mixed displays/scales and Spaces. Same-PID window/layout changes during inference or waiting remain outside the metadata observer's coverage. Refreshing before the provider narrows the earlier selected-frame gap; it does not prove that the screen stays unchanged throughout inference or that every later target remains valid.
 
-Selected typed continuous guidance remains unimplemented as described above; full external task completion and recovery still require end-to-end acceptance. No speed benchmark, latency improvement or HeyClicky parity follows from this change. All **21 whole-product parity gates remain open**.
+The later [selected-scope continuation source](GUIDANCE-SELECTED-CONTINUATION.md) addresses the historical request/continuation gap while preserving exact scope. Full external task completion and recovery still require end-to-end acceptance. No speed benchmark, latency improvement or HeyClicky parity follows from this change. All **21 whole-product parity gates remain open**.

@@ -140,6 +140,9 @@ struct ResponseInputPlan: Sendable {
   private var guidanceTurnToken: GuidanceTurnToken?
   private var guidanceLoadingTask: Task<Void, Never>?
   private var guidanceStatusReceived = false
+  // Ephemeral only: a restored semantic workflow has no capture authorization.
+  private var guidanceWorkflowCapture:
+    (workflowID: UUID, selectedScope: ScreenGuidanceCaptureScope?)?
   private let observesGuidanceSceneChanges: Bool
   private(set) var guidanceSceneScope: GuidanceSceneScope?
   private var guidanceSceneExpiryTask: Task<Void, Never>?
@@ -161,6 +164,8 @@ struct ResponseInputPlan: Sendable {
   private var voiceGuidanceContinuation: ManualGuidanceVoiceContinuation?
   private let screenGuidanceEnabled: @MainActor () -> Bool
   private let guidanceForegroundPID: @MainActor () -> pid_t?
+  private let scopedGuidanceRefresh: (@MainActor (ScreenEvidence) async throws -> ScreenEvidence)?
+  private let responseStream: ReasoningTurnStream?
   private var turnSpeaksAloud = false
   private var generation: UInt64 = 0
   var taskGeneration: UInt64 { generation }
@@ -210,6 +215,7 @@ struct ResponseInputPlan: Sendable {
   /// Assigned only by successful explicit captures. Cancelling pending work
   /// does not remove the scope of an attachment that is still selected.
   private var explicitManualEvidence: ScreenEvidenceIdentity?
+  private(set) var selectedCaptureSelectionID: UUID?
   private var invalidatedManualGuidanceScope = false
   private var undoStack: [SceneDocument] = []
   private var redoStack: [SceneDocument] = []
@@ -232,13 +238,17 @@ struct ResponseInputPlan: Sendable {
     },
     screenGuidanceEnabled: @escaping @MainActor () -> Bool = {
       CursorCompanionPreferences.load().screenGuidanceEnabled
-    }
+    },
+    scopedGuidanceRefresh: (@MainActor (ScreenEvidence) async throws -> ScreenEvidence)? = nil,
+    responseStream: ReasoningTurnStream? = nil
   ) {
     self.voice = suppliedVoice ?? VoiceService()
     self.store = store
     self.observesGuidanceSceneChanges = observeGuidanceSceneChanges ?? !acceptanceMode
     self.screenGuidanceEnabled = screenGuidanceEnabled
     self.guidanceForegroundPID = guidanceForegroundPID
+    self.scopedGuidanceRefresh = scopedGuidanceRefresh
+    self.responseStream = responseStream
     if !acceptanceMode {
       if store == nil {
         do {
@@ -463,22 +473,43 @@ struct ResponseInputPlan: Sendable {
     }
     // Preserve only explicitly selected capture scope. A prior automatic
     // guidance image is not a user-selected attachment for a later question.
-    let automaticGuidance =
-      inputPlan.requiresFreshGuidanceCapture
-      ? guidanceRequest ?? ScreenGuidanceRequest(prompt: text, speakAloud: speakAloud) : nil
+    let declaredGuidance: ScreenGuidanceRequest?
+    do {
+      if policy.route == .screenGuidance {
+        if let guidanceRequest {
+          if let scope = guidanceRequest.selectedScope, !ownsSelectedGuidanceScope(scope) {
+            throw ProviderError.message(
+              "The selected area changed. Choose a screen before continuing this guide.")
+          }
+          declaredGuidance = guidanceRequest
+        } else {
+          let scope = inputPlan.evidenceIdentity == nil ? nil : try currentSelectedGuidanceScope()
+          declaredGuidance = ScreenGuidanceRequest(
+            prompt: text, speakAloud: speakAloud, selectedScope: scope)
+        }
+      } else {
+        declaredGuidance = nil
+      }
+    } catch {
+      showError(error)
+      return
+    }
     let previousGuidanceInstruction =
       (guidanceRequest?.step ?? 0) > 0
       ? messages.last(where: { $0.role == "assistant" }).map { String($0.text.prefix(800)) } : nil
     let sourceGeneration = generation
-    if automaticGuidance == nil { guidanceSession.pause() }
+    if declaredGuidance == nil { guidanceSession.pause() }
     cancelActiveTurn()
     var workflowToken: GuidanceTurnToken?
-    if let request = automaticGuidance {
+    if let request = declaredGuidance {
       do {
         if !continuingWorkflow || guidanceSession.workflow == nil {
           try guidanceSession.start(goal: request.prompt, speakAloud: request.speakAloud)
         }
         workflowToken = try guidanceSession.beginCheck()
+        if let workflowToken {
+          guidanceWorkflowCapture = (workflowToken.workflowID, request.selectedScope)
+        }
       } catch {
         showError(error)
         guidanceSession.pause()
@@ -494,7 +525,7 @@ struct ResponseInputPlan: Sendable {
     error = nil
     generation += 1
     let current = generation
-    activeGuidanceRequest = automaticGuidance
+    activeGuidanceRequest = declaredGuidance
     configureResponseOutput(policy)
     record("response.route.\(policy.route.rawValue)")
     acceptedGuidanceTarget = false
@@ -534,18 +565,22 @@ struct ResponseInputPlan: Sendable {
         let turnContext: String
         let turnImage: Data?
         let turnEvidence: ScreenEvidenceIdentity?
-        if let automaticGuidance {
-          let frame = try await self.captureGuidanceEvidence(
-            request: automaticGuidance, generation: current, captureToken: captureToken,
-            expectedForegroundPID: expectedGuidanceForegroundPID)
+        if let request = declaredGuidance {
+          let frame: ScreenEvidence
+          if let scope = request.selectedScope {
+            guard self.ownsSelectedGuidanceScope(scope), let selected = self.evidence else {
+              throw CancellationError()
+            }
+            frame = try await self.prepareSelectedGuidanceEvidence(
+              ScreenEvidenceIdentity(selected), generation: current, captureToken: captureToken,
+              selectedScope: scope)
+          } else {
+            frame = try await self.captureGuidanceEvidence(
+              request: request, generation: current, captureToken: captureToken,
+              expectedForegroundPID: expectedGuidanceForegroundPID)
+          }
           turnContext =
             frame.semanticText + (savedGuidanceContext.isEmpty ? "" : "\n\n" + savedGuidanceContext)
-          turnImage = frame.image
-          turnEvidence = ScreenEvidenceIdentity(frame)
-        } else if policy.route == .screenGuidance, let selectedFrame = inputPlan.evidenceIdentity {
-          let frame = try await self.prepareSelectedGuidanceEvidence(
-            selectedFrame, generation: current, captureToken: captureToken)
-          turnContext = frame.semanticText
           turnImage = frame.image
           turnEvidence = ScreenEvidenceIdentity(frame)
         } else {
@@ -574,22 +609,29 @@ struct ResponseInputPlan: Sendable {
           try await self?.acceptTextPreview(value, generation: current)
         }
         self.setGuidanceStage(.provider, generation: current)
-        if turnProviderMode == "ChatGPT via Codex" {
+        let reasoningInput = ReasoningTurnInput(
+          messages: history, context: turnContext, image: turnImage, scene: activeScene,
+          responsePolicy: policy)
+        if let responseStream = self.responseStream {
+          try await responseStream(reasoningInput, handler, preview)
+        } else if turnProviderMode == "ChatGPT via Codex" {
           let adapter = CodexProvider()
           self.codex = adapter
           try await adapter.stream(
-            executable: turnCodexPath, model: turnCodexModel, messages: history,
-            context: turnContext,
-            image: turnImage, scene: activeScene, guidanceModel: guidanceModel,
+            executable: turnCodexPath, model: turnCodexModel, messages: reasoningInput.messages,
+            context: reasoningInput.context,
+            image: reasoningInput.image, scene: reasoningInput.scene, guidanceModel: guidanceModel,
             onRouting: { [weak self] selection in
               await self?.acceptModelRouting(selection, generation: current, policy: policy)
             }, onUnit: handler, onText: preview,
-            responsePolicy: policy)
+            responsePolicy: reasoningInput.responsePolicy)
         } else {
           try await self.provider.stream(
-            configuration: config, key: key, messages: history, context: turnContext,
-            image: turnImage,
-            scene: activeScene, onUnit: handler, onText: preview, responsePolicy: policy)
+            configuration: config, key: key, messages: reasoningInput.messages,
+            context: reasoningInput.context,
+            image: reasoningInput.image,
+            scene: reasoningInput.scene, onUnit: handler, onText: preview,
+            responsePolicy: reasoningInput.responsePolicy)
         }
         guard current == self.generation else { return }
         self.record("generation.completed")
@@ -829,14 +871,24 @@ struct ResponseInputPlan: Sendable {
   /// pixels. Refresh that same scope before the model receives this request.
   func prepareSelectedGuidanceEvidence(
     _ selectedFrame: ScreenEvidenceIdentity, generation: UInt64, captureToken: UInt64,
-    refresh: (@MainActor (ScreenEvidence) async throws -> ScreenEvidence)? = nil
+    refresh: (@MainActor (ScreenEvidence) async throws -> ScreenEvidence)? = nil,
+    selectedScope: ScreenGuidanceCaptureScope? = nil
   ) async throws -> ScreenEvidence {
     try Task.checkCancellation()
-    guard generation == self.generation,
+    let request = activeGuidanceRequest
+    let ownsRequest: @MainActor () -> Bool = { [weak self] in
+      guard let selectedScope else { return true }
+      guard let self, let request, request.selectedScope == selectedScope else { return false }
+      return self.activeGuidanceRequest == request && request.expires.isFinite
+        && ProcessInfo.processInfo.systemUptime < request.expires
+    }
+    guard ownsRequest(), generation == self.generation,
       captureGate.permits(captureToken, cancelled: Task.isCancelled),
       explicitManualEvidence == selectedFrame, let source = evidence, selectedFrame.matches(source),
-      screenGuidanceEnabled()
+      screenGuidanceEnabled(),
+      selectedScope.map(ownsSelectedGuidanceScope) ?? true
     else { throw CancellationError() }
+    let selectionID = selectedCaptureSelectionID
     try monitorGuidanceScene(
       generation: generation, foregroundPID: selectedFrame.foregroundPID,
       sourceRect: selectedFrame.screenRect)
@@ -851,7 +903,9 @@ struct ResponseInputPlan: Sendable {
     guard generation == self.generation,
       captureGate.permits(captureToken, cancelled: Task.isCancelled),
       explicitManualEvidence == selectedFrame, selectedFrame.matches(evidence),
-      guidanceSceneScope == scope, screenGuidanceEnabled()
+      guidanceSceneScope == scope, screenGuidanceEnabled(), ownsRequest(),
+      selectedCaptureSelectionID == selectionID,
+      selectedScope.map(ownsSelectedGuidanceScope) ?? true
     else { throw CancellationError() }
     try requireGuidanceForeground(selectedFrame.foregroundPID)
     setGuidanceStage(.capture, generation: generation)
@@ -861,18 +915,25 @@ struct ResponseInputPlan: Sendable {
       return generation == self.generation
         && self.captureGate.permits(captureToken, cancelled: Task.isCancelled)
         && self.explicitManualEvidence == selectedFrame && selectedFrame.matches(self.evidence)
-        && self.guidanceSceneScope == scope
+        && self.guidanceSceneScope == scope && ownsRequest()
+        && self.selectedCaptureSelectionID == selectionID
+        && (selectedScope.map(self.ownsSelectedGuidanceScope) ?? true)
         && self.screenGuidanceEnabled()
     }
     let fresh = try await SelectedGuidanceEvidenceRefresh.capture(
       original: source,
-      refresh: refresh ?? { [self] original in try await refreshGuidanceEvidence(original) },
+      refresh: refresh ?? scopedGuidanceRefresh ?? { [self] original in
+        try await refreshGuidanceEvidence(original)
+      },
       stillOwned: stillOwned)
     try Task.checkCancellation()
     try requireGuidanceForeground(selectedFrame.foregroundPID)
-    guard stillOwned(), publishSelectedCapture(fresh, token: captureToken) else {
+    guard stillOwned(), captureGate.permits(captureToken, cancelled: Task.isCancelled) else {
       throw CancellationError()
     }
+    // A refresh replaces pixels, not the user's selection authorization.
+    explicitManualEvidence = ScreenEvidenceIdentity(fresh)
+    evidence = fresh
     record("guidance.selectedCapture.refresh.accepted")
     return fresh
   }
@@ -884,7 +945,8 @@ struct ResponseInputPlan: Sendable {
     expectedForegroundPID: pid_t?
   ) async throws -> ScreenEvidence {
     try Task.checkCancellation()
-    guard generation == self.generation, activeGuidanceRequest == request,
+    guard request.selectedScope == nil, generation == self.generation,
+      activeGuidanceRequest == request,
       request.expires.isFinite, ProcessInfo.processInfo.systemUptime < request.expires,
       CursorCompanionPreferences.load().screenGuidanceEnabled,
       captureGate.permits(captureToken, cancelled: Task.isCancelled)
@@ -953,6 +1015,7 @@ struct ResponseInputPlan: Sendable {
       throw ProviderError.message("The active app changed. Ask for screen guidance again.")
     }
     explicitManualEvidence = nil
+    selectedCaptureSelectionID = nil
     evidence = frame
     if selectedContext.isEmpty { contextTitle = "Screen: \(frame.foregroundName)" }
     record("guidance.capture.accepted")
@@ -1002,6 +1065,7 @@ struct ResponseInputPlan: Sendable {
     stop()
     invalidatedManualGuidanceScope = selectedCaptureChanged
     explicitManualEvidence = nil
+    selectedCaptureSelectionID = nil
     evidence = nil
     if selectedContext.isEmpty {
       contextTitle = selectedCaptureChanged ? "Screen context changed — recapture or remove" : ""
@@ -1076,28 +1140,80 @@ struct ResponseInputPlan: Sendable {
     return [.awaitingUser, .needsAttention, .modelReportedComplete].contains(workflow.phase)
   }
 
+  /// Current selection authority is independent from frame identity: internal
+  /// refresh changes pixels, while an explicit replacement rotates this ID.
+  func currentSelectedGuidanceScope() throws -> ScreenGuidanceCaptureScope {
+    guard let frame = evidence, explicitManualEvidence?.matches(frame) == true,
+      let selectionID = selectedCaptureSelectionID
+    else {
+      throw ProviderError.message("Choose screen context before continuing this guide.")
+    }
+    return try ScreenGuidanceCaptureScope(evidence: frame, selectionID: selectionID)
+  }
+
+  private func ownsSelectedGuidanceScope(_ scope: ScreenGuidanceCaptureScope) -> Bool {
+    selectedCaptureSelectionID == scope.selectionID && scope.matches(evidence)
+      && explicitManualEvidence?.matches(evidence) == true
+  }
+
+  var guidanceHasSelectedScope: Bool { (try? currentSelectedGuidanceScope()) != nil }
+
+  var guidanceRequiresScopeChoice: Bool {
+    guard let workflow = guidanceSession.workflow,
+      let binding = guidanceWorkflowCapture, binding.workflowID == workflow.id
+    else { return true }
+    return binding.selectedScope.map { !ownsSelectedGuidanceScope($0) } ?? false
+  }
+
   func pauseGuidance() { stop() }
   func abandonGuidance() {
     stop()
     guidanceSession.abandon()
+    guidanceWorkflowCapture = nil
   }
-  func resumeGuidance() { restartGuidanceFromCurrentScreen() }
-  func recheckGuidance() { restartGuidanceFromCurrentScreen() }
+  func resumeGuidance() { restartGuidance(scopeChoice: .retained) }
+  func recheckGuidance() { restartGuidance(scopeChoice: .retained) }
+  func resumeGuidanceWithSelectedContext() { restartGuidance(scopeChoice: .selected) }
+  func resumeGuidanceOnCurrentScreen() { restartGuidance(scopeChoice: .currentScreen) }
 
-  private func restartGuidanceFromCurrentScreen() {
+  private enum GuidanceResumeScopeChoice { case retained, selected, currentScreen }
+
+  private func restartGuidance(scopeChoice: GuidanceResumeScopeChoice) {
     guard screenGuidanceEnabled(), !busy, !listening,
       let workflow = guidanceSession.workflow,
       workflow.phase != .abandoned && workflow.phase != .independentlyVerified
     else { return }
+    let selectedScope: ScreenGuidanceCaptureScope?
+    do {
+      switch scopeChoice {
+      case .currentScreen:
+        // This explicit UI action authorizes a new current-screen scope.
+        selectedScope = nil
+      case .selected:
+        selectedScope = try currentSelectedGuidanceScope()
+      case .retained:
+        guard let binding = guidanceWorkflowCapture, binding.workflowID == workflow.id,
+          binding.selectedScope.map(ownsSelectedGuidanceScope) ?? true
+        else {
+          notice = "Choose the selected area or current screen to resume this guide."
+          return
+        }
+        selectedScope = binding.selectedScope
+      }
+    } catch {
+      showError(error)
+      return
+    }
     stop()
     guard guidanceSession.workflow?.canBeginCheck == true else {
       notice = "This guide has reached its check limit. Start a new guide for further help."
       return
     }
-    // Resume never restores a saved frame, PID, target or usable lease. This
-    // voice-style explicit route forces current-screen preparation and capture.
+    // A new request/check always captures fresh pixels. Saved progress carries
+    // no scope; only a retained live binding or an explicit scope choice may resume.
     let request = ScreenGuidanceRequest(
-      prompt: workflow.goal, step: workflow.checks.count, speakAloud: workflow.speakAloud)
+      prompt: workflow.goal, step: workflow.checks.count, speakAloud: workflow.speakAloud,
+      selectedScope: selectedScope)
     send(
       textOverride:
         "Recheck the current screen and continue this goal using the saved semantic progress. Do not assume any previous instruction succeeded. Original goal: "
@@ -1119,7 +1235,7 @@ struct ResponseInputPlan: Sendable {
         self.guidanceSession.workflow?.phase == .loading
       else { return }
       guard self.activeGuidanceRequest == request, expectedEvidence.matches(self.evidence),
-        NSWorkspace.shared.frontmostApplication?.processIdentifier == frame.foregroundPID,
+        self.guidanceForegroundPID() == frame.foregroundPID,
         ProcessInfo.processInfo.systemUptime < request.expires, self.screenGuidanceEnabled()
       else {
         self.stop()
@@ -1129,7 +1245,8 @@ struct ResponseInputPlan: Sendable {
       self.guidanceLoadingTask = nil
       let next = ScreenGuidanceRequest(
         id: request.id, prompt: request.prompt, step: request.step + 1,
-        expires: request.expires, speakAloud: request.speakAloud)
+        expires: request.expires, speakAloud: request.speakAloud,
+        selectedScope: request.selectedScope)
       self.record("guidance.loading.freshCheck")
       self.send(
         textOverride:
@@ -1158,7 +1275,8 @@ struct ResponseInputPlan: Sendable {
       ScreenGuidancePolicy.permitsContinuation(step: request.step), request.expires.isFinite,
       ProcessInfo.processInfo.systemUptime < request.expires,
       screenGuidanceEnabled(),
-      expectedEvidence.matches(evidence)
+      expectedEvidence.matches(evidence),
+      request.selectedScope.map(ownsSelectedGuidanceScope) ?? true
     else { return }
     if let token = guidanceTurnToken, guidanceSession.owns(token) {
       do {
@@ -1171,7 +1289,7 @@ struct ResponseInputPlan: Sendable {
     }
     let next = ScreenGuidanceRequest(
       id: request.id, prompt: request.prompt, step: request.step + 1, expires: request.expires,
-      speakAloud: request.speakAloud)
+      speakAloud: request.speakAloud, selectedScope: request.selectedScope)
     let instruction = guidanceContinuationText(
       request: request, next: next, observation: observation)
     send(
@@ -1197,6 +1315,9 @@ struct ResponseInputPlan: Sendable {
   }
   private func acceptTextPreview(_ preview: ProviderTextPreview, generation: UInt64) async throws {
     guard generation == self.generation else { throw CancellationError() }
+    if let scope = activeGuidanceRequest?.selectedScope, !ownsSelectedGuidanceScope(scope) {
+      throw CancellationError()
+    }
     // A standalone explanation owns its complete semantic captions. Previewing
     // future narration here would reveal it before its visual/speech beat.
     guard !explanationPlaybackEnabled else { return }
@@ -1218,6 +1339,9 @@ struct ResponseInputPlan: Sendable {
     throws
   {
     guard generation == self.generation else { throw CancellationError() }
+    if let scope = activeGuidanceRequest?.selectedScope, !ownsSelectedGuidanceScope(scope) {
+      throw CancellationError()
+    }
     switch unit.type {
     case "guidanceStatus":
       guard responsePolicy.route == .screenGuidance, !guidanceStatusReceived,
@@ -1737,6 +1861,11 @@ struct ResponseInputPlan: Sendable {
       return true
     }
 
+    guard next.selectedScope.map(ownsSelectedGuidanceScope) ?? true else {
+      notice = "The selected area changed. Choose a screen before continuing this guide."
+      voiceNotice = notice
+      return true
+    }
     if let token = guidanceTurnToken, guidanceSession.owns(token) {
       do { try guidanceSession.observeAction(token: token, kind: .manualContinue) } catch {
         showError(error)
@@ -1767,6 +1896,7 @@ struct ResponseInputPlan: Sendable {
     }
     invalidateCapture()
     explicitManualEvidence = nil
+    selectedCaptureSelectionID = nil
     cancelWindowPicker()
     spatialSelector.cancel()
     if evidence != nil {
@@ -1778,9 +1908,15 @@ struct ResponseInputPlan: Sendable {
     record("capture.displayTopologyInvalidated")
   }
   @discardableResult private func beginContextSelection() -> UInt64 {
+    if activeGuidanceRequest?.selectedScope != nil
+      || voiceGuidanceContinuation?.step.request.selectedScope != nil
+    {
+      stop()
+    }
     invalidatedManualGuidanceScope = false
     invalidateCapture()
     explicitManualEvidence = nil
+    selectedCaptureSelectionID = nil
     cancelWindowPicker()
     spatialSelector.cancel()
     evidence = nil
@@ -1834,6 +1970,7 @@ struct ResponseInputPlan: Sendable {
   ) -> Bool {
     guard captureGate.permits(token, cancelled: Task.isCancelled) else { return false }
     explicitManualEvidence = ScreenEvidenceIdentity(frame)
+    selectedCaptureSelectionID = UUID()
     invalidatedManualGuidanceScope = false
     evidence = frame
     if !strokes.isEmpty {
@@ -2017,7 +2154,10 @@ struct ResponseInputPlan: Sendable {
     if records.contains(where: { $0.id == id && $0.kind == "guidance" })
       || guidanceSession.workflow?.id.uuidString == id
     {
-      if guidanceSession.workflow?.id.uuidString == id { stop() }
+      if guidanceSession.workflow?.id.uuidString == id {
+        stop()
+        guidanceWorkflowCapture = nil
+      }
       return Task {
         do {
           try await guidanceSession.delete(id: id)
@@ -2083,6 +2223,7 @@ struct ResponseInputPlan: Sendable {
   func newConversation() {
     stop()
     guidanceSession.detach()
+    guidanceWorkflowCapture = nil
     clearContext()
     conversationID = UUID().uuidString
     messages = []

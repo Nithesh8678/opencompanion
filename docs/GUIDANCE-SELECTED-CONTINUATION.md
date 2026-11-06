@@ -1,0 +1,34 @@
+# Selected-scope guidance continuation
+
+This source checkpoint connects explicitly selected screen guidance to the active request and resumable workflow. The final full suite passed **875 tests**: 782 application tests across 93 suites, 28 store tests and 65 core tests. New signed build, installation, exact-source CI and native full-task verification remain pending. It extends the [selected freshness contract](GUIDANCE-SELECTED-FRESHNESS.md) without treating a saved screenshot as current evidence.
+
+## Request ownership and capture ownership
+
+Previously, request/workflow declaration was coupled to the branch that needed an automatic current-display capture. A typed request using selected evidence could refresh that evidence without declaring an active guidance request or semantic workflow. The target continuation callback therefore lacked the request needed to arm the next step. This is a source-level defect; it does not establish the cause of any earlier physical interaction failure.
+
+The host now declares a guidance request for either capture route. A selected request carries an ephemeral `ScreenGuidanceCaptureScope`: selection ID, foreground PID, display ID, optional window ID and global logical source rectangle. The selection ID represents the user's current capture choice. It is separate from a frame ID and perception revision, which change when new pixels are captured.
+
+An internal same-scope refresh preserves the selection ID while replacing the evidence identity. Explicitly replacing or removing screen context revokes that selection authority. Matching rectangle/PID metadata alone cannot recreate it. The active request, task generation, capture-publication token, scene-observer lease and current selection must all remain owned before a refreshed frame is published or sent.
+
+Each selected guidance check requests a new image within the original scope, even when the previous frame is young. Changed pixels are allowed before model inference. New frame identity, increasing perception revision, exact source metadata, trusted JPEG dimensions and bounded age remain required. There is no old-image fallback, silent full-display widening or restoration of old candidate IDs. File/memory context and saved strokes remain excluded from the screen-guidance payload. Normal conversation attachment behavior is unchanged.
+
+## Continuing and resuming
+
+- **Click and manual Continue:** the next request retains the original goal, request ID, speech policy, deadline and selected descriptor, while advancing its check step. A user observation requests fresh perception; it does not mark the action successful. New pixels and candidates are required before the next provider turn.
+- **Recognized voice Continue:** the manual lease remains bound to its original request and evidence across the voice handoff. An exact accepted continuation retains the selected descriptor and original speech policy. An unrelated utterance does not become a continuation. This does not require or claim successful microphone input in the authored tests.
+- **Loading checks:** the existing bounded settle/check path retains the descriptor and captures the same selection again. Loading is a model assessment of the supplied screen, not proof that the page settled or a preceding action succeeded. It never authorizes repetition of the action automatically.
+- **Pause, Resume and Recheck:** pausing revokes runtime turn/mark authority while retaining semantic progress. A live, still-owned selection binding may be reused as the scope of a new request and check; its pixels are always refreshed. A replacement selection cannot be adopted implicitly.
+
+When the retained binding is missing, restored from storage or no longer owned, ordinary Resume/Recheck refuses to choose a screen silently. The shared progress controls offer explicit **selected-context** or **current-screen** choices. Selecting current screen deliberately authorizes that route; selecting existing context binds its current selection ID. These choices create a fresh check in the existing workflow, subject to its remaining action/check budget. They do not revive an expired request or old target lease.
+
+Saved workflow records contain semantic goals, action observations and model assessments. They exclude images, screen/candidate identities, selection IDs, live PIDs, coordinates and usable capture/target leases. A restored workflow therefore needs an explicit new scope choice.
+
+## Integration tests and evidence limits
+
+`ReasoningTurnInput` is the immutable messages/context/image/scene/policy snapshot assembled immediately before provider dispatch. An optional injected `ReasoningTurnStream` receives that same snapshot and invokes the real unit/preview admission callbacks. Production dispatch retains the configured provider path when no responder is supplied; the seam adds no default model or transport change.
+
+Authored tests inject scoped capture results and a status/text responder to exercise actual AppModel send, fresh payload assembly, semantic assessment, click/manual continuation declarations, recognized voice continuation, bounded loading retry, pause/resume choices and cancellation or supersession during capture. The coordinator's separate component tests exercise selection ownership and explicit continuation with system observation disabled. The first focused run passed 36 tests across five suites. The final full run passed all 875 tests, including the selected coordinator component checks. The new coverage consists of seven scope/voice methods, nine AppModel pipeline methods and four coordinator methods, with parameterized cases.
+
+These are caller-injected capture/provider tests, not real ScreenCaptureKit capture, model transport, external input, microphone or native mark-visibility evidence. The full-send tests emit no target units and create no annotation windows; they do not prove the native target callback/controls path or completion of an external task. Those boundaries still require installed end-to-end acceptance.
+
+Native capture races, same-PID layout/window changes, mixed-display behavior, unfamiliar-app reliability, complete multi-step outcomes and recovery remain open. No latency or performance improvement is established. All **21 whole-product parity gates remain open**.

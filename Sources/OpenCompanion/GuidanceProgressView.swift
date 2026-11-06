@@ -49,13 +49,40 @@ struct GuidanceProgressView: View {
         control("Pause", symbol: "pause.fill", id: "pause", action: model.pauseGuidance)
       }
       if model.guidanceCanResume {
-        control("Resume", symbol: "play.fill", id: "resume", action: model.resumeGuidance)
+        if model.guidanceRequiresScopeChoice {
+          scopeChoice(title: "Resume", id: "resume")
+        } else {
+          control("Resume", symbol: "play.fill", id: "resume", action: model.resumeGuidance)
+        }
       }
       if model.guidanceCanRecheck {
-        control("Recheck", symbol: "arrow.clockwise", id: "recheck", action: model.recheckGuidance)
+        if model.guidanceRequiresScopeChoice {
+          scopeChoice(title: "Recheck", id: "recheck")
+        } else {
+          control(
+            "Recheck", symbol: "arrow.clockwise", id: "recheck", action: model.recheckGuidance)
+        }
       }
       control("Stop", symbol: "stop.fill", id: "stop", action: model.abandonGuidance)
     }.fixedSize(horizontal: true, vertical: false)
+  }
+
+  private func scopeChoice(title: String, id: String) -> some View {
+    Menu {
+      if model.guidanceHasSelectedScope {
+        Button("Use selected area", action: model.resumeGuidanceWithSelectedContext)
+      }
+      Button("Use current screen", action: model.resumeGuidanceOnCurrentScreen)
+    } label: {
+      Label(title, systemImage: id == "resume" ? "play.fill" : "arrow.clockwise")
+        .font(.system(size: 10, weight: .medium))
+        .padding(.horizontal, 7).frame(minHeight: 24)
+        .foregroundStyle(.white.opacity(0.94))
+        .background(Color.white.opacity(0.09), in: Capsule())
+    }.menuStyle(.borderlessButton)
+      .fixedSize()
+      .accessibilityLabel("Choose screen to \(title.lowercased()) guidance")
+      .accessibilityIdentifier("guidance.progress.\(id).scope")
   }
 
   private func control(

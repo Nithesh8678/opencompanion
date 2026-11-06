@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import ImageIO
 
 struct GuidanceMarkRasterMetrics: Codable, Sendable {
@@ -151,6 +152,15 @@ enum ManualGuidanceLiveAcceptance {
       )
     }
     checks["productionTargetObserverInstalled"] = true
+    if verifyTaskCompletion {
+      checks["fixtureStateAccessibilityTrusted"] = AXIsProcessTrusted()
+      guard checks["fixtureStateAccessibilityTrusted"] == true else {
+        failureCode = "startup-fixture-state-accessibility-denied"
+        throw ProviderError.message(
+          "The public task check needs OpenCompanion's existing Accessibility grant to read the fixture state. No capture was attempted."
+        )
+      }
+    }
     activePathEntered = true
     let displayID = displayNumber.uint32Value
     let pid = fixture.processIdentifier
@@ -180,6 +190,7 @@ enum ManualGuidanceLiveAcceptance {
     var sampledCheckpoints = Set<String>()
     var requestID: UUID?
     var rejection: String?
+    var fixtureStateFailure: String?
     failureCode = "incomplete"
 
     func recentEvents() -> [[String: String]] {
@@ -406,6 +417,7 @@ enum ManualGuidanceLiveAcceptance {
         "checkboxActionPerformedByHelper": false,
         "checkboxCompletionVerified": taskReceipt?.fixturePostconditionVerified ?? false,
         "taskPostconditionRequired": verifyTaskCompletion, "taskCompletion": taskMetadata,
+        "fixtureStateFailureCode": fixtureStateFailure ?? "",
         "taskComplete": passed && taskReceipt?.taskComplete == true,
         "endState": passed
           ? (verifyTaskCompletion ? "fixture-task-verified" : "ready-for-checkbox-click")
@@ -442,7 +454,17 @@ enum ManualGuidanceLiveAcceptance {
       }
       try await oldPreparation?(generation, expectedPID)
       try checkFixture()
-      try await taskVerifier?.prepareCapture(generation: generation)
+      do {
+        try await taskVerifier?.prepareCapture(generation: generation)
+      } catch let error as GuidanceFixtureStateAcceptance.Failure {
+        // This closed enum contains only cases and the two authored control IDs;
+        // no Accessibility attribute contents or system error strings escape.
+        fixtureStateFailure = String(describing: error)
+        throw error
+      } catch let error as GuidanceFixtureTaskAcceptance.Failure {
+        fixtureStateFailure = error.rawValue
+        throw error
+      }
       try checkFixture()
     }
     coordinator.onManualContinueWillBegin = { step in
@@ -579,6 +601,11 @@ enum ManualGuidanceLiveAcceptance {
     while stages[1] == nil {
       try Task.checkCancellation()
       reportObservedPhase()
+      if let fixtureStateFailure {
+        failureCode = "fixture-state-\(fixtureStateFailure)"
+        throw ProviderError.message(
+          "Public fixture state verification refused: \(fixtureStateFailure).")
+      }
       do { try sampleReturnedCursors() } catch {
         failureCode = "native-mark-after-cursor-return"
         throw error
@@ -658,10 +685,19 @@ enum ManualGuidanceLiveAcceptance {
       reportObservedPhase()
       try marker("GUIDANCE_MANUAL_CHECKBOX_READY")
       failureCode = "task-postcondition-or-provider-validation"
-      taskReceipt = try await taskVerifier.waitForCompletion(
-        initialGeneration: initialGeneration, deadline: deadline,
-        expectedPreviousEvidence: ScreenEvidenceIdentity(previous),
-        onProgress: { reportObservedPhase() })
+      do {
+        taskReceipt = try await taskVerifier.waitForCompletion(
+          initialGeneration: initialGeneration, deadline: deadline,
+          expectedPreviousEvidence: ScreenEvidenceIdentity(previous),
+          onProgress: { reportObservedPhase() })
+      } catch let error as GuidanceFixtureStateAcceptance.Failure {
+        fixtureStateFailure = String(describing: error)
+        failureCode = "fixture-state-\(fixtureStateFailure ?? "unknown")"
+        throw error
+      } catch let error as GuidanceFixtureTaskAcceptance.Failure {
+        failureCode = "task-postcondition-\(error.rawValue)"
+        throw error
+      }
       reportPhase(.checkingTaskPostcondition)
       try checkFixture()
       guard rejection == nil, let taskReceipt, let first = frames[0],

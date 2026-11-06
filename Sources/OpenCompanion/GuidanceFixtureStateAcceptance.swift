@@ -16,6 +16,23 @@ enum GuidanceFixtureStateAcceptance {
     case protectData = "fixture.protectData"
   }
 
+  enum Attribute: String, Sendable, Equatable {
+    case role, subrole, hidden, identifier, value, focusedWindow, children, timeout
+
+    fileprivate var key: CFString? {
+      switch self {
+      case .role: kAXRoleAttribute as CFString
+      case .subrole: kAXSubroleAttribute as CFString
+      case .hidden: kAXHiddenAttribute as CFString
+      case .identifier: kAXIdentifierAttribute as CFString
+      case .value: kAXValueAttribute as CFString
+      case .focusedWindow: kAXFocusedWindowAttribute as CFString
+      case .children: kAXChildrenAttribute as CFString
+      case .timeout: nil
+      }
+    }
+  }
+
   enum Failure: Error, Sendable, Equatable {
     case accessibilityDenied
     case fixtureAbsent
@@ -31,7 +48,15 @@ enum GuidanceFixtureStateAcceptance {
     case invalidRole(Control)
     case hiddenControl(Control)
     case invalidValue(Control)
+    case axRequestFailed(Attribute, Int32)
+    case axCountFailed(Attribute, Int32)
+    case axCopyFailed(Attribute, Int32)
+    case attributeMissing(Attribute)
+    case attributeTypeInvalid(Attribute)
+    case attributeSizeInvalid(Attribute)
   }
+
+  private enum RequestOperation { case read, count, copy }
 
   /// Content-free values produced only after reading one of the exact IDs.
   enum ObservedValue: Sendable {
@@ -187,46 +212,54 @@ enum GuidanceFixtureStateAcceptance {
   private static func readControls(pid: pid_t) throws -> Snapshot {
     guard AXIsProcessTrusted() else { throw Failure.accessibilityDenied }
     let app = AXUIElementCreateApplication(pid)
-    guard AXUIElementSetMessagingTimeout(app, 0.15) == .success else {
-      throw Failure.attributeUnavailable
+    let appTimeout = AXUIElementSetMessagingTimeout(app, 0.15)
+    guard appTimeout == .success else {
+      throw Failure.axRequestFailed(.timeout, appTimeout.rawValue)
     }
     let deadline = ProcessInfo.processInfo.systemUptime + 1.2
     func check() throws {
       try Task.checkCancellation()
       guard ProcessInfo.processInfo.systemUptime < deadline else { throw Failure.deadlineExceeded }
     }
-    func checkedError(_ error: AXError) throws {
-      if error == .apiDisabled { throw Failure.accessibilityDenied }
-      if error == .invalidUIElement { throw Failure.fixtureDisappeared }
-      throw Failure.attributeUnavailable
+    func checkedError(
+      _ error: AXError, attribute: Attribute, operation: RequestOperation = .read
+    ) throws -> Never {
+      switch operation {
+      case .read: throw Failure.axRequestFailed(attribute, error.rawValue)
+      case .count: throw Failure.axCountFailed(attribute, error.rawValue)
+      case .copy: throw Failure.axCopyFailed(attribute, error.rawValue)
+      }
     }
-    func read(_ element: AXUIElement, _ key: CFString, optional: Bool = false) throws -> CFTypeRef?
+    func read(_ element: AXUIElement, _ attribute: Attribute, optional: Bool = false) throws
+      -> CFTypeRef?
     {
       try check()
+      guard let key = attribute.key else { throw Failure.attributeTypeInvalid(attribute) }
       // AX messaging timeouts belong to each client-side element object. The
       // application's timeout does not apply to its focused window or children.
       let timeout = AXUIElementSetMessagingTimeout(element, 0.15)
       guard timeout == .success else {
-        try checkedError(timeout)
-        return nil
+        try checkedError(timeout, attribute: .timeout)
       }
       var value: CFTypeRef?
       let error = AXUIElementCopyAttributeValue(element, key, &value)
       if optional && (error == .attributeUnsupported || error == .noValue) { return nil }
-      guard error == .success, let value else {
-        try checkedError(error)
-        return nil
+      guard error == .success else {
+        try checkedError(error, attribute: attribute)
       }
+      guard let value else { throw Failure.attributeMissing(attribute) }
       try check()
       return value
     }
-    func boundedString(_ value: CFTypeRef?, maximum: Int) throws -> String? {
+    func boundedString(_ value: CFTypeRef?, attribute: Attribute, maximum: Int) throws -> String? {
       guard let value else { return nil }
       guard CFGetTypeID(value) == CFStringGetTypeID() else {
-        throw Failure.attributeUnavailable
+        throw Failure.attributeTypeInvalid(attribute)
       }
       let string = value as! CFString
-      guard CFStringGetLength(string) <= maximum else { throw Failure.attributeUnavailable }
+      guard CFStringGetLength(string) <= maximum else {
+        throw Failure.attributeSizeInvalid(attribute)
+      }
       return string as String
     }
     func children(_ element: AXUIElement, budget: TraversalBudget, depth: Int) throws
@@ -235,37 +268,39 @@ enum GuidanceFixtureStateAcceptance {
       try check()
       let timeout = AXUIElementSetMessagingTimeout(element, 0.15)
       guard timeout == .success else {
-        try checkedError(timeout)
-        return []
+        try checkedError(timeout, attribute: .timeout)
       }
       var count: CFIndex = 0
       let error = AXUIElementGetAttributeValueCount(
         element, kAXChildrenAttribute as CFString, &count)
       if error == .attributeUnsupported || error == .noValue { return [] }
       guard error == .success else {
-        try checkedError(error)
-        return []
+        try checkedError(error, attribute: .children, operation: .count)
       }
+      guard count >= 0 else { throw Failure.attributeSizeInvalid(.children) }
       try budget.admitChildren(count, depth: depth)
       guard count > 0 else { return [] }
       try check()
       var values: CFArray?
       let copied = AXUIElementCopyAttributeValues(
         element, kAXChildrenAttribute as CFString, 0, count, &values)
-      guard copied == .success, let values, CFArrayGetCount(values) == count,
-        let result = values as? [AXUIElement], result.count == count
-      else {
-        try checkedError(copied)
-        return []
+      guard copied == .success else {
+        try checkedError(copied, attribute: .children, operation: .copy)
       }
+      guard let values else { throw Failure.attributeMissing(.children) }
+      guard CFArrayGetCount(values) == count else { throw Failure.attributeSizeInvalid(.children) }
+      guard let result = values as? [AXUIElement] else {
+        throw Failure.attributeTypeInvalid(.children)
+      }
+      guard result.count == count else { throw Failure.attributeSizeInvalid(.children) }
       try check()
       return result
     }
-    guard let focused = try read(app, kAXFocusedWindowAttribute as CFString, optional: true) else {
+    guard let focused = try read(app, .focusedWindow, optional: true) else {
       throw Failure.focusedWindowAbsent
     }
     guard CFGetTypeID(focused) == AXUIElementGetTypeID() else {
-      throw Failure.attributeUnavailable
+      throw Failure.attributeTypeInvalid(.focusedWindow)
     }
     var budget = TraversalBudget()
     var observations: [Observation] = []
@@ -274,19 +309,19 @@ enum GuidanceFixtureStateAcceptance {
       try budget.visit(depth: depth)
       guard
         let role = try boundedString(
-          read(element, kAXRoleAttribute as CFString), maximum: 64)
-      else { throw Failure.attributeUnavailable }
+          read(element, .role), attribute: .role, maximum: 64)
+      else { throw Failure.attributeMissing(.role) }
       // Never inspect values or descendants of a secure field, even in a fixture.
       let subrole = try boundedString(
-        read(element, kAXSubroleAttribute as CFString, optional: true), maximum: 64)
+        read(element, .subrole, optional: true), attribute: .subrole, maximum: 64)
       if role == "AXSecureTextField" || subrole == "AXSecureTextField" { return }
-      let hiddenValue = try read(element, kAXHiddenAttribute as CFString, optional: true)
+      let hiddenValue = try read(element, .hidden, optional: true)
       if let hiddenValue, CFGetTypeID(hiddenValue) != CFBooleanGetTypeID() {
-        throw Failure.attributeUnavailable
+        throw Failure.attributeTypeInvalid(.hidden)
       }
       let hidden = ancestorHidden || (hiddenValue as? Bool ?? false)
       let identifier = try boundedString(
-        read(element, kAXIdentifierAttribute as CFString, optional: true), maximum: 128)
+        read(element, .identifier, optional: true), attribute: .identifier, maximum: 128)
       if let identifier, let control = Control(rawValue: identifier) {
         guard !observations.contains(where: { $0.control == control }) else {
           throw Failure.duplicateControl(control)
@@ -295,23 +330,26 @@ enum GuidanceFixtureStateAcceptance {
           throw Failure.invalidRole(control)
         }
         guard !hidden else { throw Failure.hiddenControl(control) }
-        guard let value = try read(element, kAXValueAttribute as CFString) else {
-          throw Failure.invalidValue(control)
+        guard let value = try read(element, .value) else {
+          throw Failure.attributeMissing(.value)
         }
         let observed: ObservedValue
         switch control {
         case .tableName:
           guard CFGetTypeID(value) == CFStringGetTypeID() else {
-            throw Failure.invalidValue(control)
+            throw Failure.attributeTypeInvalid(.value)
           }
           // Compare CF strings directly; never retain/export the field's text.
           let string = value as! CFString
           observed = .tableNameMatches(
             CFStringGetLength(string) == 10 && CFEqual(string, "Release QA" as CFString))
         case .protectData:
-          guard CFGetTypeID(value) == CFNumberGetTypeID(), let number = value as? NSNumber,
-            number.doubleValue == 0 || number.doubleValue == 1
-          else { throw Failure.invalidValue(control) }
+          guard CFGetTypeID(value) == CFNumberGetTypeID(), let number = value as? NSNumber else {
+            throw Failure.attributeTypeInvalid(.value)
+          }
+          guard number.doubleValue == 0 || number.doubleValue == 1 else {
+            throw Failure.invalidValue(control)
+          }
           observed = .checkboxChecked(number.doubleValue == 1)
         }
         observations.append(.init(control: control, role: role, hidden: hidden, value: observed))

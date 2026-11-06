@@ -13,6 +13,8 @@ import AppKit
   private let nameField = NSTextField(string: "")
   private let protection = NSButton(checkboxWithTitle: "Protect data", target: nil, action: nil)
   private let backButton = NSButton(title: "Back", target: nil, action: nil)
+  private let bringForwardButton = NSButton(
+    title: "Bring practice screen forward", target: nil, action: nil)
   private let closeButton = NSButton(title: "Close fixture", target: nil, action: nil)
   private let footer = NSTextField(
     labelWithString:
@@ -52,6 +54,12 @@ import AppKit
     backButton.target = self
     backButton.action = #selector(goBack)
     backButton.setAccessibilityIdentifier("fixture.back")
+    bringForwardButton.target = self
+    bringForwardButton.action = #selector(bringPracticeScreenForward)
+    bringForwardButton.setAccessibilityIdentifier("fixture.bringForward")
+    bringForwardButton.setAccessibilityLabel("Bring practice screen forward")
+    bringForwardButton.font = .systemFont(ofSize: 14, weight: .medium)
+    bringForwardButton.bezelStyle = .rounded
     closeButton.target = self
     closeButton.action = #selector(closeFixture)
     closeButton.setAccessibilityIdentifier("fixture.close")
@@ -59,7 +67,7 @@ import AppKit
     footer.textColor = NSColor(white: 0.48, alpha: 1)
     for view in [
       heading, descriptionLabel, openButton, nameLabel, nameField, protection,
-      backButton, closeButton, footer,
+      backButton, bringForwardButton, closeButton, footer,
     ] {
       addSubview(view)
     }
@@ -80,6 +88,9 @@ import AppKit
     nameField.frame = CGRect(x: left, y: center.y + 20, width: min(contentWidth, 420), height: 34)
     protection.frame = CGRect(x: left, y: center.y + 75, width: 240, height: 30)
     backButton.frame = CGRect(x: left, y: center.y + 135, width: 110, height: 34)
+    bringForwardButton.frame = CGRect(
+      x: max(24, bounds.width - 334), y: 40,
+      width: min(310, max(0, bounds.width - 48)), height: 36)
     closeButton.frame = CGRect(
       x: bounds.width - 180, y: bounds.height - 72, width: 140, height: 34)
     footer.frame = CGRect(
@@ -104,6 +115,12 @@ import AppKit
   @objc private func goBack() {
     settingsVisible = false
     refreshPage()
+  }
+  /// A deliberate practice-screen control, never invoked by the acceptance
+  /// helper. Raising an AX window alone does not establish app activation.
+  @objc private func bringPracticeScreenForward() {
+    window?.makeKeyAndOrderFront(nil)
+    NSApplication.shared.activate(ignoringOtherApps: true)
   }
   @objc private func closeFixture() { NSApplication.shared.terminate(nil) }
 }
@@ -133,6 +150,14 @@ import AppKit
     window.makeKeyAndOrderFront(nil)
     self.window = window
     NSApplication.shared.activate(ignoringOtherApps: true)
+  }
+
+  func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+    guard let window else { return false }
+    if window.isMiniaturized { window.deminiaturize(nil) }
+    window.makeKeyAndOrderFront(nil)
+    sender.activate(ignoringOtherApps: true)
+    return true
   }
 
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }

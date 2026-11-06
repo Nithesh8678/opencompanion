@@ -596,13 +596,22 @@ struct ResponseInputPlan: Sendable {
     }
     guard stillOwned() else { throw CancellationError() }
     try requireGuidanceForeground(binding.source.foregroundPID)
-    let prepared = try await binding.prepare(
-      payload,
-      refresh: {
-        guard stillOwned() else { throw CancellationError() }
-        self.record("guidance.lateTarget.refresh.started")
-        return try await self.refreshGuidanceEvidence(binding.source)
-      }, stillOwned: stillOwned)
+    let prepared: ProviderTarget
+    do {
+      prepared = try await binding.prepare(
+        payload,
+        refresh: {
+          guard stillOwned() else { throw CancellationError() }
+          self.record("guidance.lateTarget.refresh.started")
+          return try await self.refreshGuidanceEvidence(binding.source)
+        }, stillOwned: stillOwned)
+    } catch ScreenGuidanceTurnBinding.Decline.secondaryWouldRefreshPresentedPrimary {
+      guard stillOwned() else { throw CancellationError() }
+      try requireGuidanceForeground(binding.source.foregroundPID)
+      record("guidance.secondary.deferred.awaitingUser")
+      setGuidanceStage(.provider, generation: generation)
+      return
+    }
     guard stillOwned() else { throw CancellationError() }
     try requireGuidanceForeground(binding.source.foregroundPID)
     if previous != ScreenEvidenceIdentity(binding.current) {
@@ -617,6 +626,7 @@ struct ResponseInputPlan: Sendable {
     try accept(
       resolvedUnit, generation: generation,
       expectedEvidence: ScreenEvidenceIdentity(binding.current))
+    binding.recordPresentedTarget(prepared)
   }
 
   private func refreshGuidanceEvidence(_ source: ScreenEvidence) async throws -> ScreenEvidence {

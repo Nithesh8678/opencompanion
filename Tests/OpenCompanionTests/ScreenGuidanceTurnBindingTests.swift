@@ -5,9 +5,181 @@ import Testing
 
 @testable import OpenCompanion
 
-/// Public bitmap fixtures and ownership closures only. No AppModel, windows,
+/// Public bitmaps, injected clocks and an isolated manual controller. No windows,
 /// real capture, focus changes, provider request, or user library is involved.
 @Suite @MainActor struct ScreenGuidanceTurnBindingTests {
+  @Test func aLateSecondaryPreservesThePrimaryFrameAndExactManualLease() async throws {
+    let source = try frame(age: 14)
+    var now = source.capturedAt + 14
+    let binding = ScreenGuidanceTurnBinding(source: source, now: { now })
+    let model = AppModel(acceptanceMode: true)
+    model.evidence = source
+    let coordinator = ScreenGuidanceCoordinator(
+      model: model, observeInput: false, now: { now }, foregroundPID: { source.foregroundPID })
+    defer {
+      coordinator.shutdown()
+      model.stop()
+    }
+    var captures = 0
+    let refresh: @MainActor () async throws -> ScreenEvidence = {
+      captures += 1
+      return source
+    }
+    var primary = payload(source)
+    primary.advanceOn = "manual"
+    primary.awaitUser = true
+    let prepared = try await binding.prepare(primary, refresh: refresh, stillOwned: { true })
+    coordinator.accept(
+      target: prepared, evidence: binding.current, generation: model.taskGeneration,
+      request: .init(prompt: "Public manual task", expires: now + 100))
+    let lease = try #require(coordinator.manualStep)
+    binding.recordPresentedTarget(prepared)
+    now = source.capturedAt + 16
+    var secondary = primary
+    secondary.awaitUser = false
+    await #expect(throws: ScreenGuidanceTurnBinding.Decline.secondaryWouldRefreshPresentedPrimary) {
+      try await binding.prepare(secondary, refresh: refresh, stillOwned: { true })
+    }
+    #expect(captures == 0 && !binding.didRefresh && binding.hasPresentedPrimary)
+    #expect(binding.current.frameID == source.frameID)
+    #expect(binding.current.capturedAt == source.capturedAt)
+    #expect(ScreenEvidenceIdentity(source).matches(model.evidence))
+    #expect(coordinator.manualStep == lease)
+    #expect(coordinator.manualStep?.expiresAt == lease.expiresAt)
+    #expect(model.error == nil && !model.busy)
+  }
+
+  @Test func earlySupportingMarksRemainAdmissibleWithoutReplacingPrimaryEvidence() async throws {
+    let source = try frame(age: 14)
+    var now = source.capturedAt + 14
+    let binding = ScreenGuidanceTurnBinding(source: source, now: { now })
+    var captures = 0
+    let refresh: @MainActor () async throws -> ScreenEvidence = {
+      captures += 1
+      return source
+    }
+    let primary = try await binding.prepare(payload(source), refresh: refresh, stillOwned: { true })
+    binding.recordPresentedTarget(primary)
+    now = source.capturedAt + 14.5
+    var secondary = payload(source)
+    secondary.advanceOn = "manual"
+    secondary.awaitUser = false
+    let prepared = try await binding.prepare(secondary, refresh: refresh, stillOwned: { true })
+    #expect(prepared.candidateID == secondary.candidateID && prepared.advanceOn == "manual")
+    #expect(captures == 0 && !binding.didRefresh && binding.hasPresentedPrimary)
+    #expect(binding.current.frameID == source.frameID)
+  }
+
+  @Test func invalidSupportingMarksStillFailBeforeTheNonfatalDecline() async throws {
+    let source = try frame(age: 14)
+    var now = source.capturedAt + 14
+    let binding = ScreenGuidanceTurnBinding(source: source, now: { now })
+    let primary = try await binding.prepare(
+      payload(source), refresh: { source }, stillOwned: { true })
+    binding.recordPresentedTarget(primary)
+    now = source.capturedAt + 16
+    var secondary = payload(source)
+    secondary.advanceOn = "manual"
+    secondary.awaitUser = false
+    var unknown = secondary
+    unknown.candidateID = ScreenGrounding.candidateID(frameID: UUID(), index: 0)
+    var bounds = secondary
+    bounds.candidateID = nil
+    bounds.width = -0.2
+    var oversized = secondary
+    oversized.instruction = String(repeating: "x", count: 32_001)
+    var shape = secondary
+    shape.shape = "invalid"
+    var action = secondary
+    action.advanceOn = "drag"
+    var contradictory = secondary
+    contradictory.advanceOn = nil
+    contradictory.awaitUser = true
+    var captures = 0
+    for malformed in [unknown, bounds, oversized, shape, action, contradictory] {
+      do {
+        _ = try await binding.prepare(
+          malformed,
+          refresh: {
+            captures += 1
+            return source
+          }, stillOwned: { true })
+        Issue.record("An invalid secondary was admitted.")
+      } catch is ScreenGuidanceTurnBinding.Decline {
+        Issue.record("Invalid content was hidden behind a nonfatal secondary decline.")
+      } catch is ProviderError {
+        // Existing strict source/content validation is the expected failure.
+      }
+    }
+    #expect(captures == 0 && !binding.didRefresh)
+    #expect(binding.current.frameID == source.frameID)
+  }
+
+  @Test func aPreviouslyRefreshedPrimaryKeepsItsNewFrameAndCannotSpendAnotherRefresh() async throws
+  {
+    let source = try frame(age: 30)
+    let fresh = try frame(age: 0, revision: 2, image: source.image)
+    var now = ProcessInfo.processInfo.systemUptime
+    let binding = ScreenGuidanceTurnBinding(source: source, now: { now })
+    var captures = 0
+    let refresh: @MainActor () async throws -> ScreenEvidence = {
+      captures += 1
+      return fresh
+    }
+    let primary = try await binding.prepare(payload(source), refresh: refresh, stillOwned: { true })
+    binding.recordPresentedTarget(primary)
+    var secondary = payload(source)
+    secondary.advanceOn = "manual"
+    let early = try await binding.prepare(secondary, refresh: refresh, stillOwned: { true })
+    #expect(early.candidateID == nil && binding.didRefresh && captures == 1)
+    now = fresh.capturedAt + 16
+    await #expect(throws: ScreenGuidanceTurnBinding.Decline.secondaryWouldRefreshPresentedPrimary) {
+      try await binding.prepare(secondary, refresh: refresh, stillOwned: { true })
+    }
+    #expect(captures == 1 && binding.current.frameID == fresh.frameID)
+    #expect(binding.current.capturedAt == fresh.capturedAt)
+    #expect(
+      binding.source.frameID == source.frameID && binding.source.capturedAt == source.capturedAt)
+  }
+
+  @Test func cancellationAndLostOwnershipCannotBecomeASecondaryDecline() async throws {
+    let source = try frame(age: 14)
+    var now = source.capturedAt + 14
+    let binding = ScreenGuidanceTurnBinding(source: source, now: { now })
+    let primary = try await binding.prepare(
+      payload(source), refresh: { source }, stillOwned: { true })
+    binding.recordPresentedTarget(primary)
+    now = source.capturedAt + 16
+    var secondary = payload(source)
+    secondary.advanceOn = "manual"
+    var captures = 0
+    var ownershipChecks = 0
+    await #expect(throws: CancellationError.self) {
+      try await binding.prepare(
+        secondary,
+        refresh: {
+          captures += 1
+          return source
+        },
+        stillOwned: {
+          ownershipChecks += 1
+          return ownershipChecks == 1
+        })
+    }
+    let cancelled = Task { @MainActor in
+      try await binding.prepare(
+        secondary,
+        refresh: {
+          captures += 1
+          return source
+        }, stillOwned: { true })
+    }
+    cancelled.cancel()
+    await #expect(throws: CancellationError.self) { try await cancelled.value }
+    #expect(captures == 0 && !binding.didRefresh)
+    #expect(binding.current.frameID == source.frameID && binding.hasPresentedPrimary)
+  }
+
   @Test(arguments: [0.0, 30.0])
   func pixelGeometryUsesTheImmutableInputImageBeforeAnyRefresh(_ age: Double) async throws {
     let source = try frame(age: age)

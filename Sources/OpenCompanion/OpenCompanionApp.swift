@@ -36,6 +36,7 @@ import SwiftUI
   private var stopKeyRegistered = false
   private var statusItem: NSStatusItem?
   private var localKeys: Any?
+  private var guidanceCheckProcess: Process?
 
   func applicationDidFinishLaunching(_ notification: Notification) {
     NSApp.setActivationPolicy(.accessory)
@@ -66,7 +67,7 @@ import SwiftUI
       return self.explanationOverlay?.isVisible(documentID: documentID) == true
         || self.notebookEditorCanvas()?.renderedDocumentID == documentID
     }
-    installMenus()
+    installMenus(includeDeveloperChecks: !acceptanceMode)
     if CommandLine.arguments.contains("--keychain-acceptance") {
       let service = "org.opencompanion.acceptance.\(UUID().uuidString)"
       let credentials = CredentialStore()
@@ -567,7 +568,7 @@ import SwiftUI
     voiceShortcut.logDiagnostics(reason: "registration")
   }
 
-  private func installMenus() {
+  private func installMenus(includeDeveloperChecks: Bool) {
     let main = NSMenu()
     let appItem = NSMenuItem()
     main.addItem(appItem)
@@ -580,6 +581,7 @@ import SwiftUI
       .target = self
     appMenu.addItem(withTitle: "New chat", action: #selector(newChat), keyEquivalent: "n")
       .target = self
+    if includeDeveloperChecks { addDeveloperChecks(to: appMenu) }
     appMenu.addItem(.separator())
     appMenu.addItem(withTitle: "Quit OpenCompanion", action: #selector(quit), keyEquivalent: "q")
       .target = self
@@ -605,10 +607,38 @@ import SwiftUI
     menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: "")
       .target = self
     menu.addItem(withTitle: "Stop", action: #selector(stop), keyEquivalent: "").target = self
+    if includeDeveloperChecks { addDeveloperChecks(to: menu) }
     menu.addItem(.separator())
     menu.addItem(withTitle: "Quit", action: #selector(quit), keyEquivalent: "").target = self
     status.menu = menu
     statusItem = status
+  }
+
+  private func addDeveloperChecks(to menu: NSMenu) {
+    let item = NSMenuItem(title: "Developer", action: nil, keyEquivalent: "")
+    let submenu = NSMenu(title: "Developer")
+    submenu.addItem(
+      withTitle: "Check public screen guidance…", action: #selector(checkPublicGuidance),
+      keyEquivalent: "").target = self
+    item.submenu = submenu
+    menu.addItem(item)
+  }
+
+  @objc private func checkPublicGuidance() {
+    guard guidanceCheckProcess == nil else { return }
+    do {
+      guidanceCheckProcess = try GuidanceAcceptanceLauncher.launch(
+        work: .init(
+          busy: model.busy || model.activeGuidanceRequest != nil || utilityWindow?.isVisible == true,
+          listening: model.listening,
+          pendingSpeech: model.voice.hasPendingSpeech,
+          explanationVisible: model.presentingExplanation || explanationPanel?.isVisible == true
+            || model.scene.map { explanationOverlay?.isVisible(documentID: $0.id) == true } == true,
+          hasDraft: !model.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+      NSApp.terminate(nil)
+    } catch {
+      model.notice = error.localizedDescription
+    }
   }
 
   private func openRequestedSurface() {

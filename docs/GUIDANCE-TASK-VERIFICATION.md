@@ -49,7 +49,7 @@ A separate **normal canonical CUA app launch** produced a registration diagnosti
 
 Targeted TCC metadata showed different responsible identities across launch contexts: `com.openai.codex` for direct helpers and `org.opencompanion.mac` for earlier normal app processes. **Inference:** launcher context is relevant to the differing trust results. The retained direct-helper excerpt lacks a final TCC allow/deny decision, so it does not prove the complete causal explanation. Raw logs are not published.
 
-## Current source and installation boundary
+## Verified `3ddfa73` source and installation boundary
 
 Source **`3ddfa730f8691044655f8ad6339782f27d67f5a7`** adds own-process AX-trust preflight and closed diagnostics identifying allowlisted AX attributes, operation categories and numeric AX error codes. It does not record attribute values or raw system error messages. The fixture, identity, timeout, generation, input and task-postcondition guards remain intact.
 
@@ -65,8 +65,28 @@ Source **`3ddfa730f8691044655f8ad6339782f27d67f5a7`** adds own-process AX-trust 
 
 Run artifacts remain outside the public repository. No raw user content, screenshots or proprietary assets are committed with this report.
 
+## Explicit normal-app helper launcher
+
+New source adds **Developer → Check public screen guidance…** to the normal app and status menus through `GuidanceAcceptanceLauncher`. This explicit action starts the existing isolated acceptance model using the same installed executable and the fixed `--guidance-manual-task-acceptance` mode. The launcher requires the canonical and resolved bundle/executable paths under `/Applications/OpenCompanion.app`, the expected executable name and bundle ID `org.opencompanion.mac`.
+
+It refuses busy or listening work, pending speech, a current guidance request, an open utility editor, a visible explanation or an unsent draft. The launcher itself performs no capture, input or app activation. The child retains the existing public-fixture, permission, foreground, coverage, deadline, generation and postcondition guards.
+
+Output uses a private `mkdtemp` directory with mode `0700` and an exclusively created, non-symlink `run.log` with mode `0600`. The content-free `launch-manifest.json` records `prepared` and, after successful process start, `process-started`; it explicitly keeps `taskComplete=false`. Neither status proves that a task ran or passed. The parent quits only after `Process.run()` succeeds; a launch failure keeps the parent running and shows its notice.
+
+Two focused launcher tests passed in the revised v2 run. The first compile attempt failed on an optional scene-ID expression; that expression was corrected without changing verification thresholds. Independent source review reported no critical findings. The full suite is still in progress at this checkpoint, and the new source's signed build, installation and actual helper launch-context verification remain pending. The positive normal-process AX registration described above belongs to historical installed `3ddfa73`, not this unverified launcher revision.
+
+## App-owned developer launcher
+
+The normal app and status menus now include **Developer → Check public screen guidance…**. This explicit action starts only the same canonical executable with the existing `--guidance-manual-task-acceptance` mode. That child creates its isolated acceptance model before loading ordinary user state. The launcher performs no capture, activation, desktop input, microphone work or provider request itself; the unchanged helper must satisfy all existing fixture, freshness, lifetime and postcondition gates.
+
+The launcher checks the exact bundle ID and both canonical and resolved bundle/executable paths. It refuses busy/listening/pending-speech states, a current guidance request, visible editor/explanation surfaces and an unsent draft. A private `mkdtemp` directory has mode 0700; `run.log` is created exclusively with mode 0600 and no symlink following. A content-free launch manifest records source/path/process identity and explicitly retains `taskComplete=false`. `process-started` means only that `Process.run` succeeded.
+
+The parent retains the child process and terminates only after successful launch. A setup or launch failure leaves the normal app running with a notice. The child inherits its standard-output descriptors before the parent's copies close. Manifest-update failure after a successful start cannot be mistaken for a failed launch. Acceptance-mode menus omit this developer command to prevent recursive test launches.
+
+The first focused compile exposed an optional-scene access error in the menu guard; it was corrected before installation. The corrected focused run passed two launch-policy tests. The full suite then passed **747 tests: 675 app tests across 81 suites, 21 store tests and 51 core tests**. Independent read-only review found no remaining critical issue. The initial and corrected focused logs and full-suite log remain private under `/tmp/opencompanion-guidance-launcher-*-2026-11-06.log`. No signed new-source installation, app-launched helper trust or full-task result is established yet.
+
 ## Remaining acceptance
 
-An explicit normal-app menu path for launching the same isolated helper is being implemented to test the differing launch contexts. No new-source build or runtime pass is claimed. A fresh task run must establish its own AX trust and satisfy the unchanged mark, input, capture and independent postcondition checks; prior receipts remain preserved. Even a passing fixture run would establish only this bounded workflow. It would not prove unfamiliar-app reliability, physical speech input, acoustic timing, displayed desktop pixels or exact reference choreography.
+A fresh task run through the explicit normal-app launcher must establish its own AX trust and satisfy the unchanged mark, input, capture and independent postcondition checks; prior receipts remain preserved. No new-source build or runtime pass is claimed. Even a passing fixture run would establish only this bounded workflow. It would not prove unfamiliar-app reliability, physical speech input, acoustic timing, displayed desktop pixels or exact reference choreography.
 
 The implementation still uses **six steps**, a **180-second request lifetime** and a **45-second marked-target lifetime**; the helper also keeps its original 120-second active deadline. A resumable **15-step** walkthrough with a completed-step record, slow-page/network loading handling and a verified final result remains a substantial gap. See the [whole-product guidance gate](HEYCLICKY-PUBLIC-FEATURES.md#proposed-acceptance-checklist-for-the-whole-parity-goal). All 21 gates remain open.

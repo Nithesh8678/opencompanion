@@ -1,4 +1,5 @@
 import CompanionCore
+import Foundation
 import Testing
 
 @testable import OpenCompanion
@@ -117,6 +118,92 @@ struct ButterflyLifecycleOracleTests {
         .contains("butterfly-segmented-larva"))
   }
 
+  @Test func substantialLobedExtrusionsUseActualRoundedMaterialAndAnAttachedHead() throws {
+    let orientation = Transform3D(
+      position: .init(x: 3, y: -2, z: 1),
+      rotationDegrees: .init(x: 31, y: -42, z: 68),
+      scale: .init(x: 1.15, y: 0.95, z: 1.05))
+    for transform in [Transform3D.identity, orientation] {
+      for rounding in [0.0, 0.15, 0.25] {
+        for reverse in [false, true] {
+          let points = reverse ? Array(lobedBody.reversed()) : lobedBody
+          let document = try extrudedLarva(
+            points, rounding: rounding, transform: transform)
+          let unmet = ButterflyLifecycleOracle.unmetChecks(document: document)
+          #expect(!unmet.contains("butterfly-segmented-larva"))
+        }
+      }
+    }
+  }
+
+  @Test func smoothOrVertexPaddedExtrusionsDoNotSupplyBodySegments() throws {
+    let rectangle: [Point2D] = [
+      .init(x: -0.7, y: -0.16), .init(x: -0.7, y: 0.2),
+      .init(x: 0.7, y: 0.2), .init(x: 0.7, y: -0.16),
+    ]
+    let padded: [Point2D] = [
+      .init(x: -0.7, y: -0.16), .init(x: -0.7, y: 0.2),
+      .init(x: -0.4, y: 0.2), .init(x: -0.1, y: 0.2),
+      .init(x: 0.2, y: 0.2), .init(x: 0.5, y: 0.2),
+      .init(x: 0.7, y: 0.2), .init(x: 0.7, y: -0.16),
+    ]
+    let oval: [Point2D] = (0..<24).map { index in
+      let angle = Double(index) * .pi / 12
+      return .init(x: cos(angle) * 0.7, y: sin(angle) * 0.18)
+    }
+    let tinyWiggles: [Point2D] = [
+      .init(x: -0.7, y: -0.16), .init(x: -0.7, y: 0.16),
+      .init(x: -0.55, y: 0.165), .init(x: -0.4, y: 0.16),
+      .init(x: -0.25, y: 0.165), .init(x: -0.1, y: 0.16),
+      .init(x: 0.05, y: 0.165), .init(x: 0.2, y: 0.16),
+      .init(x: 0.35, y: 0.165), .init(x: 0.5, y: 0.16),
+      .init(x: 0.7, y: 0.16), .init(x: 0.7, y: -0.16),
+    ]
+    for points in [rectangle, padded, oval, tinyWiggles] {
+      let document = try extrudedLarva(points, rounding: 0.15)
+      let unmet = ButterflyLifecycleOracle.unmetChecks(document: document)
+      #expect(unmet.contains("butterfly-segmented-larva"))
+    }
+  }
+
+  @Test func lobesNeedSubstantiveDepthAndACoherentHeadAtOneEnd() throws {
+    for item in [
+      (0.008, Vector3D(x: 0.73, y: 0, z: 0), 0.2),
+      (0.3, Vector3D(x: 1.4, y: 0, z: 0), 0.2),
+      (0.3, Vector3D(x: 0, y: 0.5, z: 0), 0.2),
+      (0.3, Vector3D(x: 0.73, y: 0, z: 0), 0.025),
+      (0.3, Vector3D(x: 0.73, y: 0, z: 0), 0.5),
+    ] {
+      let document = try extrudedLarva(
+        lobedBody, depth: item.0, headPosition: item.1, headRadius: item.2)
+      let unmet = ButterflyLifecycleOracle.unmetChecks(document: document)
+      #expect(unmet.contains("butterfly-segmented-larva"))
+    }
+    var missing = try extrudedLarva(lobedBody)
+    missing.nodes.removeAll { $0.id == "separate-end" }
+    let missingUnmet = ButterflyLifecycleOracle.unmetChecks(document: missing)
+    #expect(missingUnmet.contains("butterfly-segmented-larva"))
+  }
+
+  @Test func separateScallopedFeetCannotMakeASmoothBodySegmented() throws {
+    let footStrip: [Point2D] = [
+      .init(x: -0.6, y: 0.04), .init(x: 0.6, y: 0.04),
+      .init(x: 0.6, y: -0.13), .init(x: 0.48, y: -0.13),
+      .init(x: 0.36, y: 0), .init(x: 0.24, y: -0.13),
+      .init(x: 0.12, y: -0.13), .init(x: 0, y: 0),
+      .init(x: -0.12, y: -0.13), .init(x: -0.24, y: -0.13),
+      .init(x: -0.36, y: 0), .init(x: -0.48, y: -0.13),
+      .init(x: -0.6, y: -0.13),
+    ]
+    var document = try extrudedLarva(footStrip, depth: 0.15)
+    document.nodes.append(
+      mesh(
+        "smooth-mass", .capsule(radius: 0.2, height: 1.4), parent: "stage-1",
+        position: .init(x: 0, y: 0.18, z: 0), rotation: .init(x: 0, y: 0, z: 90)))
+    let unmet = ButterflyLifecycleOracle.unmetChecks(document: try document.validated())
+    #expect(unmet.contains("butterfly-segmented-larva"))
+  }
+
   @Test func stagesMustBeDistinctAndProgressionMustBeVisible() throws {
     var overlapping = try lesson()
     for index in overlapping.nodes.indices where overlapping.nodes[index].kind == .group {
@@ -189,6 +276,36 @@ struct ButterflyLifecycleOracleTests {
     document.nodes[egg].text = "1. Egg laid by an adult"
     document.nodes[adult].text = "4. Adult butterfly lays eggs"
     #expect(ButterflyLifecycleOracle.unmetChecks(document: try document.validated()).isEmpty)
+  }
+
+  private var lobedBody: [Point2D] {
+    [
+      .init(x: -0.72, y: -0.16), .init(x: -0.72, y: 0.06),
+      .init(x: -0.58, y: 0.22), .init(x: -0.44, y: 0.1),
+      .init(x: -0.28, y: 0.22), .init(x: -0.14, y: 0.1),
+      .init(x: 0.02, y: 0.22), .init(x: 0.16, y: 0.1),
+      .init(x: 0.32, y: 0.22), .init(x: 0.46, y: 0.1),
+      .init(x: 0.6, y: 0.17), .init(x: 0.7, y: 0.04),
+      .init(x: 0.7, y: -0.16),
+    ]
+  }
+
+  private func extrudedLarva(
+    _ profile: [Point2D], rounding: Double = 0.15, depth: Double = 0.3,
+    headPosition: Vector3D = .init(x: 0.73, y: 0, z: 0), headRadius: Double = 0.2,
+    transform: Transform3D = .identity
+  ) throws -> SceneDocument {
+    var document = try lesson(transform: transform)
+    document.nodes.removeAll { $0.parentID == "stage-1" }
+    document.nodes += [
+      mesh(
+        "piece-b", .extrusion(profile: profile, depth: depth, cornerRounding: rounding),
+        parent: "stage-1"),
+      mesh(
+        "separate-end", .sphere(radius: headRadius), parent: "stage-1",
+        position: headPosition),
+    ]
+    return try document.validated()
   }
 
   private func lesson(grouped: Bool = true, transform: Transform3D = .identity) throws

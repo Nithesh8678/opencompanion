@@ -171,6 +171,7 @@ enum ButterflyLifecycleOracle {
     // A single turned surface may express actual repeated body lobes, unlike
     // a smooth capsule with a caterpillar label.
     for part in parts {
+      if extrudedLarva(part, parts: parts) { return true }
       if case .lathe(let profile, _) = part.geometry, profile.count >= 7 {
         var peaks = 0
         for i in 1..<(profile.count - 1) {
@@ -217,6 +218,139 @@ enum ButterflyLifecycleOracle {
       }
     }
     return true
+  }
+
+  private struct LongitudinalSection {
+    let position: Double
+    let thickness: Double
+  }
+
+  /// A lobed, substantial body can be one continuous extrusion. Measure its
+  /// actual rounded material, not the source vertex count or separate feet.
+  /// This is bounded shape coverage for the public case, not classification.
+  private static func extrudedLarva(_ body: Part, parts: [Part]) -> Bool {
+    guard case .extrusion(let source, let depth, let rounding) = body.geometry,
+      let contour = try? SpatialProfile3D.extrusionContour(source, cornerRounding: rounding)
+    else { return false }
+    func world(_ point: Vector3D) -> SIMD3<Double> {
+      let value = body.pose.transform.applying(to: point)
+      return .init(value.x, value.y, value.z)
+    }
+    let origin = world(.zero)
+    let x = world(.init(x: 1, y: 0, z: 0)) - origin
+    let y = world(.init(x: 0, y: 1, z: 0)) - origin
+    let z = world(.init(x: 0, y: 0, z: 1)) - origin
+    let normal = simd_normalize(simd_cross(x, y))
+    let u = simd_normalize(x)
+    let v = simd_cross(normal, u)
+    let planar: [Point2D] = contour.map { point in
+      let offset = world(.init(x: point.x, y: point.y, z: 0)) - origin
+      return .init(x: simd_dot(offset, u), y: simd_dot(offset, v))
+    }
+    // Area moments make the longitudinal axis independent of winding and
+    // collinear vertex padding, including transformed/nonuniform profiles.
+    var area = 0.0
+    var firstX = 0.0
+    var firstY = 0.0
+    var secondX = 0.0
+    var secondY = 0.0
+    var mixed = 0.0
+    for index in planar.indices {
+      let a = planar[index]
+      let b = planar[(index + 1) % planar.count]
+      let cross = a.x * b.y - b.x * a.y
+      area += cross
+      firstX += (a.x + b.x) * cross
+      firstY += (a.y + b.y) * cross
+      secondX += (a.x * a.x + a.x * b.x + b.x * b.x) * cross
+      secondY += (a.y * a.y + a.y * b.y + b.y * b.y) * cross
+      mixed += (2 * a.x * a.y + a.x * b.y + b.x * a.y + 2 * b.x * b.y) * cross
+    }
+    guard abs(area) > 1e-12 else { return false }
+    let centerX = firstX / (3 * area)
+    let centerY = firstY / (3 * area)
+    let varianceX = secondX / (6 * area) - centerX * centerX
+    let varianceY = secondY / (6 * area) - centerY * centerY
+    let covariance = mixed / (12 * area) - centerX * centerY
+    let angle = atan2(2 * covariance, varianceX - varianceY) / 2
+    let cosine = cos(angle)
+    let sine = sin(angle)
+    let profile: [Point2D] = planar.map {
+      .init(x: $0.x * cosine + $0.y * sine, y: -$0.x * sine + $0.y * cosine)
+    }
+    let xs: [Double] = profile.map(\.x)
+    let ys: [Double] = profile.map(\.y)
+    guard let low = xs.min(), let high = xs.max(), let bottom = ys.min(), let top = ys.max()
+    else { return false }
+    let length = high - low
+    let thickness = top - bottom
+    let solidDepth = depth * abs(simd_dot(z, normal))
+    guard length >= thickness * 2.5, thickness > 0,
+      solidDepth >= thickness * 0.5, solidDepth <= thickness * 2
+    else { return false }
+    var sections: [LongitudinalSection] = []
+    // A fixed grid bounds work at 129 × 160 edges and avoids accepting an
+    // arbitrarily narrow notch merely because a source vertex names it.
+    for index in 0...128 {
+      let fraction = 0.025 + 0.95 * Double(index) / 128
+      let position = low + length * fraction
+      var intersections: [Double] = []
+      for edge in profile.indices {
+        let a = profile[edge]
+        let b = profile[(edge + 1) % profile.count]
+        if (a.x <= position && position < b.x) || (b.x <= position && position < a.x) {
+          intersections.append(a.y + (b.y - a.y) * (position - a.x) / (b.x - a.x))
+        }
+      }
+      guard intersections.count == 2 else { return false }
+      let width = abs(intersections[0] - intersections[1])
+      if (0.15...0.85).contains(fraction), width < thickness * 0.55 { return false }
+      sections.append(.init(position: position, thickness: width))
+    }
+    var valleys = [0]
+    var peaks: [Int] = []
+    for index in 1..<128 {
+      let previous = sections[index - 1].thickness
+      let current = sections[index].thickness
+      let next = sections[index + 1].thickness
+      if current > previous && current >= next { peaks.append(index) }
+      if current < previous && current <= next { valleys.append(index) }
+    }
+    valleys.append(128)
+    var substantial: [Double] = []
+    for peak in peaks {
+      guard let before = valleys.last(where: { $0 < peak }),
+        let after = valleys.first(where: { $0 > peak })
+      else { continue }
+      let prominence =
+        sections[peak].thickness
+        - max(sections[before].thickness, sections[after].thickness)
+      let support = sections[after].position - sections[before].position
+      let position = sections[peak].position
+      if prominence >= thickness * 0.1, support >= thickness * 0.45,
+        substantial.last.map({ position - $0 >= thickness * 0.5 }) ?? true
+      {
+        substantial.append(position)
+      }
+    }
+    guard substantial.count >= 3, let first = substantial.first, let last = substantial.last,
+      last - first >= length * 0.4
+    else { return false }
+    let axis = u * cosine + v * sine
+    let transverse = -u * sine + v * cosine
+    let middle = origin + transverse * ((bottom + top) / 2)
+    return parts.contains { head in
+      let sizes = head.orderedLengths
+      guard head.pose.node.id != body.pose.node.id, head.rounded,
+        sizes[2] <= sizes[0] * 1.8,
+        sizes[0] * 2 >= thickness * 0.5, sizes[2] * 2 <= thickness * 1.8
+      else { return false }
+      let offset = head.center - middle
+      let along = simd_dot(offset, axis)
+      let across = simd_length(offset - axis * along)
+      return min(abs(along - low), abs(along - high)) <= head.radius * 1.15
+        && across <= thickness * 0.5
+    }
   }
 
   private static func pupa(_ parts: [Part]) -> Bool {

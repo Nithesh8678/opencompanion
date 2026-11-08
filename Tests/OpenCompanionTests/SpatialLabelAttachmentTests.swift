@@ -205,6 +205,102 @@ import Testing
     }
   }
 
+  @Test func verifiedSurfacesKeepTheirExactPointAndZeroRaysAcrossReadinessOnlyEdges() throws {
+    _ = NSApplication.shared
+    let fixture = Harness(frontCamera: true)
+    try fixture.add("target", geometry: .sphere(radius: 0.5))
+    let panel = NSPanel(
+      contentRect: fixture.stage.frame, styleMask: [.borderless, .nonactivatingPanel],
+      backing: .buffered, defer: false)
+    panel.isReleasedWhenClosed = false
+    panel.ignoresMouseEvents = true
+    panel.sharingType = .none
+    panel.contentView = fixture.stage
+    defer {
+      panel.orderOut(nil)
+      panel.contentView = nil
+      panel.close()
+    }
+    let initial = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+    #expect(initial.isResolved)
+    let world = try #require(initial.resolvedWorld)
+    let total = fixture.resolver.diagnostics.totalRayTests
+    for visible in [true, false, true] {
+      let changes = fixture.resolver.diagnostics.contextChanges
+      if visible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
+      #expect(panel.isVisible == visible && !panel.isKeyWindow)
+      #expect(
+        fixture.resolver.isCurrentContext(
+          documentID: "surface-fixture", generation: 1, stage: fixture.stage, nodes: fixture.nodes,
+          effectiveOpacities: fixture.opacity))
+      // This is the one-shot readiness action used by the native display frame.
+      fixture.resolver.invalidateTransientMisses()
+      let result = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+      #expect(fixture.resolver.diagnostics.contextChanges == changes + 1)
+      #expect(result.isResolved && result.reusedCachedSurface && result.rayTests == 0)
+      #expect(result.resolvedWorld == world)
+      #expect(fixture.resolver.diagnostics.totalRayTests == total)
+      #expect(!fixture.resolver.hasPendingWork)
+    }
+    for hidden in [true, false] {
+      fixture.stage.isHidden = hidden
+      let result = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+      #expect(result.isResolved && result.reusedCachedSurface && result.rayTests == 0)
+      #expect(result.resolvedWorld == world)
+      #expect(fixture.resolver.diagnostics.totalRayTests == total)
+    }
+  }
+
+  @Test func actualStageAndWindowReplacementCannotBorrowVerifiedSurfaceAuthority() throws {
+    let fixture = Harness(frontCamera: true)
+    try fixture.add("target", geometry: .sphere(radius: 0.5))
+    let first = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+    #expect(first.isResolved)
+    let stage = SCNView(frame: fixture.stage.bounds)
+    stage.scene = fixture.scene
+    stage.pointOfView = fixture.camera
+    #expect(
+      !fixture.resolver.isCurrentContext(
+        documentID: "surface-fixture", generation: 1, stage: stage, nodes: fixture.nodes,
+        effectiveOpacities: fixture.opacity))
+    let requests: [SpatialLabelAttachmentResolver.Request] = [
+      .init(labelID: "label", anchor: .init(targetID: "target"))
+    ]
+    let reboundResults = fixture.resolver.resolve(
+      requests, documentID: "surface-fixture", generation: 1, stage: stage,
+      nodes: fixture.nodes, geometries: fixture.geometries, effectiveOpacities: fixture.opacity)
+    let rebound = try #require(reboundResults["label"])
+    // The previous local candidate may be reused after a fresh whole-scene ray;
+    // only borrowing a zero-ray proof from a replaced stage/window is forbidden.
+    #expect(rebound.isResolved && rebound.rayTests > 0 && rebound.rayTests <= 33)
+    #expect(
+      fixture.resolver.isCurrentContext(
+        documentID: "surface-fixture", generation: 1, stage: stage, nodes: fixture.nodes,
+        effectiveOpacities: fixture.opacity))
+    let panel = NSPanel(
+      contentRect: stage.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered,
+      defer: false)
+    panel.isReleasedWhenClosed = false
+    panel.contentView = stage
+    defer {
+      panel.contentView = nil
+      panel.close()
+    }
+    #expect(
+      !fixture.resolver.isCurrentContext(
+        documentID: "surface-fixture", generation: 1, stage: stage, nodes: fixture.nodes,
+        effectiveOpacities: fixture.opacity))
+    let boundResults = fixture.resolver.resolve(
+      requests, documentID: "surface-fixture", generation: 1, stage: stage,
+      nodes: fixture.nodes, geometries: fixture.geometries, effectiveOpacities: fixture.opacity)
+    let bound = try #require(boundResults["label"])
+    #expect(bound.isResolved && bound.rayTests > 0 && bound.rayTests <= 33)
+    #expect(
+      fixture.resolver.isCurrentContext(
+        documentID: "surface-fixture", generation: 1, stage: stage, nodes: fixture.nodes,
+        effectiveOpacities: fixture.opacity))
+  }
+
   @Test func removalGeometryReplacementAndNewGenerationInvalidateCachedOwnership() throws {
     let fixture = Harness()
     try fixture.add("target", geometry: .sphere(radius: 0.5))

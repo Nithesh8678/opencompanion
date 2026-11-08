@@ -82,6 +82,8 @@ struct ProviderInstructionSelectionTests {
       #expect(prompt.contains("recognisable topic silhouette"))
       #expect(prompt.contains("A smaller mesh count is not a quality goal"))
       #expect(prompt.contains("A head on one featureless tube still lacks segmentation"))
+      #expect(prompt.contains("a separate visible head joined to its body"))
+      #expect(prompt.contains("silently check every represented state"))
       #expect(!prompt.contains("one to three NEW physical parts"))
       #expect(prompt.contains("differentiated head/body regions, segmentation"))
       #expect(prompt.contains("not a fixed number"))

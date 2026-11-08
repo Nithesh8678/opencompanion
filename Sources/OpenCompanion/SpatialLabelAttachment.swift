@@ -57,6 +57,7 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
   private struct Context: Equatable {
     let documentID: String
     let generation: UInt64
+    let stage: ObjectIdentifier
     let viewport: CGRect
     let window: ObjectIdentifier?
     let windowVisible: Bool
@@ -66,6 +67,16 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
     let cameraMatrix: [Float]
     let lens: [Double]
     let nodes: [NodeStamp]
+
+    /// Visibility is query readiness, not a change to a verified triangle's
+    /// ownership or projected position. Native stage/window replacement and
+    /// every scene/camera mutation still invalidate that surface authority.
+    func hasSameSurfaceAuthority(as other: Self) -> Bool {
+      documentID == other.documentID && generation == other.generation
+        && stage == other.stage && viewport == other.viewport && window == other.window
+        && camera == other.camera && cameraMatrix == other.cameraMatrix
+        && lens == other.lens && nodes == other.nodes
+    }
   }
   private struct Entry {
     let anchor: LabelAnchor3D
@@ -156,8 +167,14 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
       entries.removeAll(keepingCapacity: true)
     }
     if context != stamp {
+      if let prior = context, prior.hasSameSurfaceAuthority(as: stamp) {
+        // Recheck early misses on a readiness edge, but retain exact verified
+        // surfaces. Rotating their token would add a ray and numerical drift.
+        invalidateTransientMisses()
+      } else {
+        contextToken = UUID()
+      }
       context = stamp
-      contextToken = UUID()
       contextChanges = min(1_000_000, contextChanges + 1)
     }
     // Preserve fair service even when an animated camera/part changes the
@@ -213,16 +230,19 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
     return result
   }
 
-  /// Cached attachments may be borrowed only under the exact native context
-  /// which verified them. This performs no triangle queries or cache mutation.
+  /// Verified surfaces may be borrowed only under unchanged native surface
+  /// authority. Callers separately gate actual presentation visibility. A
+  /// readiness-only edge invalidates misses when resolving, not these proofs.
+  /// This performs no triangle queries or cache mutation.
   func isCurrentContext(
     documentID: String, generation: UInt64, stage: SCNView,
     nodes: [String: SCNNode], effectiveOpacities: [String: Double]
   ) -> Bool {
-    context
-      == makeContext(
+    guard let context else { return false }
+    return context.hasSameSurfaceAuthority(
+      as: makeContext(
         documentID: documentID, generation: generation, stage: stage,
-        nodes: nodes, effectiveOpacities: effectiveOpacities)
+        nodes: nodes, effectiveOpacities: effectiveOpacities))
   }
 
   private func resolveOne(
@@ -401,7 +421,8 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
     let camera = stage.pointOfView
     let lens = camera?.camera
     return .init(
-      documentID: documentID, generation: generation, viewport: stage.bounds,
+      documentID: documentID, generation: generation, stage: ObjectIdentifier(stage),
+      viewport: stage.bounds,
       window: stage.window.map(ObjectIdentifier.init),
       windowVisible: stage.window?.isVisible == true,
       windowOcclusionVisible: stage.window?.occlusionState.contains(.visible) == true,

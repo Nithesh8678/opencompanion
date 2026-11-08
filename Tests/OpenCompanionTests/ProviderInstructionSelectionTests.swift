@@ -12,7 +12,10 @@ struct ProviderInstructionSelectionTests {
       #expect(prompt.contains("exactly ONE meaningful physical mesh"))
       #expect(prompt.contains("only a minimal assembly group if needed"))
       #expect(prompt.contains("Defer anchored labels, animations and connectors to the second"))
-      #expect(prompt.contains("Omit identity transforms and all unused optional or default fields"))
+      #expect(prompt.contains("Omit whole identity transforms, whole optional identity vectors"))
+      #expect(prompt.contains("never omit individual components from a present vector"))
+      #expect(prompt.contains("Every present 3D vector must contain x, y and z"))
+      #expect(prompt.contains("Keep one stable overall lesson title"))
       #expect(prompt.contains("First-scene narration must contain at most 12 words"))
       #expect(prompt.contains("never use an empty group, decorative shape or placeholder"))
       #expect(prompt.contains("Complete useful anchored labels and all requested parts"))
@@ -28,6 +31,36 @@ struct ProviderInstructionSelectionTests {
     ] {
       #expect(!prompt.contains("First-scene narration must contain at most 12 words"))
       #expect(!prompt.contains("Defer anchored labels, animations and connectors to the second"))
+    }
+  }
+
+  @Test func documentedCompactTransformRetainsEveryRequiredVectorComponent() throws {
+    let policy = ResponsePolicy(route: .notebook, includesExistingNotebook: false)
+    for prompt in [
+      ReasoningProvider.baseInstructions(for: policy),
+      ReasoningProvider.baseInstructions(for: policy, sceneStart: .geometryFirst),
+      ReasoningProvider.standaloneStructuredSceneInstructions(for: policy),
+    ] {
+      let marker = "Compact transform example: "
+      let line = try #require(
+        prompt.split(separator: "\n").map(String.init).first { $0.hasPrefix(marker) })
+      let data = Data(line.dropFirst(marker.count).utf8)
+      let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+      for key in ["position", "rotationDegrees", "scale"] {
+        if let vector = object[key] as? [String: Any] {
+          #expect(Set(vector.keys) == ["x", "y", "z"])
+        }
+      }
+      let transform = try JSONDecoder().decode(Transform3D.self, from: data)
+      #expect(transform.position == .zero && transform.scale == .one)
+      #expect(transform.rotationDegrees == .init(x: 90, y: 0, z: 0))
+    }
+    // Compact output cannot silently change the native vector contract.
+    for key in ["position", "rotationDegrees", "scale"] {
+      let incomplete = Data("{\"\(key)\":{\"x\":90}}".utf8)
+      #expect(throws: DecodingError.self) {
+        try JSONDecoder().decode(Transform3D.self, from: incomplete)
+      }
     }
   }
 

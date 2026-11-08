@@ -68,7 +68,7 @@ struct ProviderInstructionSelectionTests {
     let policy = ResponsePolicy(route: .notebook, includesExistingNotebook: false)
     let guidelines = ReasoningProvider.spatialVisualQualityGuidelines
     // Keep this shared design guidance concise; protocol details live separately.
-    #expect(guidelines.utf8.count <= 3_000)
+    #expect(guidelines.utf8.count <= 4_000)
     for prompt in [
       ReasoningProvider.baseInstructions(for: policy),
       ReasoningProvider.baseInstructions(for: policy, sceneStart: .geometryFirst),
@@ -77,6 +77,15 @@ struct ProviderInstructionSelectionTests {
     ] {
       #expect(prompt.components(separatedBy: guidelines).count == 2)
       #expect(prompt.contains("recognisable topic silhouette"))
+      #expect(prompt.contains("A smaller mesh count is not a quality goal"))
+      #expect(prompt.contains("A head on one featureless tube still lacks segmentation"))
+      #expect(prompt.contains("up to eight related new meshes"))
+      #expect(!prompt.contains("one to three NEW physical parts"))
+      #expect(prompt.contains("differentiated head/body regions, segmentation"))
+      #expect(prompt.contains("not a fixed number"))
+      #expect(prompt.contains("including the return transition for a cycle"))
+      #expect(prompt.contains("static rod connectors alone do not show direction"))
+      #expect(!prompt.lowercased().contains("butterfly"))
       #expect(prompt.contains("connected parts meet"))
       #expect(prompt.contains("2–4 color hierarchy"))
       #expect(prompt.contains("simplified illustrative model"))

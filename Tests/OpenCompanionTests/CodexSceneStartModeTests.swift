@@ -9,7 +9,7 @@ struct CodexSceneStartModeTests {
     // Conversation retains the pre-ablation 969c49b bytes. Guidance includes
     // bounded workflow assessments and visible checkbox hit-area grounding. Notebook
     // snapshots intentionally include the richer native geometry vocabulary and
-    // shared visual-quality guidance. New NDJSON lessons also use the compact
+    // shared organic-form/process guidance. New NDJSON lessons also use the compact
     // first-mesh contract; retained edits and implicit intro-first stay distinct.
     let cases: [(ResponsePolicy, String)] = [
       (
@@ -22,11 +22,11 @@ struct CodexSceneStartModeTests {
       ),
       (
         .init(route: .notebook, includesExistingNotebook: false),
-        "88a7931b424e4612ef0bf8cfff2dd6a39daf8042386d456ea3f9747170225d3e"
+        "de4fec83c59bb4f8f290cb30571094ef013823831e1cedd6a37f5442139f8bf7"
       ),
       (
         .init(route: .notebook, includesExistingNotebook: true),
-        "4542184e288f03d178a040e8edfc6b8983785c1cc42d7a9d14bd3e0dee4b0ac7"
+        "573a3a0fc18e8da38d5c4abefcbcc2eade14b3862d4cbbb81d3a34d0c1a1cf42"
       ),
     ]
     for (policy, expected) in cases {

@@ -116,7 +116,7 @@ public enum Geometry3D: Equatable, Hashable, Sendable, Codable {
   case cone(topRadius: Double, bottomRadius: Double, height: Double, segments: Int = 32)
   case capsule(radius: Double, height: Double, segments: Int = 24)
   case lathe(profile: [LathePoint3D], segments: Int = 32)
-  case extrusion(profile: [Point2D], depth: Double)
+  case extrusion(profile: [Point2D], depth: Double, cornerRounding: Double = 0)
   case torus(ringRadius: Double, pipeRadius: Double, ringSegments: Int = 32, pipeSegments: Int = 12)
   case tube(
     innerRadius: Double, outerRadius: Double, height: Double, segments: Int = 32,
@@ -124,7 +124,7 @@ public enum Geometry3D: Equatable, Hashable, Sendable, Codable {
   private enum Keys: String, CodingKey {
     case type, width, height, depth, chamferRadius, radius, segments, ringRadius, pipeRadius,
       ringSegments, pipeSegments, innerRadius, outerRadius, startAngleDegrees, sweepAngleDegrees,
-      topRadius, bottomRadius, profile
+      topRadius, bottomRadius, profile, cornerRounding
   }
   private enum Tag: String, Codable {
     case box, sphere, cylinder, torus, tube, cone, capsule, lathe, extrusion
@@ -140,7 +140,7 @@ public enum Geometry3D: Equatable, Hashable, Sendable, Codable {
     case .cone: allowed = ["type", "topRadius", "bottomRadius", "height", "segments"]
     case .capsule: allowed = ["type", "radius", "height", "segments"]
     case .lathe: allowed = ["type", "profile", "segments"]
-    case .extrusion: allowed = ["type", "profile", "depth"]
+    case .extrusion: allowed = ["type", "profile", "depth", "cornerRounding"]
     case .torus: allowed = ["type", "ringRadius", "pipeRadius", "ringSegments", "pipeSegments"]
     case .tube:
       allowed = [
@@ -183,7 +183,8 @@ public enum Geometry3D: Equatable, Hashable, Sendable, Codable {
     case .extrusion:
       self = .extrusion(
         profile: try Self.decodeProfile(Point2D.self, from: c, keys: ["x", "y"]),
-        depth: try c.decode(Double.self, forKey: .depth))
+        depth: try c.decode(Double.self, forKey: .depth),
+        cornerRounding: try c.decodeIfPresent(Double.self, forKey: .cornerRounding) ?? 0)
     case .torus:
       self = .torus(
         ringRadius: try c.decode(Double.self, forKey: .ringRadius),
@@ -233,10 +234,11 @@ public enum Geometry3D: Equatable, Hashable, Sendable, Codable {
       try c.encode(Tag.lathe, forKey: .type)
       try c.encode(profile, forKey: .profile)
       try c.encode(segments, forKey: .segments)
-    case .extrusion(let profile, let depth):
+    case .extrusion(let profile, let depth, let rounding):
       try c.encode(Tag.extrusion, forKey: .type)
       try c.encode(profile, forKey: .profile)
       try c.encode(depth, forKey: .depth)
+      if rounding != 0 { try c.encode(rounding, forKey: .cornerRounding) }
     case .torus(let r, let p, let s, let t):
       try c.encode(Tag.torus, forKey: .type)
       try c.encode(r, forKey: .ringRadius)
@@ -297,13 +299,17 @@ public enum Geometry3D: Equatable, Hashable, Sendable, Codable {
       let contour = try SpatialProfile3D.latheContour(
         profile, maximumDimension: limits.maximumSpatialDimension)
       cost = .init(vertices: 4 * s * contour.count, triangles: 2 * s * contour.count)
-    case .extrusion(let profile, let depth):
+    case .extrusion(let profile, let depth, let rounding):
       guard dimension(depth) else { throw invalid() }
+      let contour = try SpatialProfile3D.extrusionContour(
+        profile, cornerRounding: rounding, maximumDimension: limits.maximumSpatialDimension)
       let triangles = try SpatialProfile3D.triangulation(
-        profile, maximumDimension: limits.maximumSpatialDimension)
+        contour, maximumDimension: limits.maximumSpatialDimension,
+        maximumPoints: SpatialProfile3D.maximumExpandedPoints,
+        minimumEdgeLength: rounding == 0 ? 0.001 : 0, preserveBoundary: rounding > 0)
       cost = .init(
-        vertices: 4 * profile.count + 2 * triangles.count,
-        triangles: 2 * profile.count + 2 * triangles.count / 3)
+        vertices: 4 * contour.count + 2 * triangles.count,
+        triangles: 2 * contour.count + 2 * triangles.count / 3)
     case .torus(let r, let p, let s, let t):
       guard dimension(r, p), r > p, r + p <= limits.maximumSpatialDimension, segments(s, t) else {
         throw invalid()
@@ -338,7 +344,7 @@ public enum Geometry3D: Equatable, Hashable, Sendable, Codable {
       return .init(
         x: profile.map(\.radius).max() ?? 0, y: profile.map { abs($0.y) }.max() ?? 0,
         z: profile.map(\.radius).max() ?? 0)
-    case .extrusion(let profile, let depth):
+    case .extrusion(let profile, let depth, _):
       return .init(
         x: profile.map { abs($0.x) }.max() ?? 0, y: profile.map { abs($0.y) }.max() ?? 0,
         z: depth / 2)

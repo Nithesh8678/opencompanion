@@ -21,6 +21,36 @@ extension NSColor {
   }
 }
 
+/// Read-only CoreText layout of the actual retained native label. Complete
+/// UTF-16 coverage proves layout capacity, not OCR or physical scanout pixels.
+struct SpatialLabelGlyphLayout: Sendable, Equatable {
+  let utf16Count: Int
+  let visibleUTF16Location: Int
+  let visibleUTF16Count: Int
+  var isComplete: Bool {
+    utf16Count > 0 && visibleUTF16Location == 0 && visibleUTF16Count == utf16Count
+  }
+
+  @MainActor static func measure(text: String, font: NSFont, bounds: CGRect)
+    -> SpatialLabelGlyphLayout?
+  {
+    guard !text.isEmpty, text.utf8.prefix(32_001).count <= 32_000,
+      bounds.origin.x.isFinite, bounds.origin.y.isFinite,
+      bounds.size.width.isFinite, bounds.size.height.isFinite,
+      bounds.size.width > 0, bounds.size.height > 0,
+      bounds.size.width <= 100_000, bounds.size.height <= 100_000
+    else { return nil }
+    let attributed = NSAttributedString(string: text, attributes: [.font: font])
+    let framesetter = CTFramesetterCreateWithAttributedString(attributed)
+    let frame = CTFramesetterCreateFrame(
+      framesetter, CFRange(location: 0, length: 0), CGPath(rect: bounds, transform: nil), nil)
+    let visible = CTFrameGetVisibleStringRange(frame)
+    return .init(
+      utf16Count: text.utf16.count, visibleUTF16Location: visible.location,
+      visibleUTF16Count: visible.length)
+  }
+}
+
 enum CanvasPresentation: Sendable, Equatable {
   case editor
   case passiveOverlay
@@ -150,6 +180,14 @@ struct SceneCanvas: NSViewRepresentable {
   private var lastSceneFocusProjection: SceneFocusProjection?
   private var focusAwaitingVisibleFade = false
   private var focusReconciliationPending = false
+  private var visibilityReconciliationPending = false
+  private struct VisibilityKey: Equatable {
+    let window: ObjectIdentifier?
+    let visible: Bool
+    let unoccluded: Bool
+    let hidden: Bool
+  }
+  private var lastVisibilityKey: VisibilityKey?
   private var focusAppearanceRetryUntil: TimeInterval?
   private(set) var renderSubmissionSerial: UInt64 = 0
   var onSceneFocusProjectionChanged: ((SceneFocusProjection?) -> Void)?
@@ -360,6 +398,12 @@ struct SceneCanvas: NSViewRepresentable {
     visibilityChanged()
   }
   private func visibilityChanged() {
+    let key = VisibilityKey(
+      window: window.map(ObjectIdentifier.init), visible: window?.isVisible == true,
+      unoccluded: window?.occlusionState.contains(.visible) == true,
+      hidden: isHiddenOrHasHiddenAncestor)
+    let changed = lastVisibilityKey != key
+    lastVisibilityKey = attachmentWorkEnabled ? key : nil
     if window?.isVisible != true || isHiddenOrHasHiddenAncestor {
       cancelOverlayCameraInteraction()
       clearSceneFocus()
@@ -368,6 +412,13 @@ struct SceneCanvas: NSViewRepresentable {
       nativePlaying && window?.isVisible == true && !isHiddenOrHasHiddenAncestor
         && !shouldReduceMotion,
       at: ProcessInfo.processInfo.systemUptime)
+    if !attachmentWorkEnabled || !key.visible || !key.unoccluded || key.hidden {
+      visibilityReconciliationPending = false
+    } else if changed {
+      // Consume native visibility on a display frame, after this notification
+      // unwinds. Multiple notifications coalesce; no retry timer is involved.
+      visibilityReconciliationPending = true
+    }
     updateDisplayLink()
   }
   func configureClock(
@@ -407,15 +458,16 @@ struct SceneCanvas: NSViewRepresentable {
   }
   private func updateDisplayLink() {
     let reduceMotion = shouldReduceMotion
-    if reduceMotion, labelReveal.hasRevealableText {
+    if reduceMotion, labelReveal.hasRevealableText, !visibilityReconciliationPending {
       advanceSpatialLabels(by: 0, reduceMotion: true)
     }
     guard
       nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork
-        || focusAwaitingVisibleFade || focusReconciliationPending,
+        || focusAwaitingVisibleFade || focusReconciliationPending
+        || visibilityReconciliationPending,
       let window, window.isVisible, !isHiddenOrHasHiddenAncestor,
       !reduceMotion || attachmentResolver.hasPendingWork || focusAwaitingVisibleFade
-        || focusReconciliationPending
+        || focusReconciliationPending || visibilityReconciliationPending
     else {
       nativeDisplayLink?.isPaused = true
       lastDisplayTime = nil
@@ -448,6 +500,8 @@ struct SceneCanvas: NSViewRepresentable {
     labelReveal.reset()
     attachmentResolver.reset()
     attachmentWorkEnabled = false
+    visibilityReconciliationPending = false
+    lastVisibilityKey = nil
     projectedLabelAttachments.removeAll(keepingCapacity: true)
     stage?.isPlaying = false
   }
@@ -458,10 +512,11 @@ struct SceneCanvas: NSViewRepresentable {
     guard sender === nativeDisplayLink else { return }
     guard
       nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork
-        || focusAwaitingVisibleFade || focusReconciliationPending,
+        || focusAwaitingVisibleFade || focusReconciliationPending
+        || visibilityReconciliationPending,
       !isHiddenOrHasHiddenAncestor, window?.isVisible == true,
       !shouldReduceMotion || attachmentResolver.hasPendingWork || focusAwaitingVisibleFade
-        || focusReconciliationPending
+        || focusReconciliationPending || visibilityReconciliationPending
     else {
       sender.isPaused = true
       lastDisplayTime = nil
@@ -475,13 +530,22 @@ struct SceneCanvas: NSViewRepresentable {
     // belongs to the next native frame, never a recursive resolver pass.
     let reconcileFocus = focusReconciliationPending
     focusReconciliationPending = false
+    let reconcileVisibility = visibilityReconciliationPending
+    visibilityReconciliationPending = false
+    if reconcileVisibility {
+      // A second mount refresh can already have queried the visible model
+      // context before SceneKit submitted a frame. Recheck those misses once
+      // on the visibility edge; settled misses remain cached thereafter.
+      attachmentResolver.invalidateTransientMisses()
+      focusResolver.invalidateTransientMisses()
+    }
     let labelChanged = labelReveal.advance(by: delta, reduceMotion: shouldReduceMotion)
     if labelChanged { displayLabelAdvanceCount = min(1_000_000, displayLabelAdvanceCount + 1) }
     if nativePlaying, !shouldReduceMotion, let time = try? clock?.value(at: now) {
       currentTime = time
       render(document, time: time, selectedID: selection)
     } else if labelChanged || attachmentResolver.hasPendingWork || focusAwaitingVisibleFade
-      || reconcileFocus
+      || reconcileFocus || reconcileVisibility
     {
       updateProjectedLabels()
     }
@@ -1222,6 +1286,14 @@ struct SceneCanvas: NSViewRepresentable {
     return layer.frame
   }
 
+  func projectedLabelGlyphLayout(id: String) -> SpatialLabelGlyphLayout? {
+    guard let label = nodeLayers[id] as? CATextLayer,
+      label.superlayer === spatialLabels, !label.isHidden,
+      let text = label.string as? String, let font = label.font as? NSFont
+    else { return nil }
+    return SpatialLabelGlyphLayout.measure(text: text, font: font, bounds: label.bounds)
+  }
+
   var projectedLabelFrames: [String: CGRect] {
     var frames: [String: CGRect] = [:]
     for (id, layer) in nodeLayers where layer.superlayer === spatialLabels && !layer.isHidden {
@@ -1662,9 +1734,11 @@ struct SceneCanvas: NSViewRepresentable {
   var hasPendingSpatialLabels: Bool { labelReveal.hasRevealableText }
   var needsDisplayClock: Bool {
     nativePlaying || labelReveal.hasRevealableText || attachmentResolver.hasPendingWork
-      || focusAwaitingVisibleFade || focusReconciliationPending
+      || focusAwaitingVisibleFade || focusReconciliationPending || visibilityReconciliationPending
   }
-  var hasPendingLabelAttachments: Bool { attachmentResolver.hasPendingWork }
+  var hasPendingLabelAttachments: Bool {
+    attachmentResolver.hasPendingWork || visibilityReconciliationPending
+  }
   func resolvePendingLabelAttachments() {
     guard attachmentResolver.hasPendingWork else { return }
     updateProjectedLabels()

@@ -51,8 +51,10 @@ enum Spatial3DGeometryFactory {
       return try revolved(
         SpatialProfile3D.latheContour(profile), segments: segments, budget: budget,
         smoothProfile: true)
-    case .extrusion(let profile, let depth):
-      return try extruded(profile, depth: depth, budget: budget)
+    case .extrusion(let profile, let depth, let rounding):
+      let contour = try SpatialProfile3D.extrusionContour(profile, cornerRounding: rounding)
+      return try extruded(
+        contour, depth: depth, budget: budget, minimumEdgeLength: rounding == 0 ? 0.001 : 0)
     case .torus(let ringRadius, let pipeRadius, let ringSegments, let pipeSegments):
       let result = SCNTorus(ringRadius: CGFloat(ringRadius), pipeRadius: CGFloat(pipeRadius))
       result.ringSegmentCount = ringSegments
@@ -121,12 +123,16 @@ enum Spatial3DGeometryFactory {
   }
 
   private static func extruded(
-    _ profile: [Point2D], depth: Double, budget: SpatialGeometryBudget
+    _ profile: [Point2D], depth: Double, budget: SpatialGeometryBudget, minimumEdgeLength: Double
   ) throws -> SCNGeometry {
-    let triangles = try SpatialProfile3D.triangulation(profile)
-    let area = try SpatialProfile3D.signedArea(of: profile)
+    let triangles = try SpatialProfile3D.triangulation(
+      profile, maximumPoints: SpatialProfile3D.maximumExpandedPoints,
+      minimumEdgeLength: minimumEdgeLength, preserveBoundary: minimumEdgeLength == 0)
+    let area = try SpatialProfile3D.signedArea(
+      of: profile, maximumPoints: SpatialProfile3D.maximumExpandedPoints,
+      minimumEdgeLength: minimumEdgeLength)
     let direction = area > 0 ? 1.0 : -1.0
-    var mesh = ProceduralMesh(budget: budget)
+    var mesh = ProceduralMesh(budget: budget, preserveSmallTriangles: minimumEdgeLength == 0)
     func point(_ index: Int, _ z: Double) -> SIMD3<Double> {
       .init(profile[index].x, profile[index].y, z)
     }
@@ -157,11 +163,13 @@ enum Spatial3DGeometryFactory {
 
   private struct ProceduralMesh {
     let budget: SpatialGeometryBudget
+    let preserveSmallTriangles: Bool
     var vertices: [SCNVector3] = []
     var normals: [SCNVector3] = []
     var indices: [UInt32] = []
-    init(budget: SpatialGeometryBudget) {
+    init(budget: SpatialGeometryBudget, preserveSmallTriangles: Bool = false) {
       self.budget = budget
+      self.preserveSmallTriangles = preserveSmallTriangles
       vertices.reserveCapacity(budget.vertices)
       normals.reserveCapacity(budget.vertices)
       indices.reserveCapacity(budget.triangles * 3)
@@ -183,7 +191,7 @@ enum Spatial3DGeometryFactory {
         let v = points[corners[2]] - points[corners[0]]
         let cross = SIMD3(u.y * v.z - u.z * v.y, u.z * v.x - u.x * v.z, u.x * v.y - u.y * v.x)
         let squared = cross.x * cross.x + cross.y * cross.y + cross.z * cross.z
-        guard squared > 1e-24 else { continue }
+        guard squared > (preserveSmallTriangles ? 0 : 1e-24) else { continue }
         let n = supplied[corners[0]] + supplied[corners[1]] + supplied[corners[2]]
         let dot = cross.x * n.x + cross.y * n.y + cross.z * n.z
         let ordered = dot >= 0 ? corners : [corners[0], corners[2], corners[1]]

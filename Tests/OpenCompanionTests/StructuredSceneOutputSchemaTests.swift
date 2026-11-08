@@ -67,6 +67,7 @@ struct StructuredSceneOutputSchemaTests {
       "capsule": ["type", "radius", "height", "segments"],
       "lathe": ["type", "profile", "segments"],
       "extrusion": ["type", "profile", "depth"],
+      "roundedExtrusion": ["type", "profile", "depth", "cornerRounding"],
       "torus": ["type", "ringRadius", "pipeRadius", "ringSegments", "pipeSegments"],
       "tube": [
         "type", "innerRadius", "outerRadius", "height", "segments", "startAngleDegrees",
@@ -95,6 +96,39 @@ struct StructuredSceneOutputSchemaTests {
       #expect(throws: (any Error).self) {
         _ = try JSONValue.object(mixed).decoded(as: Geometry3D.self)
       }
+    }
+  }
+
+  @Test(arguments: [false, true])
+  func roundedAndLinearExtrusionBranchesStayClosedDisjointAndShareNativeDefaults(unified: Bool)
+    throws
+  {
+    let definitions = try schemaDefinitions(
+      unified ? StructuredSceneOutputSchema.unifiedValue : StructuredSceneOutputSchema.value)
+    let linear = try #require(definitions["extrusion"])
+    let rounded = try #require(definitions["roundedExtrusion"])
+    let base = try json(
+      #"{"type":"extrusion","profile":[{"x":-1,"y":-1},{"x":1,"y":-1},{"x":1,"y":1},{"x":-1,"y":1}],"depth":0.4}"#
+    )
+    #expect(matches(base, schema: linear, definitions: definitions))
+    #expect(!matches(base, schema: rounded, definitions: definitions))
+    let ordinary = try base.decoded(as: Geometry3D.self)
+    for fraction in [0.0, 0.2] {
+      var fields = try object(base)
+      fields["cornerRounding"] = .number(fraction)
+      let value = JSONValue.object(fields)
+      #expect(!matches(value, schema: linear, definitions: definitions))
+      #expect(matches(value, schema: rounded, definitions: definitions))
+      let shape = try value.decoded(as: Geometry3D.self)
+      _ = try shape.validatedBudget()
+      if fraction == 0 { #expect(shape == ordinary) }
+    }
+    for fraction in [-0.01, 0.26] {
+      var fields = try object(base)
+      fields["cornerRounding"] = .number(fraction)
+      #expect(!matches(.object(fields), schema: rounded, definitions: definitions))
+      let shape = try JSONValue.object(fields).decoded(as: Geometry3D.self)
+      #expect(throws: CoreError.self) { try shape.validatedBudget() }
     }
   }
 
@@ -202,7 +236,7 @@ struct StructuredSceneOutputSchemaTests {
     }
     for name in [
       "geometry", "box", "sphere", "cylinder", "torus", "tube", "cone", "capsule", "lathe",
-      "extrusion", "profilePoint", "lathePoint", "sceneUnit", "animation",
+      "extrusion", "roundedExtrusion", "profilePoint", "lathePoint", "sceneUnit", "animation",
     ] {
       #expect(unified[name] == original[name])
     }
@@ -255,6 +289,8 @@ struct StructuredSceneOutputSchemaTests {
     #"{"type":"capsule","radius":0.5,"height":3,"segments":24}"#,
     #"{"type":"lathe","profile":[{"radius":1,"y":-1},{"radius":0.5,"y":1}],"segments":24}"#,
     #"{"type":"extrusion","profile":[{"x":0,"y":0},{"x":2,"y":0},{"x":1,"y":1}],"depth":0.4}"#,
+    #"{"type":"extrusion","profile":[{"x":0,"y":0},{"x":2,"y":0},{"x":1,"y":1}],"depth":0.4,"cornerRounding":0.2}"#,
+    #"{"type":"extrusion","profile":[{"x":0,"y":0},{"x":2,"y":0},{"x":1,"y":1}],"depth":0.4,"cornerRounding":0}"#,
   ]
 
   private func admit(_ value: JSONValue, schema: JSONValue = StructuredSceneOutputSchema.value)

@@ -94,6 +94,117 @@ import Testing
     try fixture.assertSurface(clearColor)
   }
 
+  @Test func terminalMissRequeriesOnActualNativeWindowBindingThenSettles() throws {
+    _ = NSApplication.shared
+    let fixture = Harness(frontCamera: true)
+    try fixture.add("target", geometry: .sphere(radius: 0.5))
+    try fixture.add("blocker", geometry: .box(width: 4, height: 4, depth: 0.4))
+    fixture.nodes["blocker"]?.position.z = 2
+    let first = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+    #expect(first.status == .occluded && !first.isResolved)
+    #expect(first.rayTests > 0 && first.rayTests <= 33)
+    try fixture.assertClosestNode("blocker")
+    let cached = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+    #expect(cached.status == .occluded && cached.reusedCachedSurface && cached.rayTests == 0)
+    #expect(!fixture.resolver.hasPendingWork)
+    let originalContext = fixture.resolver.diagnostics.contextChanges
+    let originalBounds = fixture.stage.bounds
+    let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    let panel = NSPanel(
+      contentRect: fixture.stage.frame, styleMask: [.borderless, .nonactivatingPanel],
+      backing: .buffered, defer: false)
+    panel.isReleasedWhenClosed = false
+    defer {
+      panel.contentView = nil
+      panel.close()
+    }
+    // Binding is real AppKit ownership, with no ordering, keying, activation,
+    // screenshot, simulated hit result, or arbitrary readiness sleep.
+    panel.contentView = fixture.stage
+    #expect(fixture.stage.window === panel)
+    #expect(!panel.isVisible && !panel.isKeyWindow)
+    #expect(fixture.stage.bounds == originalBounds)
+    let rebound = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+    #expect(fixture.resolver.diagnostics.contextChanges == originalContext + 1)
+    #expect(!rebound.reusedCachedSurface && rebound.rayTests > 0 && rebound.rayTests <= 33)
+    #expect(!rebound.isResolved && rebound.status == .occluded)
+    try fixture.assertClosestNode("blocker")
+    let queries = fixture.resolver.diagnostics.totalRayTests
+    let settled = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+    #expect(settled.reusedCachedSurface && settled.rayTests == 0)
+    #expect(fixture.resolver.diagnostics.totalRayTests == queries)
+    #expect(!fixture.resolver.hasPendingWork)
+    #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground)
+  }
+
+  @Test func nativeStageVisibilityInvalidatesTerminalMissWithoutUnboundedRetries() throws {
+    let fixture = Harness(frontCamera: true)
+    try fixture.add("target", geometry: .sphere(radius: 0.5))
+    try fixture.add("blocker", geometry: .box(width: 4, height: 4, depth: 0.4))
+    fixture.nodes["blocker"]?.position.z = 2
+    let first = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+    #expect(first.status == .occluded && !first.isResolved)
+    for hidden in [true, false] {
+      let oldContext = fixture.resolver.diagnostics.contextChanges
+      fixture.stage.isHidden = hidden
+      let changed = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+      #expect(fixture.resolver.diagnostics.contextChanges == oldContext + 1)
+      #expect(!changed.reusedCachedSurface && changed.rayTests > 0 && changed.rayTests <= 33)
+      #expect(!changed.isResolved)
+      if !hidden {
+        #expect(changed.status == .occluded)
+        try fixture.assertClosestNode("blocker")
+      }
+      let total = fixture.resolver.diagnostics.totalRayTests
+      let repeated = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+      #expect(repeated.reusedCachedSurface && repeated.rayTests == 0)
+      #expect(fixture.resolver.diagnostics.totalRayTests == total)
+      #expect(!fixture.resolver.hasPendingWork)
+    }
+  }
+
+  @Test func sameNativeWindowShowAndHideInvalidateTerminalMissThenCacheAgain() throws {
+    _ = NSApplication.shared
+    let fixture = Harness(frontCamera: true)
+    try fixture.add("target", geometry: .sphere(radius: 0.5))
+    try fixture.add("blocker", geometry: .box(width: 4, height: 4, depth: 0.4))
+    fixture.nodes["blocker"]?.position.z = 2
+    let panel = NSPanel(
+      contentRect: fixture.stage.frame, styleMask: [.borderless, .nonactivatingPanel],
+      backing: .buffered, defer: false)
+    panel.isReleasedWhenClosed = false
+    panel.ignoresMouseEvents = true
+    panel.sharingType = .none
+    panel.contentView = fixture.stage
+    defer {
+      panel.orderOut(nil)
+      panel.contentView = nil
+      panel.close()
+    }
+    let foreground = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    let first = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+    #expect(!panel.isVisible && first.status == .occluded)
+    for visible in [true, false] {
+      let priorContext = fixture.resolver.diagnostics.contextChanges
+      // Actual public native component visibility, not mocked window flags.
+      // Neither path makes this nonactivating panel key or posts user input.
+      if visible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
+      #expect(panel.isVisible == visible && fixture.stage.window === panel)
+      #expect(!panel.isKeyWindow)
+      let changed = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+      #expect(fixture.resolver.diagnostics.contextChanges == priorContext + 1)
+      #expect(!changed.reusedCachedSurface && changed.rayTests > 0 && changed.rayTests <= 33)
+      #expect(!changed.isResolved && changed.status == .occluded)
+      try fixture.assertClosestNode("blocker")
+      let total = fixture.resolver.diagnostics.totalRayTests
+      let cached = try #require(fixture.resolve(target: "target", point: .zero)["label"])
+      #expect(cached.reusedCachedSurface && cached.rayTests == 0)
+      #expect(fixture.resolver.diagnostics.totalRayTests == total)
+      #expect(!fixture.resolver.hasPendingWork)
+      #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground)
+    }
+  }
+
   @Test func removalGeometryReplacementAndNewGenerationInvalidateCachedOwnership() throws {
     let fixture = Harness()
     try fixture.add("target", geometry: .sphere(radius: 0.5))
@@ -315,6 +426,19 @@ import Testing
           Double(hit.worldCoordinates.x) - world.x,
           Double(hit.worldCoordinates.y) - world.y), Double(hit.worldCoordinates.z) - world.z)
       #expect(error < 0.001)
+    }
+    func assertClosestNode(_ expectedID: String) throws {
+      let projected = stage.projectPoint(SCNVector3Zero)
+      let hit = try #require(
+        stage.hitTest(
+          CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y)),
+          options: [
+            .searchMode: SCNHitTestSearchMode.closest.rawValue, .boundingBoxOnly: false,
+            .clipToZRange: true, .backFaceCulling: true, .ignoreHiddenNodes: true,
+            .categoryBitMask: 1,
+          ]
+        ).first)
+      #expect(hit.node === nodes[expectedID])
     }
   }
 }

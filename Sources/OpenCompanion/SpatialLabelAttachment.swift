@@ -58,6 +58,10 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
     let documentID: String
     let generation: UInt64
     let viewport: CGRect
+    let window: ObjectIdentifier?
+    let windowVisible: Bool
+    let windowOcclusionVisible: Bool
+    let stageHidden: Bool
     let camera: ObjectIdentifier?
     let cameraMatrix: [Float]
     let lens: [Double]
@@ -105,6 +109,15 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
     unresolved = 0
     pending = 0
     attemptSequence = 0
+  }
+
+  /// One native visibility edge may follow an early same-context hit miss.
+  /// Keep verified surfaces, but let that owned edge recheck negative results.
+  /// This does not schedule work or create a retry loop.
+  func invalidateTransientMisses() {
+    for id in Array(entries.keys) where entries[id]?.attachment.isResolved != true {
+      entries.removeValue(forKey: id)
+    }
   }
 
   func resolve(
@@ -389,6 +402,10 @@ struct SpatialLabelAttachmentDiagnostics: Codable, Sendable {
     let lens = camera?.camera
     return .init(
       documentID: documentID, generation: generation, viewport: stage.bounds,
+      window: stage.window.map(ObjectIdentifier.init),
+      windowVisible: stage.window?.isVisible == true,
+      windowOcclusionVisible: stage.window?.occlusionState.contains(.visible) == true,
+      stageHidden: stage.isHiddenOrHasHiddenAncestor,
       camera: camera.map(ObjectIdentifier.init),
       cameraMatrix: camera.map { elements($0.simdWorldTransform) } ?? [],
       lens: lens.map {

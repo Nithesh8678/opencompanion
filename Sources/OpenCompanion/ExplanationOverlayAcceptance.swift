@@ -117,6 +117,9 @@ import simd
       guard let anchor = $0.spatial3D?.labelAnchor else { return false }
       return !$0.text.isEmpty && $0.opacity > 0 && (targetOpacity[anchor.targetID] ?? 0) > 0
     }
+    guard expectedLabels.count <= 128 else {
+      throw ProviderError.message("The own-view label pixel check exceeds its128-label limit.")
+    }
     let visibleFrames = canvas.projectedLabelFrames
     let documentBounds = CGRect(x: 0, y: 0, width: document.width, height: document.height)
     guard canvas.unresolvedLabelOverlapCount == 0,
@@ -169,6 +172,28 @@ import simd
     let geometryMatchFraction =
       geometryPixels.samples > 0
       ? Double(geometryPixels.matches) / Double(geometryPixels.samples) : nil
+    var perLabelMetrics: [[String: Any]] = []
+    var everyLabelCompleteWithPixels = true
+    for label in expectedLabels {
+      let layout = canvas.projectedLabelGlyphLayout(id: label.id)
+      let frame = visibleFrames[label.id].map(canvas.canvasFrame(forDocumentRect:)) ?? .zero
+      // Leader endpoints terminate at the rectangle's edge. Its interior is
+      // the glyph check; this remains a difference-pixel test, not OCR.
+      let interior = frame.insetBy(dx: 1.5, dy: 1.5)
+      let pixels =
+        interior.width > 0 && interior.height > 0
+        ? changedPixels(composite, baseline: baseline, in: interior, canvasSize: canvas.bounds.size)
+        : 0
+      let complete = layout?.isComplete == true
+      everyLabelCompleteWithPixels = everyLabelCompleteWithPixels && complete && pixels >= 12
+      perLabelMetrics.append([
+        "id": label.id, "utf16Count": layout?.utf16Count ?? 0,
+        "visibleUTF16Location": layout?.visibleUTF16Location ?? -1,
+        "visibleUTF16Count": layout?.visibleUTF16Count ?? 0,
+        "coreTextLayoutComplete": complete, "interiorDifferencePixels": pixels,
+        "canvasFrame": metricFrame(frame),
+      ])
+    }
     let finalCompositeMetrics: [String: Any] = [
       "schemaVersion": 1, "phase": "before-final-composite-guard",
       "ownViewOnly": true, "desktopCaptured": false,
@@ -190,12 +215,16 @@ import simd
       "geometryRawAlphaPixelsVisited": geometryPixels.alphaPixelsVisited,
       "geometrySelectedNativePixels": geometryPixels.selectedNativePixels,
       "labelPixels": labelPixels, "leaderPixels": leaderPixels,
+      "allLabelMetrics": perLabelMetrics,
+      "labelMetricScope":
+        "Actual retained-font CoreText capacity and own-composite interior difference pixels; not OCR or physical scanout.",
       "predicates": [
         "finalVisibleOver500": finalCoverage.visible > 500,
         "opaqueTrayBackdropVisible": backdropVisible,
         "geometrySamplesAtLeast20": geometryPixels.samples >= 20,
         "geometryMatchFractionAtLeast0_65": geometryMatchFraction.map { $0 >= 0.65 } ?? false,
         "labelPixelsAtLeast12": labelPixels >= 12,
+        "everyLabelCompleteWithPixels": everyLabelCompleteWithPixels,
         "leaderPixelsAtLeast6": leaderPixels >= 6,
       ],
       "frames": [
@@ -226,7 +255,7 @@ import simd
     guard finalCoverage.visible > 500, backdropVisible,
       geometryPixels.samples >= 20,
       Double(geometryPixels.matches) / Double(geometryPixels.samples) >= 0.65,
-      labelPixels >= 12, leaderPixels >= 6
+      labelPixels >= 12, leaderPixels >= 6, everyLabelCompleteWithPixels
     else {
       throw ProviderError.message(
         "The final native composite lacks correctly placed geometry, label glyphs, leaders or its readable tray backdrop."
@@ -304,6 +333,10 @@ import simd
       }.count,
       "anchoredLabelCount": document.nodes.filter { $0.spatial3D?.labelAnchor != nil }.count,
       "visibleCompleteLabelCount": expectedLabels.count,
+      "allLabelMetrics": perLabelMetrics,
+      "allFinalLabelCoreTextLayoutsComplete": true,
+      "allFinalLabelInteriorsHaveDifferencePixels": true,
+      "labelGlyphIdentityOrPhysicalScanoutVerified": false,
       "overlappingLabelPairs": 0,
       "emptyFirstGroupRemainedHidden": true, "visualWindowEntirelyClickThrough": false,
       "opaqueTrayBackdropVisible": backdropVisible,

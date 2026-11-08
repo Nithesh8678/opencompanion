@@ -47,6 +47,10 @@ enum SpatialSceneLiveAcceptance {
         prompt:
           "Create a small static 3D explanation of a simple four-blade impeller. Show a solid cylindrical central hub and four thin swept blades, each built from one simple nonrectangular extruded polygon with at least five significant noncollinear outline corners. Join every blade root into the hub and spread the blades around its axis in one plane. Attach short Hub and Blade labels to the actual parts. Build it progressively, use a restrained color hierarchy, and explain that this static geometry is illustrative rather than a fluid simulation or a measured aerodynamic design.",
         minimumMeshes: 5, minimumLabels: 2, concepts: ["hub", "blade"]),
+      Case(
+        id: "butterfly-lifecycle",
+        prompt: "Show me the lifecycle of a butterfly visually in 3D.",
+        minimumMeshes: 7, minimumLabels: 4, concepts: []),
     ]
     let selectedIDs = try SpatialSceneCaseSelection.select(
       arguments: ProcessInfo.processInfo.arguments, knownIDs: cases.map(\.id))
@@ -322,6 +326,7 @@ enum SpatialSceneContentOracle {
     case "simple-pendulum": return pendulum(document: document, poses: poses)
     case "rounded-flask": return flask(document: document, poses: poses)
     case "swept-impeller": return impeller(document: document, poses: poses)
+    case "butterfly-lifecycle": return ButterflyLifecycleOracle.unmetChecks(document: document)
     default: return ["unknown-content-fixture"]
     }
   }
@@ -417,7 +422,7 @@ enum SpatialSceneContentOracle {
     let origin = point(.zero, in: hubs[0])
     var angles: [Double] = []
     for blade in blades {
-      guard case .extrusion(let profile, let depth)? = blade.node.spatial3D?.geometry,
+      guard case .extrusion(let profile, let depth, _)? = blade.node.spatial3D?.geometry,
         profile.count >= 5, significantCorners(profile) >= 5
       else { return ["impeller-blade-outline"] }
       let local = profile.map {

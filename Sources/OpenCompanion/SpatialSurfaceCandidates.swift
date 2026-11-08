@@ -68,8 +68,11 @@ enum SpatialSurfaceCandidates {
     case .lathe(let profile, _):
       guard let contour = try? SpatialProfile3D.latheContour(profile) else { return [] }
       (closest, samples) = revolutionPoints(contour, hint: hint)
-    case .extrusion(let profile, let depth):
-      (closest, samples) = extrusionPoints(profile, depth: depth, hint: hint)
+    case .extrusion(let profile, let depth, let rounding):
+      guard let contour = try? SpatialProfile3D.extrusionContour(profile, cornerRounding: rounding)
+      else { return [] }
+      (closest, samples) = extrusionPoints(
+        contour, depth: depth, hint: hint, preserveBoundary: rounding > 0)
     case .torus(let ringRadius, let pipeRadius, _, _):
       let radial = radialDirection(hint)
       let center = Vector3D(x: radial.x * ringRadius, y: 0, z: radial.z * ringRadius)
@@ -193,7 +196,9 @@ enum SpatialSurfaceCandidates {
     return (nearest(boundary, to: hint), samples)
   }
 
-  private static func extrusionPoints(_ profile: [Point2D], depth: Double, hint: Vector3D) -> (
+  private static func extrusionPoints(
+    _ profile: [Point2D], depth: Double, hint: Vector3D, preserveBoundary: Bool
+  ) -> (
     Vector3D, [Vector3D]
   ) {
     let query = Point2D(x: clamped(hint.x, -1e9, 1e9), y: clamped(hint.y, -1e9, 1e9))
@@ -218,7 +223,10 @@ enum SpatialSurfaceCandidates {
     if inside {
       for z in [-depth / 2, depth / 2] { boundary.append(.init(x: query.x, y: query.y, z: z)) }
     }
-    if let triangles = try? SpatialProfile3D.triangulation(profile) {
+    if let triangles = try? SpatialProfile3D.triangulation(
+      profile, maximumPoints: SpatialProfile3D.maximumExpandedPoints, minimumEdgeLength: 0,
+      preserveBoundary: preserveBoundary)
+    {
       for index in stride(from: 0, to: triangles.count, by: 3) {
         let a = profile[triangles[index]]
         let b = profile[triangles[index + 1]]

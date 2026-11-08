@@ -100,6 +100,9 @@ struct SpatialSurfaceCandidatesTests {
           .init(x: 0, y: 0), .init(x: 2, y: 0), .init(x: 1, y: 0.5), .init(x: 2, y: 2),
           .init(x: 0, y: 2),
         ], depth: 0.4),
+      .extrusion(
+        profile: [.init(x: -1, y: -1), .init(x: 1, y: -1), .init(x: 1, y: 1), .init(x: -1, y: 1)],
+        depth: 0.4, cornerRounding: 0.2),
       .torus(ringRadius: 2, pipeRadius: 0.4),
       .tube(innerRadius: 1.2, outerRadius: 1.42, height: 3.2),
       .tube(
@@ -147,7 +150,9 @@ struct SpatialSurfaceCandidatesTests {
         let b = contour[(index + 1) % contour.count]
         return (a.x != 0 || b.x != 0) && onSegment(.init(x: radial, y: p.y), a, b)
       }
-    case .extrusion(let profile, let depth):
+    case .extrusion(let original, let depth, let rounding):
+      guard let profile = try? SpatialProfile3D.extrusionContour(original, cornerRounding: rounding)
+      else { return false }
       let point = Point2D(x: p.x, y: p.y)
       let boundary = profile.indices.contains {
         onSegment(point, profile[$0], profile[($0 + 1) % profile.count])

@@ -60,6 +60,8 @@ struct StructuredSpatialStageCompilerTests {
     #"{"type":"capsule","radius":0.5,"height":3,"segments":24}"#,
     #"{"type":"lathe","profile":[{"radius":1,"y":-1},{"radius":0.5,"y":1}],"segments":24}"#,
     #"{"type":"extrusion","profile":[{"x":0,"y":0},{"x":2,"y":0},{"x":1,"y":1}],"depth":0.4}"#,
+    #"{"type":"extrusion","profile":[{"x":0,"y":0},{"x":2,"y":0},{"x":1,"y":1}],"depth":0.4,"cornerRounding":0.2}"#,
+    #"{"type":"extrusion","profile":[{"x":0,"y":0},{"x":2,"y":0},{"x":1,"y":1}],"depth":0.4,"cornerRounding":0}"#,
   ])
   func allNinePrimitivesArePreservedWithoutNameBasedRepairs(_ geometry: String) throws {
     var step = try fields(Self.minimal)

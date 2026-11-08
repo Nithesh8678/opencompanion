@@ -92,6 +92,7 @@ struct CursorCompanionSnapshot: Codable {
   var sceneNodeVisitAuthority: SceneFocusAuthority? { sceneVisit?.authority }
   var sceneNodeVisitTargetPoint: CGPoint? { sceneVisit?.target }
   private var lastPlacement: CursorCompanionPlacement?
+  private var lastRequestedWindowFrame: CGRect?
   private var dismissal: TimeInterval?
   private var dismissalTask: Task<Void, Never>?
   private var visibleText = ""
@@ -875,9 +876,17 @@ struct CursorCompanionSnapshot: Codable {
       placement = SceneCursorVisit.avoidingScene(
         placement, bounds: bounds, display: screen.frame, visible: screen.visibleFrame)
     }
+    if lastRequestedWindowFrame != placement.frame || lastPlacement?.frame != panel.frame {
+      panel.setFrame(placement.frame, display: false)
+      lastRequestedWindowFrame = placement.frame
+    }
+    // The window server may round the requested fractional origin/size. Use
+    // its accepted frame before submitting view-local layers, so the glyph
+    // tip and caption keep their intended global logical-point coordinates.
+    placement = CursorCompanionLayout.rebased(placement, windowFrame: panel.frame)
     lastPlacement = placement
-    panel.setFrame(placement.frame, display: false)
-    view.frame = CGRect(origin: .zero, size: placement.frame.size)
+    let acceptedViewFrame = CGRect(origin: .zero, size: panel.frame.size)
+    if view.frame != acceptedViewFrame { view.frame = acceptedViewFrame }
     view.update(
       phase: phase, text: visibleText, level: model?.microphoneLevel ?? 0,
       bodyPoint: placement.bodyPoint, bubbleFrame: placement.bubbleFrame,

@@ -487,12 +487,13 @@ enum ExplanationNarrationAcceptance {
     guard let documentID, overlay.isVisible(documentID: documentID),
       let window = NSApp.windows.first(where: {
         $0.isVisible && $0.identifier?.rawValue == "org.opencompanion.explanation.visual"
-      }), window.ignoresMouseEvents, !window.canBecomeKey, window.sharingType == .none,
+      }), !window.ignoresMouseEvents, !window.canBecomeKey, window.sharingType == .none,
       let canvas = window.contentView as? RetainedCanvasView,
-      canvas.renderedDocumentID == documentID
+      canvas.renderedDocumentID == documentID, canvas.overlayTrayEnabled,
+      canvas.overlaySurfaceInteractive
     else {
       throw ProviderError.message(
-        "The matching nonactivating passive native canvas is unavailable.")
+        "The matching nonactivating interactive explanation tray is unavailable.")
     }
     return canvas
   }
@@ -672,7 +673,8 @@ enum ExplanationNarrationAcceptance {
   ) throws {
     let result: [String: Any] = [
       "result": passed ? "passed" : "failed", "failure": String((failure ?? "").prefix(2_048)),
-      "publicAuthoredFixture": true, "actualSpeechSynthesisRequested": true,
+      "publicAuthoredFixture": true, "speechConfigured": true,
+      "actualSpeechSynthesisRequested": observation.updates.contains { $0.kind == .enqueued },
       "providerCalled": false, "desktopCaptured": false, "microphoneCaptured": false,
       "audioRecorded": false, "acousticOutputVerified": false, "physicalInputUsed": false,
       "frameRateVerified": false, "foregroundPreserved": foregroundPreserved,

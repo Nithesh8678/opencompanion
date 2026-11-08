@@ -378,6 +378,29 @@ struct CursorCompanionLayout: Sendable {
           width: bubble.width, height: bubble.height))
   }
 
+  /// AppKit can quantize an NSWindow's requested frame. Rebase the local
+  /// flipped geometry against the frame it actually accepted, keeping the
+  /// global body center and caption rectangle unchanged.
+  static func rebased(
+    _ placement: CursorCompanionPlacement, windowFrame: CGRect
+  ) -> CursorCompanionPlacement {
+    guard windowFrame.origin.x.isFinite, windowFrame.origin.y.isFinite,
+      windowFrame.size.width.isFinite, windowFrame.size.height.isFinite,
+      windowFrame.size.width > 0, windowFrame.size.height > 0,
+      windowFrame.maxX.isFinite, windowFrame.maxY.isFinite
+    else { return placement }
+    let offset = CGPoint(
+      x: placement.frame.minX - windowFrame.minX,
+      y: windowFrame.maxY - placement.frame.maxY)
+    return CursorCompanionPlacement(
+      frame: windowFrame,
+      bodyPoint: CGPoint(
+        x: placement.bodyPoint.x + offset.x, y: placement.bodyPoint.y + offset.y),
+      bubbleFrame: placement.bubbleFrame.isEmpty
+        ? .zero
+        : placement.bubbleFrame.offsetBy(dx: offset.x, dy: offset.y))
+  }
+
   private static func usable(_ rect: CGRect) -> CGRect? {
     guard rect.origin.x.isFinite, rect.origin.y.isFinite,
       rect.width.isFinite, rect.height.isFinite

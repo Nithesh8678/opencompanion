@@ -69,17 +69,19 @@ struct ProviderInstructionSelectionTests {
     let guidelines = ReasoningProvider.spatialVisualQualityGuidelines
     // Keep this shared design guidance concise; protocol details live separately.
     #expect(guidelines.utf8.count <= 4_000)
-    for prompt in [
+    let ordinary = [
       ReasoningProvider.baseInstructions(for: policy),
       ReasoningProvider.baseInstructions(for: policy, sceneStart: .geometryFirst),
       ReasoningProvider.standaloneStructuredSceneInstructions(for: policy),
-      ReasoningProvider.standaloneStructuredSpatialStepsInstructions,
-    ] {
+    ]
+    for prompt in ordinary {
       #expect(prompt.components(separatedBy: guidelines).count == 2)
+      #expect(prompt.contains("up to eight related new meshes"))
+    }
+    for prompt in ordinary + [ReasoningProvider.standaloneStructuredSpatialStepsInstructions] {
       #expect(prompt.contains("recognisable topic silhouette"))
       #expect(prompt.contains("A smaller mesh count is not a quality goal"))
       #expect(prompt.contains("A head on one featureless tube still lacks segmentation"))
-      #expect(prompt.contains("up to eight related new meshes"))
       #expect(!prompt.contains("one to three NEW physical parts"))
       #expect(prompt.contains("differentiated head/body regions, segmentation"))
       #expect(prompt.contains("not a fixed number"))
@@ -97,6 +99,38 @@ struct ProviderInstructionSelectionTests {
       let prompt = ReasoningProvider.baseInstructions(
         for: .init(route: route, includesExistingNotebook: false))
       #expect(!prompt.contains(guidelines))
+    }
+  }
+
+  @Test func spatialStepsBatchingGuidanceMatchesItsStrictThreePartAdmission() throws {
+    let prompt = ReasoningProvider.standaloneStructuredSpatialStepsInstructions
+    #expect(prompt.contains("up to three related new meshes"))
+    #expect(prompt.contains("one to three physical parts"))
+    #expect(!prompt.contains("up to eight related new meshes"))
+    for count in [3, 4] {
+      let parts: [JSONValue] = (0..<count).map { index in
+        .object([
+          "id": .string("part-\(index)"), "parentID": .null,
+          "fill": .string("#4488CC"), "opacity": .null, "transform": .null,
+          "geometry": .object([
+            "type": .string("sphere"), "radius": .number(0.1), "segments": .number(12),
+          ]),
+        ])
+      }
+      let step = JSONValue.object([
+        "text": .string("The stage introduces related parts."), "title": .null,
+        "groups": .array([]), "parts": .array(parts), "labels": .array([]),
+        "animations": .array([]), "removeIDs": .array([]),
+      ])
+      let data = try JSONEncoder().encode(step)
+      if count == 3 {
+        let compiled = try StructuredSpatialStageCompiler.compile(data)
+        let document = try ProviderSceneBoundary.applying(
+          compiled.scene, to: SceneDocument(), baseRevision: 0)
+        #expect(document.nodes.count == 3)
+      } else {
+        #expect(throws: (any Error).self) { try StructuredSpatialStageCompiler.compile(data) }
+      }
     }
   }
 

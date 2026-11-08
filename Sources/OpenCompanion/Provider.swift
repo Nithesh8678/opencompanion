@@ -234,7 +234,7 @@ actor ReasoningProvider {
         "Provider rejected the request (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)). Check endpoint, model access, and credentials."
       )
     }
-    var decoder = ProviderTextStreamDecoder()
+    var decoder = ProviderTextStreamDecoder(allowSceneBraceRecovery: requestPolicy.allowsNotebook)
     var total = 0
     var sawDone = false
     for try await line in bytes.lines {
@@ -323,7 +323,11 @@ actor ReasoningProvider {
   /// with a format requiring geometry in every step. Native scope checks still
   /// reject retained edits, screenshots, conversation and guidance beforehand.
   static var standaloneStructuredSpatialStepsInstructions: String {
-    notebookIdentity + "\n" + spatialVisualQualityGuidelines + "\n"
+    // The fixed-role schema admits at most three parts per step. Its batching
+    // guidance must not inherit the NDJSON format's eight-mesh allowance.
+    let quality = spatialVisualQualityGuidelines.replacingOccurrences(
+      of: "up to eight related new meshes", with: "up to three related new meshes")
+    return notebookIdentity + "\n" + quality + "\n"
       + StructuredSpatialStageSchema.instructions
   }
 

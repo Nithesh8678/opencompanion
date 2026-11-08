@@ -266,7 +266,8 @@ actor CodexProvider {
         await timing.mark(.firstUnitAccepted)
         if unit.type == "scene" { await timing.mark(.firstSceneAccepted) }
       }
-      var ndjson = CodexNDJSONOutput(threadID: threadID)
+      var ndjson = CodexNDJSONOutput(
+        threadID: threadID, allowSceneBraceRecovery: requestPolicy.allowsNotebook)
       let onSceneLineDecoded: (@Sendable (ProviderLineWireSample) async -> Void)?
       if measureSceneLatency {
         onSceneLineDecoded = { sample in await timing.recordSceneLine(sample) }

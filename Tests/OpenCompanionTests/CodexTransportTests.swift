@@ -10,6 +10,34 @@ import UniformTypeIdentifiers
 // Each case starts a real Python subprocess. Bound fixture concurrency so cold
 // interpreter startup does not consume another case's protocol watchdog.
 @Suite(.serialized) struct CodexTransportTests {
+  @Test(arguments: [ResponsePolicy.Route.notebook, .conversation, .screenGuidance])
+  func sceneBraceRecoveryIsRestrictedToNotebookPolicy(route: ResponsePolicy.Route) async throws {
+    let malformed =
+      #"{"type":"scene","nodes":[{"id":"body","kind":"mesh","spatial3D":{"geometry":{"type":"sphere","radius":1}}]}"#
+    let fixture = try makeFixture(completeTurn: true, responseText: malformed + "\n")
+    defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }
+    let provider = CodexProvider()
+    let receiver = TransportUnitReceiver()
+    let timeout = Task {
+      try await Task.sleep(for: .seconds(5))
+      await receiver.markWatchdogFired()
+      await provider.stop()
+    }
+    defer { timeout.cancel() }
+    let policy = ResponsePolicy(route: route, includesExistingNotebook: false)
+    do {
+      try await provider.stream(
+        executable: fixture.path, model: "fixture-default",
+        messages: [.init(role: "user", text: "Public scene fixture")], context: "",
+        image: nil, scene: nil, onUnit: { await receiver.append($0.type) }, responsePolicy: policy)
+      #expect(route == .notebook)
+    } catch {
+      #expect(route != .notebook)
+    }
+    #expect(await receiver.text == (route == .notebook ? "scene" : ""))
+    #expect(await receiver.watchdogFired == false)
+  }
+
   @Test func currentScreenAndItsQuestionReachTheSameCodexTurnWithImageBytesIntact() async throws {
     let fixture = try makeFixture(completeTurn: true)
     defer { try? FileManager.default.removeItem(at: fixture.deletingLastPathComponent()) }

@@ -305,9 +305,15 @@ enum ButterflyLifecycleOracle {
       let profile = try? SpatialProfile3D.extrusionContour(source, cornerRounding: rounding),
       profile.count >= 6
     else { return false }
-    let scale = max(
-      (profile.map(\.x).max() ?? 0) - (profile.map(\.x).min() ?? 0),
-      (profile.map(\.y).max() ?? 0) - (profile.map(\.y).min() ?? 0))
+    let xs: [Double] = profile.map(\.x)
+    let ys: [Double] = profile.map(\.y)
+    let minimumX: Double = xs.min() ?? 0
+    let maximumX: Double = xs.max() ?? 0
+    let minimumY: Double = ys.min() ?? 0
+    let maximumY: Double = ys.max() ?? 0
+    let width: Double = maximumX - minimumX
+    let height: Double = maximumY - minimumY
+    let scale: Double = max(width, height)
     var positive = 0.0
     var negative = 0.0
     for i in profile.indices {
@@ -465,14 +471,24 @@ enum ButterflyLifecycleOracle {
       high = .init(r, h / 2, r)
       low = -high
     case .lathe(let profile, _):
-      let r = profile.map(\.radius).max() ?? 0
-      low = .init(-r, profile.map(\.y).min() ?? 0, -r)
-      high = .init(r, profile.map(\.y).max() ?? 0, r)
+      let radii: [Double] = profile.map(\.radius)
+      let ys: [Double] = profile.map(\.y)
+      let r: Double = radii.max() ?? 0
+      let minimumY: Double = ys.min() ?? 0
+      let maximumY: Double = ys.max() ?? 0
+      low = .init(-r, minimumY, -r)
+      high = .init(r, maximumY, r)
     case .extrusion(let source, let depth, let rounding):
       guard let profile = try? SpatialProfile3D.extrusionContour(source, cornerRounding: rounding)
       else { return nil }
-      low = .init(profile.map(\.x).min() ?? 0, profile.map(\.y).min() ?? 0, -depth / 2)
-      high = .init(profile.map(\.x).max() ?? 0, profile.map(\.y).max() ?? 0, depth / 2)
+      let xs: [Double] = profile.map(\.x)
+      let ys: [Double] = profile.map(\.y)
+      let minimumX: Double = xs.min() ?? 0
+      let maximumX: Double = xs.max() ?? 0
+      let minimumY: Double = ys.min() ?? 0
+      let maximumY: Double = ys.max() ?? 0
+      low = .init(minimumX, minimumY, -depth / 2)
+      high = .init(maximumX, maximumY, depth / 2)
     }
     func point(_ value: SIMD3<Double>) -> SIMD3<Double> {
       let result = pose.transform.applying(to: .init(x: value.x, y: value.y, z: value.z))

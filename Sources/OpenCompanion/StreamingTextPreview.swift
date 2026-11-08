@@ -15,11 +15,18 @@ struct ProviderTextStreamDecoder: Sendable {
   static let maximumLineBytes = 262_144
   static let maximumTextBytes = 32_000
 
+  private let allowSceneBraceRecovery: Bool
   private var line: [UInt8] = []
   private var prefix = TextJSONPrefix()
   private var lastPreviewBytes = 0
   private var wireClock = ProviderLineWireClock()
   private(set) var acceptedUnits = 0
+  /// Successfully normalized scene lines, not proof of later native admission.
+  private(set) var recoveredSceneBraceCount = 0
+
+  init(allowSceneBraceRecovery: Bool = false) {
+    self.allowSceneBraceRecovery = allowSceneBraceRecovery
+  }
 
   mutating func append(
     _ delta: String,
@@ -95,9 +102,18 @@ struct ProviderTextStreamDecoder: Sendable {
     do {
       unit = try JSONDecoder().decode(ProviderUnit.self, from: Data(value.utf8))
     } catch {
-      if let onRejectedLine, let diagnosticLine { await onRejectedLine(diagnosticLine) }
-      throw ProviderError.message(
-        "Model output did not match the line protocol. Accepted earlier content was retained.")
+      try Task.checkCancellation()
+      if allowSceneBraceRecovery,
+        let recovered = try SceneJSONBraceRecovery.recover(Data(value.utf8))
+      {
+        unit = recovered
+        recoveredSceneBraceCount += 1
+      } else {
+        if let onRejectedLine, let diagnosticLine { await onRejectedLine(diagnosticLine) }
+        try Task.checkCancellation()
+        throw ProviderError.message(
+          "Model output did not match the line protocol. Accepted earlier content was retained.")
+      }
     }
     if unit.type == "text" {
       guard let text = unit.text, text.utf8.count <= Self.maximumTextBytes else {

@@ -25,11 +25,15 @@ struct CodexNDJSONAudit: Codable, Sendable, Equatable {
   let completedOnlyItems: Int
   let duplicateCompletions: Int
   let ignoredScopeEvents: Int
+  /// Normalized decoded scene lines; raw byte fingerprints remain unchanged.
+  var recoveredSceneBraceCount: Int = 0
 }
 
 /// A turn owns sequential agent-message items. Only an authoritative completed
 /// item can close its last NDJSON line. A completed text may extend the exact
-/// streamed UTF8 prefix; it never replaces, repairs or replays streamed units.
+/// streamed UTF8 prefix; raw authority never changes or replays streamed units.
+/// Explicit notebook policy can permit one scene-brace normalization in the
+/// shared decoder, separately counted from these unchanged wire fingerprints.
 struct CodexNDJSONOutput: Sendable {
   private enum Phase: String, Sendable {
     case unknown, commentary
@@ -54,7 +58,7 @@ struct CodexNDJSONOutput: Sendable {
   private var turnID: String?
   private var items: [String: Item] = [:]
   private var activeID: String?
-  private var decoder = ProviderTextStreamDecoder()
+  private var decoder: ProviderTextStreamDecoder
   private var deltaBytes = 0
   private var completedBytes = 0
   private var duplicateCompletions = 0
@@ -62,7 +66,10 @@ struct CodexNDJSONOutput: Sendable {
   private var terminal = false
   var acceptedUnits: Int { decoder.acceptedUnits }
 
-  init(threadID: String) { self.threadID = threadID }
+  init(threadID: String, allowSceneBraceRecovery: Bool = false) {
+    self.threadID = threadID
+    decoder = ProviderTextStreamDecoder(allowSceneBraceRecovery: allowSceneBraceRecovery)
+  }
 
   mutating func bind(turnID: String) throws {
     guard !turnID.isEmpty, turnID.utf8.count <= 256,
@@ -232,7 +239,8 @@ struct CodexNDJSONOutput: Sendable {
       acceptedUnits: acceptedUnits, deltaUTF8Bytes: deltaBytes, completedUTF8Bytes: completedBytes,
       completedOnlyItems: items.values.filter { $0.deltaEvents == 0 && $0.completionDigest != nil }
         .count,
-      duplicateCompletions: duplicateCompletions, ignoredScopeEvents: ignoredScopeEvents)
+      duplicateCompletions: duplicateCompletions, ignoredScopeEvents: ignoredScopeEvents,
+      recoveredSceneBraceCount: decoder.recoveredSceneBraceCount)
   }
 
   private func rejectTypeChange(_ value: JSONValue) throws {

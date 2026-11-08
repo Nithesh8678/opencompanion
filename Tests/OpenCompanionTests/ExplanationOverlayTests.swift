@@ -28,7 +28,8 @@ struct ExplanationOverlayLayoutTests {
     #expect(abs(frames.stage.width / frames.stage.height - 900.0 / 560.0) < 0.000_001)
     #expect(frames.stage.maxX == display.maxX - 20)
     #expect(frames.stage.minY == display.minY + 24)
-    #expect(frames.clear.minY >= frames.stage.maxY)
+    #expect(frames.stage.contains(frames.clear))
+    #expect(frames.clear.minY >= frames.stage.maxY - ExplanationOverlayLayout.headerHeight)
     #expect(frames.clear.size == CGSize(width: 74, height: 32))
   }
 
@@ -38,7 +39,8 @@ struct ExplanationOverlayLayoutTests {
       ExplanationOverlayLayout.frames(
         documentSize: CGSize(width: 560, height: 900), visibleFrame: display))
     #expect(display.contains(frames.stage) && display.contains(frames.clear))
-    #expect(!frames.stage.intersects(frames.clear))
+    #expect(frames.stage.contains(frames.clear))
+    #expect(frames.stage.width >= 260)
     #expect(frames.stage.width > 0 && frames.stage.height > 0)
   }
 
@@ -77,20 +79,26 @@ struct ExplanationOverlayLayoutTests {
     #expect(canvas.acceptsFirstResponder)
   }
 
-  @Test func visualWindowIsWhollyClickThroughAndClearWindowIsTightlyBounded() {
+  @Test func compactCardIsBoundedAndNativeClearAcceptsFirstMouseWithoutActivation() {
     _ = NSApplication.shared
     let canvas = RetainedCanvasView(frame: CGRect(x: 0, y: 0, width: 620, height: 420))
     let visual = ExplanationOverlay.makeVisualPanel(
       frame: CGRect(x: 800, y: 60, width: 620, height: 420), canvas: canvas)
     let clear = ExplanationOverlay.makeClearPanel(
-      frame: CGRect(x: 1073, y: 490, width: 74, height: 32), action: {})
+      frame: CGRect(x: 1336, y: 442, width: 74, height: 32), action: {})
     defer {
       visual.contentView = nil
       visual.close()
       clear.contentView = nil
       clear.close()
     }
-    #expect(visual.ignoresMouseEvents && !clear.ignoresMouseEvents)
+    #expect(!visual.ignoresMouseEvents && !clear.ignoresMouseEvents)
+    #expect(canvas.overlayTrayEnabled && canvas.overlayHeaderInset == 44)
+    #expect(canvas.layer?.backgroundColor?.alpha == 1)
+    #expect(visual.frame.contains(clear.frame))
+    #expect(clear.contentView?.acceptsFirstMouse(for: nil) == true)
+    #expect(clear.contentView?.needsPanelToBecomeKey == false)
+    #expect(clear.contentView?.subviews.first is NSButton)
     #expect(!visual.isOpaque && visual.backgroundColor?.alphaComponent == 0)
     #expect(!visual.canBecomeKey && !visual.canBecomeMain)
     #expect(!clear.canBecomeKey && !clear.canBecomeMain)

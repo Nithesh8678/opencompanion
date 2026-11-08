@@ -8,7 +8,7 @@ import CompanionCore
 enum StructuredSceneOutputSchema {
   static let instructions = """
     This turn uses a standalone explanation schema. Return one JSON object with a units array, not newline-delimited objects or Markdown. Units are either text or scene; no targets, tools or desktop actions. Start with a concise text unit, then a small useful scene unit and add physical parts progressively in later units. Use stable IDs. Each scene unit is a valid atomic native transaction: referenced parents and anchored-label targets must exist in that unit or an earlier unit; remove dependent labels when removing their target. Use [] for unused nodes, removeIDs or animations and null for a genuinely unused nullable field. Omitted schema fields use native defaults; never invent properties or add null geometry keys belonging to another primitive.
-    Typed 3D supports group, mesh and target-anchored text. Geometry uses exactly the keys of its selected box, sphere, cylinder, torus or tube variant. Keep spatial hierarchy, geometry, connections and label hints physically meaningful; a schema does not prove those relationships. Ordinary 2D uses a 900x560 canvas, separate text nodes and point-based directional lines/arrows. This prototype excludes bindings, parameters, expressions, operations, retained-document edits, legacy inferred mesh geometry, external assets and renderer code. Native validation and bounded transport still apply; do not claim exact physics, audio synchronization or external actions.
+    Typed 3D supports group, mesh and target-anchored text. Geometry uses exactly the keys of its selected box, sphere, cylinder, torus, tube, cone, capsule, lathe or extrusion variant. Cone/frustum and capsule axes are +Y; capsule height is total end-to-end height. Lathe revolves an ordered radius/Y contour around +Y, closing endpoints to the axis; an outer wall followed by rim and inner wall can form an actually hollow vessel. Profiles preserve local coordinates and must be simple, with no crossing or overlapping edges. Extrusion closes a simple XY polygon and extends it by depth/2 on either side of Z=0; no bevel or executable curves. Keep spatial hierarchy, geometry, connections and label hints physically meaningful; a schema does not prove those relationships. Ordinary 2D uses a 900x560 canvas, separate text nodes and point-based directional lines/arrows. This prototype excludes bindings, parameters, expressions, operations, retained-document edits, legacy inferred mesh geometry, external assets and renderer code. Native validation and bounded transport still apply; do not claim exact physics, audio synchronization or external actions.
     """
 
   static let value: JSONValue = {
@@ -41,6 +41,36 @@ enum StructuredSceneOutputSchema {
         ]),
         "A solid rod or disk along local +Y, with filled circular ends. It has no bore or open sector."
       ),
+      "cone": described(
+        object([
+          "type": literal("cone"), "topRadius": number(0, 1_000), "bottomRadius": number(0, 1_000),
+          "height": spatialDimension, "segments": integer(3, 64),
+        ]),
+        "A capped solid cone or frustum along +Y, centered at the origin. A radius may be zero for a tip; positive radii are at least 0.001, with at least one nonzero radius."
+      ),
+      "capsule": described(
+        object([
+          "type": literal("capsule"), "radius": spatialDimension, "height": spatialDimension,
+          "segments": integer(3, 64),
+        ]),
+        "A solid rounded rod along +Y: hemispherical ends and a straight middle. Height is total tip-to-tip height and must be at least twice radius."
+      ),
+      "lathe": described(
+        object([
+          "type": literal("lathe"),
+          "profile": array(reference("lathePoint"), minimum: 2, maximum: 32),
+          "segments": integer(3, 64),
+        ]),
+        "A full revolution of an ordered radius/Y contour around +Y. Endpoints cap to the axis (or join directly when at equal Y). Nonmonotonic Y allows outer wall, rim and inner wall of a hollow vessel. The closed material cross-section must be simple and nondegenerate, without repeated points or self-touching edges."
+      ),
+      "extrusion": described(
+        object([
+          "type": literal("extrusion"),
+          "profile": array(reference("profilePoint"), minimum: 3, maximum: 32),
+          "depth": spatialDimension,
+        ]),
+        "A solid extrusion of a simple implicitly closed XY polygon, centered through depth along Z. Supports concave profiles, with no holes, bevel, repeated closing point or self-intersection."
+      ),
       "torus": described(
         object([
           "type": literal("torus"), "ringRadius": spatialDimension, "pipeRadius": spatialDimension,
@@ -60,6 +90,8 @@ enum StructuredSceneOutputSchema {
     var definitions: [String: JSONValue] = [
       "identifier": identifier,
       "point": object(["x": coordinate, "y": coordinate]),
+      "profilePoint": object(["x": number(-1_000, 1_000), "y": number(-1_000, 1_000)]),
+      "lathePoint": object(["radius": number(0, 1_000), "y": number(-1_000, 1_000)]),
       "position": vector(number(-1_000, 1_000)),
       "rotation": vector(number(-360_000, 360_000)),
       "scale": vector(number(0.001, 100)),

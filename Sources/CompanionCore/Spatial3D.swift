@@ -93,20 +93,42 @@ public struct SpatialGeometryBudget: Equatable, Sendable {
   public let vertices, triangles: Int
 }
 
+public struct LathePoint3D: Codable, Equatable, Hashable, Sendable {
+  public var radius, y: Double
+  public init(radius: Double, y: Double) {
+    self.radius = radius
+    self.y = y
+  }
+  private enum CodingKeys: String, CodingKey { case radius, y }
+  public init(from decoder: any Decoder) throws {
+    try SpatialDecoding.rejectUnknown(decoder, allowing: ["radius", "y"])
+    let c = try decoder.container(keyedBy: CodingKeys.self)
+    self.init(
+      radius: try c.decode(Double.self, forKey: .radius), y: try c.decode(Double.self, forKey: .y))
+  }
+}
+
 /// Dimensions are world units. Shape-specific keys are strict; there are no assets or shaders.
 public enum Geometry3D: Equatable, Hashable, Sendable, Codable {
   case box(width: Double, height: Double, depth: Double, chamferRadius: Double = 0)
   case sphere(radius: Double, segments: Int = 24)
   case cylinder(radius: Double, height: Double, segments: Int = 32)
+  case cone(topRadius: Double, bottomRadius: Double, height: Double, segments: Int = 32)
+  case capsule(radius: Double, height: Double, segments: Int = 24)
+  case lathe(profile: [LathePoint3D], segments: Int = 32)
+  case extrusion(profile: [Point2D], depth: Double)
   case torus(ringRadius: Double, pipeRadius: Double, ringSegments: Int = 32, pipeSegments: Int = 12)
   case tube(
     innerRadius: Double, outerRadius: Double, height: Double, segments: Int = 32,
     startAngleDegrees: Double = 0, sweepAngleDegrees: Double = 360)
   private enum Keys: String, CodingKey {
     case type, width, height, depth, chamferRadius, radius, segments, ringRadius, pipeRadius,
-      ringSegments, pipeSegments, innerRadius, outerRadius, startAngleDegrees, sweepAngleDegrees
+      ringSegments, pipeSegments, innerRadius, outerRadius, startAngleDegrees, sweepAngleDegrees,
+      topRadius, bottomRadius, profile
   }
-  private enum Tag: String, Codable { case box, sphere, cylinder, torus, tube }
+  private enum Tag: String, Codable {
+    case box, sphere, cylinder, torus, tube, cone, capsule, lathe, extrusion
+  }
   public init(from decoder: any Decoder) throws {
     let c = try decoder.container(keyedBy: Keys.self)
     let tag = try c.decode(Tag.self, forKey: .type)
@@ -115,6 +137,10 @@ public enum Geometry3D: Equatable, Hashable, Sendable, Codable {
     case .box: allowed = ["type", "width", "height", "depth", "chamferRadius"]
     case .sphere: allowed = ["type", "radius", "segments"]
     case .cylinder: allowed = ["type", "radius", "height", "segments"]
+    case .cone: allowed = ["type", "topRadius", "bottomRadius", "height", "segments"]
+    case .capsule: allowed = ["type", "radius", "height", "segments"]
+    case .lathe: allowed = ["type", "profile", "segments"]
+    case .extrusion: allowed = ["type", "profile", "depth"]
     case .torus: allowed = ["type", "ringRadius", "pipeRadius", "ringSegments", "pipeSegments"]
     case .tube:
       allowed = [
@@ -139,6 +165,25 @@ public enum Geometry3D: Equatable, Hashable, Sendable, Codable {
         radius: try c.decode(Double.self, forKey: .radius),
         height: try c.decode(Double.self, forKey: .height),
         segments: try c.decodeIfPresent(Int.self, forKey: .segments) ?? 32)
+    case .cone:
+      self = .cone(
+        topRadius: try c.decode(Double.self, forKey: .topRadius),
+        bottomRadius: try c.decode(Double.self, forKey: .bottomRadius),
+        height: try c.decode(Double.self, forKey: .height),
+        segments: try c.decodeIfPresent(Int.self, forKey: .segments) ?? 32)
+    case .capsule:
+      self = .capsule(
+        radius: try c.decode(Double.self, forKey: .radius),
+        height: try c.decode(Double.self, forKey: .height),
+        segments: try c.decodeIfPresent(Int.self, forKey: .segments) ?? 24)
+    case .lathe:
+      self = .lathe(
+        profile: try Self.decodeProfile(LathePoint3D.self, from: c, keys: ["radius", "y"]),
+        segments: try c.decodeIfPresent(Int.self, forKey: .segments) ?? 32)
+    case .extrusion:
+      self = .extrusion(
+        profile: try Self.decodeProfile(Point2D.self, from: c, keys: ["x", "y"]),
+        depth: try c.decode(Double.self, forKey: .depth))
     case .torus:
       self = .torus(
         ringRadius: try c.decode(Double.self, forKey: .ringRadius),
@@ -173,6 +218,25 @@ public enum Geometry3D: Equatable, Hashable, Sendable, Codable {
       try c.encode(r, forKey: .radius)
       try c.encode(h, forKey: .height)
       try c.encode(s, forKey: .segments)
+    case .cone(let top, let bottom, let height, let segments):
+      try c.encode(Tag.cone, forKey: .type)
+      try c.encode(top, forKey: .topRadius)
+      try c.encode(bottom, forKey: .bottomRadius)
+      try c.encode(height, forKey: .height)
+      try c.encode(segments, forKey: .segments)
+    case .capsule(let radius, let height, let segments):
+      try c.encode(Tag.capsule, forKey: .type)
+      try c.encode(radius, forKey: .radius)
+      try c.encode(height, forKey: .height)
+      try c.encode(segments, forKey: .segments)
+    case .lathe(let profile, let segments):
+      try c.encode(Tag.lathe, forKey: .type)
+      try c.encode(profile, forKey: .profile)
+      try c.encode(segments, forKey: .segments)
+    case .extrusion(let profile, let depth):
+      try c.encode(Tag.extrusion, forKey: .type)
+      try c.encode(profile, forKey: .profile)
+      try c.encode(depth, forKey: .depth)
     case .torus(let r, let p, let s, let t):
       try c.encode(Tag.torus, forKey: .type)
       try c.encode(r, forKey: .ringRadius)
@@ -218,6 +282,28 @@ public enum Geometry3D: Equatable, Hashable, Sendable, Codable {
       let nativeSegments = max(48, s)
       // Each cap has its own center/rim vertices in addition to the side surface.
       cost = .init(vertices: 6 * (nativeSegments + 1), triangles: 4 * nativeSegments)
+    case .cone(let top, let bottom, let height, let s):
+      guard top.isFinite, bottom.isFinite, top >= 0, bottom >= 0,
+        top == 0 || top >= 0.001, bottom == 0 || bottom >= 0.001,
+        dimension(max(top, bottom), height), segments(s)
+      else { throw invalid() }
+      cost = .init(vertices: 12 * s, triangles: 4 * s)
+    case .capsule(let radius, let height, let s):
+      guard dimension(radius, height), height >= 2 * radius, segments(s) else { throw invalid() }
+      let profileEdges = 2 * max(3, s / 2) + 2
+      cost = .init(vertices: 4 * s * profileEdges, triangles: 2 * s * profileEdges)
+    case .lathe(let profile, let s):
+      guard segments(s) else { throw invalid() }
+      let contour = try SpatialProfile3D.latheContour(
+        profile, maximumDimension: limits.maximumSpatialDimension)
+      cost = .init(vertices: 4 * s * contour.count, triangles: 2 * s * contour.count)
+    case .extrusion(let profile, let depth):
+      guard dimension(depth) else { throw invalid() }
+      let triangles = try SpatialProfile3D.triangulation(
+        profile, maximumDimension: limits.maximumSpatialDimension)
+      cost = .init(
+        vertices: 4 * profile.count + 2 * triangles.count,
+        triangles: 2 * profile.count + 2 * triangles.count / 3)
     case .torus(let r, let p, let s, let t):
       guard dimension(r, p), r > p, r + p <= limits.maximumSpatialDimension, segments(s, t) else {
         throw invalid()
@@ -245,11 +331,38 @@ public enum Geometry3D: Equatable, Hashable, Sendable, Codable {
     case .box(let w, let h, let d, _): return .init(x: w / 2, y: h / 2, z: d / 2)
     case .sphere(let r, _): return .init(x: r, y: r, z: r)
     case .cylinder(let r, let h, _): return .init(x: r, y: h / 2, z: r)
+    case .cone(let top, let bottom, let height, _):
+      return .init(x: max(top, bottom), y: height / 2, z: max(top, bottom))
+    case .capsule(let radius, let height, _): return .init(x: radius, y: height / 2, z: radius)
+    case .lathe(let profile, _):
+      return .init(
+        x: profile.map(\.radius).max() ?? 0, y: profile.map { abs($0.y) }.max() ?? 0,
+        z: profile.map(\.radius).max() ?? 0)
+    case .extrusion(let profile, let depth):
+      return .init(
+        x: profile.map { abs($0.x) }.max() ?? 0, y: profile.map { abs($0.y) }.max() ?? 0,
+        z: depth / 2)
     case .torus(let r, let p, _, _): return .init(x: r + p, y: p, z: r + p)
     case .tube(_, let o, let h, _, _, _): return .init(x: o, y: h / 2, z: o)
     }
   }
   private func invalid() -> CoreError { .invalidDocument("3D geometry dimensions or tessellation") }
+
+  private static func decodeProfile<T: Decodable>(
+    _ type: T.Type, from c: KeyedDecodingContainer<Keys>, keys: Set<String>
+  ) throws -> [T] {
+    var values = try c.nestedUnkeyedContainer(forKey: .profile)
+    var result: [T] = []
+    while !values.isAtEnd {
+      guard result.count < SpatialProfile3D.maximumPoints else {
+        throw CoreError.budgetExceeded("3D profile points")
+      }
+      let decoder = try values.superDecoder()
+      try SpatialDecoding.rejectUnknown(decoder, allowing: keys)
+      result.append(try T(from: decoder))
+    }
+    return result
+  }
 }
 
 public struct LabelAnchor3D: Codable, Equatable, Sendable {

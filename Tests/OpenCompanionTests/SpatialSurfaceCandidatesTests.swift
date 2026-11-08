@@ -88,6 +88,18 @@ struct SpatialSurfaceCandidatesTests {
       .box(width: 2, height: 3, depth: 4, chamferRadius: 0.2),
       .box(width: 2, height: 2, depth: 2, chamferRadius: 1),
       .sphere(radius: 1), .cylinder(radius: 1, height: 3),
+      .cone(topRadius: 0, bottomRadius: 1, height: 3),
+      .cone(topRadius: 0.6, bottomRadius: 1.2, height: 3),
+      .capsule(radius: 0.5, height: 3), .capsule(radius: 1, height: 2),
+      .lathe(profile: [
+        .init(radius: 1, y: -1), .init(radius: 1, y: 1), .init(radius: 0.8, y: 1),
+        .init(radius: 0.8, y: -0.8),
+      ]),
+      .extrusion(
+        profile: [
+          .init(x: 0, y: 0), .init(x: 2, y: 0), .init(x: 1, y: 0.5), .init(x: 2, y: 2),
+          .init(x: 0, y: 2),
+        ], depth: 0.4),
       .torus(ringRadius: 2, pipeRadius: 0.4),
       .tube(innerRadius: 1.2, outerRadius: 1.42, height: 3.2),
       .tube(
@@ -118,6 +130,37 @@ struct SpatialSurfaceCandidatesTests {
     case .cylinder(let radius, let height, _):
       return (near(radial, radius) && abs(p.y) <= height / 2 + 1e-8)
         || (near(abs(p.y), height / 2) && radial <= radius + 1e-8)
+    case .cone(let top, let bottom, let height, _):
+      let r = bottom + (top - bottom) * (p.y + height / 2) / height
+      return abs(p.y) <= height / 2 + 1e-8
+        && (near(radial, r)
+          || (near(p.y, -height / 2) && radial <= bottom + 1e-8)
+          || (near(p.y, height / 2) && radial <= top + 1e-8))
+    case .capsule(let radius, let height, _):
+      let halfStraight = (height - 2 * radius) / 2
+      let centerY = min(halfStraight, max(-halfStraight, p.y))
+      return near(hypot(radial, p.y - centerY), radius)
+    case .lathe(let profile, _):
+      guard let contour = try? SpatialProfile3D.latheContour(profile) else { return false }
+      return contour.indices.contains { index in
+        let a = contour[index]
+        let b = contour[(index + 1) % contour.count]
+        return (a.x != 0 || b.x != 0) && onSegment(.init(x: radial, y: p.y), a, b)
+      }
+    case .extrusion(let profile, let depth):
+      let point = Point2D(x: p.x, y: p.y)
+      let boundary = profile.indices.contains {
+        onSegment(point, profile[$0], profile[($0 + 1) % profile.count])
+      }
+      var inside = false
+      for index in profile.indices {
+        let a = profile[index]
+        let b = profile[(index + 1) % profile.count]
+        if (a.y > p.y) != (b.y > p.y), p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
+          inside.toggle()
+        }
+      }
+      return abs(p.z) <= depth / 2 + 1e-8 && (boundary || (near(abs(p.z), depth / 2) && inside))
     case .torus(let ring, let pipe, _, _): return near(hypot(radial - ring, p.y), pipe)
     case .tube(let inner, let outer, let height, _, let start, let sweep):
       let angle = atan2(p.z, p.x) * 180 / .pi
@@ -129,6 +172,13 @@ struct SpatialSurfaceCandidatesTests {
       else { return false }
       return near(radial, inner) || near(radial, outer) || near(abs(p.y), height / 2) || onCut
     }
+  }
+  private func onSegment(_ p: Point2D, _ a: Point2D, _ b: Point2D) -> Bool {
+    let dx = b.x - a.x
+    let dy = b.y - a.y
+    return abs(dx * (p.y - a.y) - dy * (p.x - a.x)) < 1e-8
+      && p.x >= min(a.x, b.x) - 1e-8 && p.x <= max(a.x, b.x) + 1e-8
+      && p.y >= min(a.y, b.y) - 1e-8 && p.y <= max(a.y, b.y) + 1e-8
   }
   private func near(_ a: Double, _ b: Double) -> Bool { abs(a - b) < 1e-8 }
 }

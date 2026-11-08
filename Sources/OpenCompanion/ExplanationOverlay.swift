@@ -1,7 +1,6 @@
 import AppKit
 import Combine
 import CompanionCore
-import SwiftUI
 
 struct ExplanationOverlayFrames: Sendable, Equatable {
   let stage: CGRect
@@ -17,6 +16,7 @@ struct ExplanationOverlayAvailability: Sendable {
 enum ExplanationOverlayLayout {
   static let maximumStageSize = CGSize(width: 620, height: 420)
   static let clearSize = CGSize(width: 74, height: 32)
+  static let headerHeight: CGFloat = 44
 
   static func frames(documentSize: CGSize, visibleFrame: CGRect) -> ExplanationOverlayFrames? {
     guard documentSize.width.isFinite, documentSize.height.isFinite,
@@ -30,7 +30,9 @@ enum ExplanationOverlayLayout {
       width: min(maximumStageSize.width, visibleFrame.width - 40),
       height: min(maximumStageSize.height, visibleFrame.height - 88))
     let scale = min(available.width / documentSize.width, available.height / documentSize.height)
-    let size = CGSize(width: documentSize.width * scale, height: documentSize.height * scale)
+    let size = CGSize(
+      width: max(min(260, available.width), documentSize.width * scale),
+      height: max(min(180, available.height), documentSize.height * scale))
     guard size.width.isFinite, size.height.isFinite, size.width >= 1, size.height >= 1 else {
       return nil
     }
@@ -38,18 +40,15 @@ enum ExplanationOverlayLayout {
       x: visibleFrame.maxX - size.width - 20, y: visibleFrame.minY + 24,
       width: size.width, height: size.height)
     let clear = CGRect(
-      x: min(
-        max(stage.midX - clearSize.width / 2, visibleFrame.minX + 8),
-        visibleFrame.maxX - clearSize.width - 8),
-      y: min(stage.maxY + 10, visibleFrame.maxY - clearSize.height - 8),
+      x: stage.maxX - clearSize.width - 10, y: stage.maxY - clearSize.height - 6,
       width: clearSize.width, height: clearSize.height)
     return ExplanationOverlayFrames(stage: stage, clear: clear)
   }
 }
 
-/// Generated visuals remain click-through until Option explicitly arms a real
-/// visible mesh. During that interaction the bounded visual panel owns input;
-/// no transparent-pixel mouse holes or event reposting are assumed.
+/// A compact opaque card owns only its bounded native window. Two-finger
+/// scrolling rotates the rendered model; Option-drag remains an alternative.
+/// No transparent-pixel mouse holes or event reposting are assumed.
 @MainActor final class ExplanationOverlay {
   private weak var model: AppModel?
   private let onClear: @MainActor () -> Void
@@ -58,6 +57,7 @@ enum ExplanationOverlayLayout {
   private var canvas: RetainedCanvasView?
   private var orbitController: ExplanationOrbitController?
   private var orbitHint: NSTextField?
+  private var titleLabel: NSTextField?
   private let observeOrbitInput: Bool
   private var subscriptions = Set<AnyCancellable>()
   private var refreshScheduled = false
@@ -159,23 +159,26 @@ enum ExplanationOverlayLayout {
     view.onSceneFocusProjectionChanged = { [weak self] projection in
       self?.publishSceneFocus(projection)
     }
-    let hint = NSTextField(labelWithString: "⌥ Drag to rotate")
-    hint.font = .systemFont(ofSize: 11, weight: .medium)
-    hint.textColor = .white
-    hint.backgroundColor = NSColor.black.withAlphaComponent(0.82)
-    hint.drawsBackground = true
-    hint.alignment = .center
-    hint.wantsLayer = true
-    hint.layer?.cornerRadius = 9
-    hint.layer?.masksToBounds = true
-    hint.layer?.zPosition = 2_000_000
-    hint.frame = CGRect(x: 12, y: 12, width: 128, height: 25)
-    hint.isHidden = true
+    let title = NSTextField(labelWithString: String(document.title.prefix(100)))
+    title.font = .systemFont(ofSize: 12, weight: .semibold)
+    title.textColor = .white
+    title.lineBreakMode = .byTruncatingTail
+    title.frame = CGRect(x: 14, y: 6, width: max(1, view.bounds.width - 108), height: 18)
+    title.autoresizingMask = [.width]
+    title.setAccessibilityIdentifier("explanation.title")
+    view.addSubview(title)
+    titleLabel = title
+    let hint = NSTextField(labelWithString: "Two-finger swipe to rotate")
+    hint.font = .systemFont(ofSize: 10, weight: .medium)
+    hint.textColor = NSColor(white: 0.68, alpha: 1)
+    hint.lineBreakMode = .byTruncatingTail
+    hint.frame = CGRect(x: 14, y: 24, width: max(1, view.bounds.width - 108), height: 15)
+    hint.autoresizingMask = [.width]
     hint.setAccessibilityIdentifier("explanation.orbit.hint")
     view.addSubview(hint)
     orbitHint = hint
     view.setAccessibilityHelp(
-      "Hold Option over a visible 3D part, then drag to rotate. Release Option to finish. Control and Option starts voice."
+      "Swipe with two fingers over this card to rotate the 3D model. Option and drag is also available. Control and Option starts voice."
     )
     orbitController = ExplanationOrbitController(
       canvas: view, panel: visual, observeInput: observeOrbitInput,
@@ -191,9 +194,12 @@ enum ExplanationOverlayLayout {
       onPhaseChange: { [weak self] phase in
         guard let self, let hint = self.orbitHint else { return }
         if phase != .passive { self.endSceneFocus() }
-        hint.stringValue = phase == .dragging ? "Rotating · release ⌥" : "⌥ Drag to rotate"
-        hint.isHidden = phase == .passive
-        if phase != .passive { self.canvas?.addSubview(hint, positioned: .above, relativeTo: nil) }
+        switch phase {
+        case .passive: hint.stringValue = "Two-finger swipe to rotate"
+        case .armed: hint.stringValue = "Option + drag to rotate"
+        case .dragging: hint.stringValue = "Rotating · release Option to finish"
+        case .scrolling: hint.stringValue = "Rotating · two-finger swipe"
+        }
       })
     refresh()
     visual.orderFrontRegardless()
@@ -208,6 +214,7 @@ enum ExplanationOverlayLayout {
     orbitController?.shutdown()
     orbitController = nil
     orbitHint = nil
+    titleLabel = nil
     documentID = nil
     presentationLease = nil
     displayID = nil
@@ -343,10 +350,12 @@ enum ExplanationOverlayLayout {
 
   static func makeVisualPanel(frame: CGRect, canvas: RetainedCanvasView) -> AnnotationPanel {
     canvas.presentation = .passiveOverlay
+    canvas.overlayTrayEnabled = true
+    canvas.overlayHeaderInset = ExplanationOverlayLayout.headerHeight
     let panel = basePanel(frame: frame)
     panel.title = "OpenCompanion Explanation"
     panel.identifier = NSUserInterfaceItemIdentifier("org.opencompanion.explanation.visual")
-    panel.ignoresMouseEvents = true
+    panel.ignoresMouseEvents = false
     panel.acceptsMouseMovedEvents = true
     panel.contentView = canvas
     return panel
@@ -359,7 +368,8 @@ enum ExplanationOverlayLayout {
     panel.title = "Clear explanation"
     panel.identifier = NSUserInterfaceItemIdentifier("org.opencompanion.explanation.clear")
     panel.ignoresMouseEvents = false
-    panel.contentView = NSHostingView(rootView: ExplanationClearButton(clear: action))
+    panel.contentView = ExplanationClearControlView(
+      frame: CGRect(origin: .zero, size: frame.size), action: action)
     return panel
   }
 
@@ -408,6 +418,7 @@ enum ExplanationOverlayLayout {
       }
       return
     }
+    titleLabel?.stringValue = String(document.title.prefix(100))
     canvas.onTimeChange = { [weak model] time in model?.playTime = time }
     canvas.configureClock(
       documentID: document.id, time: model.playTime,
@@ -461,17 +472,35 @@ enum ExplanationOverlayLayout {
   }
 }
 
-private struct ExplanationClearButton: View {
-  let clear: @MainActor () -> Void
-  var body: some View {
-    Button(action: clear) {
-      HStack(spacing: 5) {
-        Image(systemName: "xmark").font(.system(size: 9, weight: .semibold))
-        Text("Clear").font(.system(size: 12, weight: .medium, design: .rounded))
-      }.foregroundStyle(Color(white: 0.18)).frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(white: 0.96).opacity(0.96), in: Capsule())
-    }.buttonStyle(.plain).accessibilityLabel("Clear explanation")
-      .accessibilityHint("Stop this response and hide the visual. Keep its notebook document.")
-      .accessibilityIdentifier("explanation.clear")
+@MainActor private final class ExplanationClearControlView: NSView {
+  private let action: @MainActor () -> Void
+
+  init(frame: CGRect, action: @escaping @MainActor () -> Void) {
+    self.action = action
+    super.init(frame: frame)
+    wantsLayer = true
+    layer?.backgroundColor = NSColor(white: 0.20, alpha: 1).cgColor
+    layer?.cornerRadius = 8
+    let button = ExplanationClearButton(title: "Clear", target: self, action: #selector(clear))
+    button.frame = bounds
+    button.autoresizingMask = [.width, .height]
+    button.isBordered = false
+    button.font = .systemFont(ofSize: 11, weight: .medium)
+    button.contentTintColor = .white
+    button.setAccessibilityIdentifier("explanation.clear")
+    button.setAccessibilityLabel("Clear explanation")
+    button.setAccessibilityHelp(
+      "Stop this response and hide the visual. Keep its notebook document.")
+    addSubview(button)
   }
+
+  @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+  override var needsPanelToBecomeKey: Bool { false }
+  @objc private func clear() { action() }
+}
+
+@MainActor private final class ExplanationClearButton: NSButton {
+  override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+  override var needsPanelToBecomeKey: Bool { false }
 }

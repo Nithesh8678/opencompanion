@@ -22,16 +22,16 @@ import Testing
     #expect(ExplanationOrbitController.modifiers([]).isEmpty)
   }
 
-  @Test func manualAdmissionKeepsDefaultAndUnavailableOrBackgroundInputPassive() throws {
+  @Test func boundedCardWorksWithoutObservationAndOptionAdmissionStaysScoped() throws {
     let fixture = try Harness()
     defer { fixture.close() }
-    #expect(fixture.panel.ignoresMouseEvents && !fixture.canvas.overlayCameraArmed)
+    #expect(!fixture.panel.ignoresMouseEvents && !fixture.canvas.overlayCameraArmed)
     #expect(!fixture.controller.diagnostics.observationAvailable)
     let point = try fixture.meshPoint()
     fixture.reconcile(point, modifiers: [])
     #expect(fixture.controller.diagnostics.phase == "passive")
     fixture.reconcile(.zero)
-    #expect(fixture.panel.ignoresMouseEvents)
+    #expect(!fixture.panel.ignoresMouseEvents)
     fixture.available = false
     fixture.reconcile(point)
     #expect(fixture.panel.ignoresMouseEvents && !fixture.canvas.overlayCameraArmed)
@@ -101,7 +101,7 @@ import Testing
     fixture.controller.consumeLocalEvent(up)
     fixture.canvas.mouseUp(with: up)
     #expect(fixture.controller.diagnostics.phase == "passive")
-    #expect(fixture.panel.ignoresMouseEvents && !fixture.canvas.overlayCameraArmed)
+    #expect(!fixture.panel.ignoresMouseEvents && !fixture.canvas.overlayCameraArmed)
     #expect(fixture.controller.diagnostics.ends == 1 && fixture.controller.diagnostics.cancels == 0)
   }
 
@@ -122,7 +122,8 @@ import Testing
       .leftMouseDragged, point: CGPoint(x: point.x + 50, y: point.y), flags: flags)
     fixture.controller.consumeLocalEvent(drag)
     #expect(fixture.controller.diagnostics.phase == "passive")
-    #expect(fixture.panel.ignoresMouseEvents && !fixture.canvas.isOverlayCameraDragging)
+    #expect(fixture.panel.ignoresMouseEvents == controlPressed)
+    #expect(!fixture.canvas.isOverlayCameraDragging)
     #expect(!fixture.canvas.overlayCameraArmed && fixture.controller.diagnostics.cancels == 1)
     fixture.canvas.mouseDragged(with: drag)
     #expect(camera.simdWorldTransform == before && fixture.canvas.overlayCameraDragEventCount == 0)
@@ -145,7 +146,7 @@ import Testing
     fixture.controller.consumeLocalEvent(down)
     fixture.canvas.mouseDown(with: down)
     #expect(!fixture.canvas.isOverlayCameraDragging && !fixture.canvas.overlayCameraArmed)
-    #expect(fixture.panel.ignoresMouseEvents && fixture.controller.diagnostics.phase == "passive")
+    #expect(!fixture.panel.ignoresMouseEvents && fixture.controller.diagnostics.phase == "passive")
     #expect(
       fixture.controller.diagnostics.starts == 0 && fixture.controller.diagnostics.cancels == 0)
   }
@@ -187,6 +188,88 @@ import Testing
     #expect(!fixture.canvas.isOverlayCameraDragging && fixture.panel.ignoresMouseEvents)
   }
 
+  @Test func ownedLocalScrollChangesOnlyCameraWithoutOptionOrGlobalObservation() throws {
+    let fixture = try Harness()
+    defer { fixture.close() }
+    let point = try fixture.meshPoint()
+    fixture.reconcile(point, modifiers: [])
+    let camera = try #require(fixture.canvas.spatialStage?.pointOfView)
+    let before = camera.simdWorldTransform
+    let accepted = fixture.scroll(point: point, phase: .began)
+    #expect(accepted && camera.simdWorldTransform != before)
+    #expect(fixture.controller.diagnostics.phase == "scrolling")
+    #expect(fixture.controller.diagnostics.scrollStarts == 1)
+    #expect(fixture.controller.diagnostics.scrollEvents == 1)
+    #expect(!fixture.canvas.overlayCameraArmed && !fixture.panel.ignoresMouseEvents)
+    #expect(!fixture.controller.diagnostics.tapEnabled)
+    let ended = fixture.scroll(point: point, phase: [], momentum: .ended, x: 0, y: 0)
+    #expect(ended && fixture.controller.diagnostics.phase == "passive")
+    #expect(fixture.controller.diagnostics.scrollEnds == 1)
+    #expect(fixture.document.revision == 0)
+    #expect(!fixture.canvas.spatialStage!.defaultCameraController.isInertiaRunning)
+  }
+
+  @Test func foreignWindowOrphanMomentumAndInvalidScrollNeverMoveCamera() throws {
+    let fixture = try Harness()
+    defer { fixture.close() }
+    let point = try fixture.meshPoint()
+    fixture.reconcile(point, modifiers: [])
+    let camera = try #require(fixture.canvas.spatialStage?.pointOfView)
+    let before = camera.simdWorldTransform
+    let foreign = fixture.scroll(point: point, phase: .began, foreignWindow: true)
+    let orphan = fixture.scroll(point: point, phase: [], momentum: .changed)
+    let stale = fixture.scroll(point: point, phase: .began, timestamp: 0)
+    let invalid = fixture.scroll(point: point, phase: .began, x: .nan)
+    let outside = fixture.scroll(point: CGPoint(x: -1, y: -1), phase: .began)
+    #expect(!foreign && !orphan && !stale && !invalid && !outside)
+    #expect(camera.simdWorldTransform == before)
+    #expect(fixture.controller.diagnostics.scrollStarts == 0)
+  }
+
+  @Test func scrollCancelsOnVoiceChordOrNewAuthorityAndMomentumCannotReacquire() throws {
+    let fixture = try Harness()
+    defer { fixture.close() }
+    let point = try fixture.meshPoint()
+    fixture.reconcile(point, modifiers: [])
+    let began = fixture.scroll(point: point, phase: .began)
+    #expect(began)
+    let vetoed = fixture.scroll(point: point, phase: .changed, flags: [.control, .option])
+    #expect(vetoed && fixture.controller.diagnostics.phase == "passive")
+    #expect(fixture.panel.ignoresMouseEvents)
+    fixture.reconcile(point, modifiers: [])
+    let next = fixture.scroll(point: point, phase: .began)
+    #expect(next)
+    let old = try #require(fixture.authority)
+    fixture.authority = .init(
+      lease: UUID(), documentID: old.documentID, generation: 2, displayID: 1)
+    fixture.reconcile(point, modifiers: [])
+    let camera = try #require(fixture.canvas.spatialStage?.pointOfView)
+    let before = camera.simdWorldTransform
+    let tail = fixture.scroll(point: point, phase: [], momentum: .changed)
+    #expect(!tail && fixture.controller.diagnostics.phase == "passive")
+    #expect(camera.simdWorldTransform == before)
+    #expect(fixture.controller.diagnostics.scrollCancels == 2)
+    fixture.authority = nil
+    fixture.controller.refresh()
+    #expect(
+      fixture.panel.ignoresMouseEvents && !fixture.controller.diagnostics.localScrollAvailable)
+  }
+
+  @Test func reducedMotionEndsAtTouchReleaseAndIgnoresMomentum() throws {
+    let fixture = try Harness(reduceMotion: true)
+    defer { fixture.close() }
+    let point = try fixture.meshPoint()
+    fixture.reconcile(point, modifiers: [])
+    let began = fixture.scroll(point: point, phase: .began)
+    let ended = fixture.scroll(point: point, phase: .ended, x: 0, y: 0)
+    let camera = try #require(fixture.canvas.spatialStage?.pointOfView)
+    let before = camera.simdWorldTransform
+    let tail = fixture.scroll(point: point, phase: [], momentum: .began)
+    #expect(began && ended && !tail)
+    #expect(fixture.controller.diagnostics.phase == "passive")
+    #expect(camera.simdWorldTransform == before)
+  }
+
   @MainActor private final class Harness {
     let document: SceneDocument
     let canvas: RetainedCanvasView
@@ -196,7 +279,7 @@ import Testing
     private var ownedController: ExplanationOrbitController?
     var controller: ExplanationOrbitController { ownedController! }
 
-    init() throws {
+    init(reduceMotion: Bool = false) throws {
       _ = NSApplication.shared
       document = try SceneDocument(
         id: "orbit-controller-public",
@@ -225,7 +308,8 @@ import Testing
       ownedController = ExplanationOrbitController(
         canvas: canvas, panel: panel, observeInput: false,
         authority: { [weak self] in self?.authority },
-        available: { [weak self] in self?.available == true })
+        available: { [weak self] in self?.available == true },
+        reduceMotion: { reduceMotion })
     }
     func close() {
       ownedController?.shutdown()
@@ -258,6 +342,16 @@ import Testing
           with: type, location: canvas.convert(point, to: nil), modifierFlags: flags,
           timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: panel.windowNumber,
           context: nil, eventNumber: 1, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 0.5))
+    }
+    @discardableResult func scroll(
+      point: CGPoint, phase: NSEvent.Phase, momentum: NSEvent.Phase = [],
+      x: Double = 12, y: Double = 4, flags: NSEvent.ModifierFlags = [],
+      timestamp: TimeInterval? = nil, foreignWindow: Bool = false
+    ) -> Bool {
+      controller.consumeScrollInput(
+        window: foreignWindow ? nil : panel, point: point, flags: flags, deltaX: x, deltaY: y,
+        precise: true, phase: phase, momentumPhase: momentum,
+        timestamp: timestamp ?? ProcessInfo.processInfo.systemUptime)
     }
     private enum HarnessError: Error { case noOwnWindow }
   }

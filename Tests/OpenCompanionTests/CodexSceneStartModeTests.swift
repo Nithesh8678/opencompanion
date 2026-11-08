@@ -8,8 +8,9 @@ struct CodexSceneStartModeTests {
   @Test func defaultPromptsMatchTheirRecordedContracts() {
     // Conversation retains the pre-ablation 969c49b bytes. Guidance includes
     // bounded workflow assessments and visible checkbox hit-area grounding. Notebook
-    // snapshots intentionally include the shared connector/playback grammar
-    // clarification; implicit startup must still equal explicit intro-first.
+    // snapshots intentionally include the richer native geometry vocabulary and
+    // shared visual-quality guidance. New NDJSON lessons also use the compact
+    // first-mesh contract; retained edits and implicit intro-first stay distinct.
     let cases: [(ResponsePolicy, String)] = [
       (
         .init(route: .conversation, includesExistingNotebook: false),
@@ -21,11 +22,11 @@ struct CodexSceneStartModeTests {
       ),
       (
         .init(route: .notebook, includesExistingNotebook: false),
-        "4e371d2fd80b6d0ce37c1bf65701e1fe478480976625739c937c95298ffebf85"
+        "0ee0a8385faa1b11535ba2e74693b6645a5d1c781276b5b0226c3a2e0f7c5886"
       ),
       (
         .init(route: .notebook, includesExistingNotebook: true),
-        "d5268de6dce8228b1458142c017e05380bf02bc0e3507e2fc22907d95db49cf9"
+        "4d4d2eb84d2ba4e7df6fbefb0af58c8ee46f1147f4d05b97836a3132cd00c636"
       ),
     ]
     for (policy, expected) in cases {
@@ -96,7 +97,7 @@ struct CodexSceneStartModeTests {
     let startupClauses = [
       "Start with one brief useful text unit in canonical type-then-text order. Follow with a small coherent visual relationship, then add useful detail progressively in separate complete scene units. A scene is permitted only when useful for the current requested explanation; it is never mandatory. Empty pages and generic titles are insufficient.",
       "Standalone text units remain useful for the short introduction or conclusion.",
-      "Start with one brief text unit, then immediately emit a small first scene unit containing an assembly group and ONE physical part (at most two meshes).",
+      "Start with one brief text unit, then immediately emit a small first scene unit containing exactly ONE meaningful physical mesh and only a minimal assembly group if needed.",
       "Use text to answer.",
     ]
     var unchangedPieces = [original]

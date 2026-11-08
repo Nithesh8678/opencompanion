@@ -15,14 +15,18 @@ struct ExplanationOrbitDiagnostics: Codable, Sendable {
   let ends: Int
   let cancels: Int
   let dragEvents: Int
+  let scrollStarts: Int
+  let scrollEnds: Int
+  let scrollCancels: Int
+  let scrollEvents: Int
+  let localScrollAvailable: Bool
   let panelIgnoresMouseEvents: Bool
   let canvasArmed: Bool
 }
 
-/// Option explicitly reserves this bounded native panel. Global input is only
-/// observed: it is never swallowed, modified, reposted or used to capture a
-/// screen. The canvas still rechecks an actual mesh and current authority at
-/// mouse-down; a transparent window is not treated as a cross-app mouse hole.
+/// The visible card owns only its bounded native window. Two-finger scroll is
+/// handled locally without a permission prompt; global observation remains only
+/// for the optional Option-drag fallback. No input is reposted or synthesized.
 @MainActor final class ExplanationOrbitController {
   typealias Authority = ExplanationOrbitState.Authority
   private weak var canvas: RetainedCanvasView?
@@ -31,6 +35,7 @@ struct ExplanationOrbitDiagnostics: Codable, Sendable {
   private let available: @MainActor () -> Bool
   private let onPhaseChange: @MainActor (ExplanationOrbitState.Phase) -> Void
   private let observeInput: Bool
+  private let reduceMotion: @MainActor () -> Bool
   private var state = ExplanationOrbitState()
   private var registration: ExplanationOrbitTapRegistration?
   private var globalMouse: Any?
@@ -50,11 +55,23 @@ struct ExplanationOrbitDiagnostics: Codable, Sendable {
   private var ends = 0
   private var cancels = 0
   private var lastPhase = ExplanationOrbitState.Phase.passive
+  private var scrollEndTimer: Timer?
+  private var scrollTimerAuthority: Authority?
+  private var latestModifiers: ExplanationOrbitState.Modifiers = []
+  private var lastObservedAuthority: Authority?
+  private var authorityObservedAt = ProcessInfo.processInfo.systemUptime
+  private var scrollStarts = 0
+  private var scrollEnds = 0
+  private var scrollCancels = 0
+  private var scrollEvents = 0
 
   init(
     canvas: RetainedCanvasView, panel: AnnotationPanel, observeInput: Bool = true,
     authority: @escaping @MainActor () -> Authority?,
     available: @escaping @MainActor () -> Bool,
+    reduceMotion: @escaping @MainActor () -> Bool = {
+      NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    },
     onPhaseChange: @escaping @MainActor (ExplanationOrbitState.Phase) -> Void = { _ in }
   ) {
     self.canvas = canvas
@@ -62,11 +79,16 @@ struct ExplanationOrbitDiagnostics: Codable, Sendable {
     self.observeInput = observeInput
     self.authority = authority
     self.available = available
+    self.reduceMotion = reduceMotion
     self.onPhaseChange = onPhaseChange
     canvas.shouldBeginOverlayCameraInteraction = { [weak self] point, flags in
       self?.begin(atCanvasPoint: point, flags: flags) == true
     }
     canvas.onOverlayCameraInteraction = { [weak self] event in self?.cameraInteraction(event) }
+    canvas.onOverlayScrollInteraction = { [weak self] event in
+      self?.consumeScrollEvent(event) == true
+    }
+    lastObservedAuthority = authority()
     if observeInput { installObservation() }
     applyOwnership()
   }
@@ -79,6 +101,9 @@ struct ExplanationOrbitDiagnostics: Codable, Sendable {
       optionReleases: optionReleases, pointerEvents: pointerEvents,
       starts: starts, ends: ends, cancels: cancels,
       dragEvents: canvas?.overlayCameraDragEventCount ?? 0,
+      scrollStarts: scrollStarts, scrollEnds: scrollEnds, scrollCancels: scrollCancels,
+      scrollEvents: scrollEvents,
+      localScrollAvailable: surfaceAvailable && canvas?.spatialStage != nil,
       panelIgnoresMouseEvents: panel?.ignoresMouseEvents ?? true,
       canvasArmed: canvas?.overlayCameraArmed ?? false)
   }
@@ -91,7 +116,7 @@ struct ExplanationOrbitDiagnostics: Codable, Sendable {
   func refresh() {
     guard !closed else { return }
     let values = currentInputValues()
-    state.update(input(pointer: values.0, modifiers: values.1, buttons: values.2))
+    reconcile(input(pointer: values.0, modifiers: values.1, buttons: values.2))
     applyOwnership()
   }
 
@@ -109,10 +134,12 @@ struct ExplanationOrbitDiagnostics: Codable, Sendable {
   func shutdown() {
     guard !closed else { return }
     closed = true
+    cancelScrollTimer()
     state.cancel()
     applyOwnership()
     canvas?.shouldBeginOverlayCameraInteraction = nil
     canvas?.onOverlayCameraInteraction = nil
+    canvas?.onOverlayScrollInteraction = nil
     if let globalMouse { NSEvent.removeMonitor(globalMouse) }
     if let localMouse { NSEvent.removeMonitor(localMouse) }
     globalMouse = nil
@@ -124,9 +151,14 @@ struct ExplanationOrbitDiagnostics: Codable, Sendable {
   private func input(
     pointer: CGPoint, modifiers: ExplanationOrbitState.Modifiers,
     buttons: ExplanationOrbitState.Buttons, canvasPoint: CGPoint? = nil,
-    requireFreshHit: Bool = false
+    requireFreshHit: Bool = false, forLocalScroll: Bool = false
   ) -> ExplanationOrbitState.Input {
+    latestModifiers = modifiers
     let current = authority()
+    if current != lastObservedAuthority {
+      lastObservedAuthority = current
+      authorityObservedAt = ProcessInfo.processInfo.systemUptime
+    }
     let visible = panel?.isVisible == true && canvas?.window === panel
     let isAvailable = available()
     var hit = false
@@ -140,12 +172,163 @@ struct ExplanationOrbitDiagnostics: Codable, Sendable {
     } else if let canvasPoint, optionOnly, let canvas {
       hit = canvas.visibleSpatialMesh(atCanvasPoint: canvasPoint) != nil
     }
+    let localPoint: CGPoint? = {
+      guard let canvas, let panel else { return nil }
+      return canvasPoint ?? canvas.convert(panel.convertPoint(fromScreen: pointer), from: nil)
+    }()
+    let inside =
+      localPoint.map { point in
+        point.x.isFinite && point.y.isFinite && canvas?.bounds.contains(point) == true
+      } ?? false
     return .init(
       authority: current, modifiers: modifiers, buttons: buttons,
       presentationVisible: visible, awake: isAvailable, sessionActive: isAvailable,
       displayAvailable: current != nil,
-      spatialReady: observationAvailable && canvas?.spatialStage != nil,
-      pointerOnVisibleMesh: hit)
+      spatialReady: (forLocalScroll || state.phase == .scrolling || observationAvailable)
+        && canvas?.spatialStage != nil,
+      pointerOnVisibleMesh: hit, pointerInsideSurface: inside)
+  }
+
+  private var surfaceAvailable: Bool {
+    guard !closed, available(), panel?.isVisible == true, canvas?.window === panel,
+      canvas?.spatialStage != nil, let current = authority(),
+      !current.documentID.isEmpty, current.documentID.utf8.prefix(257).count <= 256,
+      current.displayID != 0
+    else { return false }
+    return !(latestModifiers.contains(.control) && latestModifiers.contains(.option))
+  }
+
+  private func reconcile(_ input: ExplanationOrbitState.Input) {
+    let wasScrolling = state.phase == .scrolling
+    state.update(input)
+    if wasScrolling, state.phase != .scrolling {
+      scrollCancels = min(1_000_000, scrollCancels + 1)
+    }
+  }
+
+  /// Only the canvas/SCNView's native scrollWheel dispatch enters here. The
+  /// method is also a deterministic own-event seam; it never posts input.
+  @discardableResult func consumeScrollEvent(_ event: NSEvent) -> Bool {
+    guard !closed, event.type == .scrollWheel, let canvas, let panel,
+      event.window === panel
+    else { return false }
+    return consumeScrollInput(
+      window: event.window, point: canvas.convert(event.locationInWindow, from: nil),
+      flags: event.modifierFlags, deltaX: Double(event.scrollingDeltaX),
+      deltaY: Double(event.scrollingDeltaY), precise: event.hasPreciseScrollingDeltas,
+      phase: event.phase, momentumPhase: event.momentumPhase, timestamp: event.timestamp)
+  }
+
+  /// The same bounded local-event reducer can be exercised with authored
+  /// own-window metadata. It does not dispatch or post an NSEvent.
+  @discardableResult func consumeScrollInput(
+    window: NSWindow?, point: CGPoint, flags: NSEvent.ModifierFlags,
+    deltaX: Double, deltaY: Double, precise: Bool,
+    phase: NSEvent.Phase, momentumPhase: NSEvent.Phase, timestamp: TimeInterval
+  ) -> Bool {
+    guard !closed, let canvas, let panel, window === panel else { return false }
+    let pointer = panel.convertPoint(toScreen: canvas.convert(point, to: nil))
+    let values = currentInputValues()
+    let current = input(
+      pointer: pointer, modifiers: Self.modifiers(flags), buttons: values.2,
+      canvasPoint: point, forLocalScroll: true)
+    let wasScrolling = state.phase == .scrolling
+    guard timestamp.isFinite, timestamp >= authorityObservedAt,
+      let delta = ExplanationOrbitState.scrollDelta(
+        x: deltaX, y: deltaY, precise: precise)
+    else {
+      cancelScroll()
+      return wasScrolling
+    }
+    let momentum = !momentumPhase.isEmpty
+    let cancelled = phase.contains(.cancelled) || momentumPhase.contains(.cancelled)
+    if cancelled || momentum && reduceMotion() {
+      cancelScroll()
+      return wasScrolling
+    }
+    if wasScrolling {
+      state.update(current)
+      guard state.phase == .scrolling else {
+        scrollCancels = min(1_000_000, scrollCancels + 1)
+        applyOwnership()
+        return true
+      }
+    } else {
+      // Orphaned momentum/changed tails never acquire a new presentation.
+      let begins = phase.contains(.began) || phase.contains(.mayBegin)
+      let discrete = phase.isEmpty && momentumPhase.isEmpty
+      guard !momentum, begins || discrete, state.beginScroll(current) else {
+        applyOwnership()
+        return false
+      }
+      scrollStarts = min(1_000_000, scrollStarts + 1)
+    }
+    applyOwnership()
+    guard !closed, state.phase == .scrolling, state.authority == current.authority else {
+      return true
+    }
+    if delta != .zero {
+      guard canvas.orbitOverlayCamera(delta: delta) else {
+        cancelScroll()
+        return true
+      }
+      scrollEvents = min(1_000_000, scrollEvents + 1)
+    }
+    if momentumPhase.contains(.ended) || reduceMotion() && phase.contains(.ended) {
+      endScroll()
+    } else {
+      // Trackpad momentum is supplied by the OS, not generated here. A single
+      // idle timer releases a lost terminal event or a phase-less mouse wheel.
+      scheduleScrollEnd()
+    }
+    return true
+  }
+
+  private func scheduleScrollEnd() {
+    guard let owner = state.authority, state.phase == .scrolling else { return }
+    scrollTimerAuthority = owner
+    if let timer = scrollEndTimer {
+      timer.fireDate = Date(timeIntervalSinceNow: 0.20)
+      return
+    }
+    let timer = Timer(timeInterval: 0.20, repeats: false) { [weak self] _ in
+      MainActor.assumeIsolated {
+        guard let self, !self.closed, self.state.phase == .scrolling,
+          self.state.authority == self.scrollTimerAuthority
+        else { return }
+        self.endScroll()
+      }
+    }
+    scrollEndTimer = timer
+    RunLoop.main.add(timer, forMode: .common)
+  }
+
+  private func cancelScrollTimer() {
+    scrollEndTimer?.invalidate()
+    scrollEndTimer = nil
+    scrollTimerAuthority = nil
+  }
+
+  private func endScroll() {
+    guard state.phase == .scrolling else { return }
+    let values = currentInputValues()
+    let current = input(
+      pointer: values.0, modifiers: values.1, buttons: values.2, forLocalScroll: true)
+    if state.endScroll(current) {
+      scrollEnds = min(1_000_000, scrollEnds + 1)
+    } else {
+      scrollCancels = min(1_000_000, scrollCancels + 1)
+      state.cancel()
+    }
+    cancelScrollTimer()
+    applyOwnership()
+  }
+
+  private func cancelScroll() {
+    if state.phase == .scrolling { scrollCancels = min(1_000_000, scrollCancels + 1) }
+    state.cancel()
+    cancelScrollTimer()
+    applyOwnership()
   }
 
   private func begin(atCanvasPoint point: CGPoint, flags: NSEvent.ModifierFlags) -> Bool {
@@ -193,18 +376,20 @@ struct ExplanationOrbitDiagnostics: Codable, Sendable {
   private func applyOwnership() {
     guard !applying else { return }
     applying = true
-    defer { applying = false }
-    let accepts = !closed && state.acceptsMouseEvents
+    let accepts = !closed && (state.phase == .armed || state.phase == .dragging)
     if !accepts, canvas?.isOverlayCameraDragging == true {
       cancels = min(1_000_000, cancels + 1)
       canvas?.cancelOverlayCameraInteraction()
     }
     canvas?.overlayCameraArmed = accepts
-    panel?.ignoresMouseEvents = !accepts
-    if state.phase != lastPhase {
-      lastPhase = state.phase
-      onPhaseChange(state.phase)
-    }
+    let surface = surfaceAvailable
+    canvas?.overlaySurfaceInteractive = surface
+    panel?.ignoresMouseEvents = !surface
+    if state.phase != .scrolling { cancelScrollTimer() }
+    let phaseChanged = state.phase != lastPhase
+    lastPhase = state.phase
+    applying = false
+    if phaseChanged { onPhaseChange(state.phase) }
   }
 
   private func currentInputValues()
@@ -278,7 +463,7 @@ struct ExplanationOrbitDiagnostics: Codable, Sendable {
         let pointer = panel.convertPoint(toScreen: event.locationInWindow)
         let buttons: ExplanationOrbitState.Buttons =
           event.type == .leftMouseDragged ? .left : Self.buttons()
-        state.update(input(pointer: pointer, modifiers: flags, buttons: buttons))
+        reconcile(input(pointer: pointer, modifiers: flags, buttons: buttons))
         applyOwnership()
         return
       }
@@ -325,7 +510,7 @@ struct ExplanationOrbitDiagnostics: Codable, Sendable {
     }
     // The tap runs before AppKit necessarily updates its process-wide flag
     // cache. Use this event's actual flags for immediate release/PTT priority.
-    state.update(
+    reconcile(
       input(
         pointer: NSEvent.mouseLocation, modifiers: Self.modifiers(flags), buttons: Self.buttons()))
     applyOwnership()

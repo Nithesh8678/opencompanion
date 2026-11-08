@@ -63,6 +63,10 @@ struct StructuredSceneOutputSchemaTests {
       "box": ["type", "width", "height", "depth", "chamferRadius"],
       "sphere": ["type", "radius", "segments"],
       "cylinder": ["type", "radius", "height", "segments"],
+      "cone": ["type", "topRadius", "bottomRadius", "height", "segments"],
+      "capsule": ["type", "radius", "height", "segments"],
+      "lathe": ["type", "profile", "segments"],
+      "extrusion": ["type", "profile", "depth"],
       "torus": ["type", "ringRadius", "pipeRadius", "ringSegments", "pipeSegments"],
       "tube": [
         "type", "innerRadius", "outerRadius", "height", "segments", "startAngleDegrees",
@@ -197,7 +201,8 @@ struct StructuredSceneOutputSchemaTests {
       #expect(original[name] != nil && unified[name] == nil)
     }
     for name in [
-      "geometry", "box", "sphere", "cylinder", "torus", "tube", "sceneUnit", "animation",
+      "geometry", "box", "sphere", "cylinder", "torus", "tube", "cone", "capsule", "lathe",
+      "extrusion", "profilePoint", "lathePoint", "sceneUnit", "animation",
     ] {
       #expect(unified[name] == original[name])
     }
@@ -246,6 +251,10 @@ struct StructuredSceneOutputSchemaTests {
     #"{"type":"cylinder","radius":0.12,"height":3,"segments":24}"#,
     #"{"type":"torus","ringRadius":0.6,"pipeRadius":0.08,"ringSegments":32,"pipeSegments":12}"#,
     #"{"type":"tube","innerRadius":0.9,"outerRadius":1.1,"height":1.8,"segments":32,"startAngleDegrees":120,"sweepAngleDegrees":240}"#,
+    #"{"type":"cone","topRadius":0,"bottomRadius":1,"height":2,"segments":24}"#,
+    #"{"type":"capsule","radius":0.5,"height":3,"segments":24}"#,
+    #"{"type":"lathe","profile":[{"radius":1,"y":-1},{"radius":0.5,"y":1}],"segments":24}"#,
+    #"{"type":"extrusion","profile":[{"x":0,"y":0},{"x":2,"y":0},{"x":1,"y":1}],"depth":0.4}"#,
   ]
 
   private func admit(_ value: JSONValue, schema: JSONValue = StructuredSceneOutputSchema.value)

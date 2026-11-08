@@ -37,6 +37,16 @@ enum SpatialSceneLiveAcceptance {
         prompt:
           "Create a small static 3D lesson explaining a simple pendulum in an illustrative rest pose. Show a rectangular fixed support, a solid round bob and a slender solid rod connecting the support to the bob. Attach short Support, Rod and Bob labels to the actual parts. Build the lesson progressively. Keep the geometry static and explain that the dimensions and rest pose are illustrative, not a physical simulation or a measured dynamics result.",
         minimumMeshes: 3, minimumLabels: 3, concepts: ["support", "rod", "bob"]),
+      Case(
+        id: "rounded-flask",
+        prompt:
+          "Create a small static 3D lesson showing a rounded open flask. Use a hollow lathe-profiled vessel with a bulbous body and narrow open neck, a separate torus rim fitted around the neck opening, and a solid tapered cone stopper displayed beside that opening. Attach short Vessel, Rim and Stopper labels to their actual parts. Build it progressively and explain that the proportions and separated stopper are illustrative. Preserve the real opening and wall thickness; do not substitute a solid cylinder or a stack of disks for the vessel.",
+        minimumMeshes: 3, minimumLabels: 3, concepts: ["vessel", "rim", "stopper"]),
+      Case(
+        id: "swept-impeller",
+        prompt:
+          "Create a small static 3D explanation of a simple four-blade impeller. Show a solid cylindrical central hub and four thin swept blades, each built from one simple nonrectangular extruded polygon with at least five significant noncollinear outline corners. Join every blade root into the hub and spread the blades around its axis in one plane. Attach short Hub and Blade labels to the actual parts. Build it progressively, use a restrained color hierarchy, and explain that this static geometry is illustrative rather than a fluid simulation or a measured aerodynamic design.",
+        minimumMeshes: 5, minimumLabels: 2, concepts: ["hub", "blade"]),
     ]
     let selectedIDs = try SpatialSceneCaseSelection.select(
       arguments: ProcessInfo.processInfo.arguments, knownIDs: cases.map(\.id))
@@ -194,6 +204,10 @@ enum SpatialSceneLiveAcceptance {
     case .cylinder: "cylinder"
     case .torus: "torus"
     case .tube: "tube"
+    case .cone: "cone"
+    case .capsule: "capsule"
+    case .lathe: "lathe"
+    case .extrusion: "extrusion"
     }
   }
 
@@ -306,8 +320,152 @@ enum SpatialSceneContentOracle {
     case "water-molecule": return water(document: document, poses: poses)
     case "brushed-dc-motor": return motor(document: document, poses: poses)
     case "simple-pendulum": return pendulum(document: document, poses: poses)
+    case "rounded-flask": return flask(document: document, poses: poses)
+    case "swept-impeller": return impeller(document: document, poses: poses)
     default: return ["unknown-content-fixture"]
     }
+  }
+
+  private static func flask(document: SceneDocument, poses: [ScenePose3D]) -> [String] {
+    guard document.animations.isEmpty else { return ["flask-static"] }
+    let vessels = parts(words: ["vessel", "flask"], document: document, poses: poses) {
+      if case .lathe = $0 { return true }
+      return false
+    }
+    let rims = parts(words: ["rim"], document: document, poses: poses) {
+      if case .torus = $0 { return true }
+      return false
+    }
+    let stoppers = parts(words: ["stopper"], document: document, poses: poses) {
+      if case .cone = $0 { return true }
+      return false
+    }
+    guard vessels.count == 1, rims.count == 1, stoppers.count == 1,
+      [vessels[0], rims[0], stoppers[0]].allSatisfy(pendulumMaterialIsVisible),
+      case .lathe(let profile, _)? = vessels[0].node.spatial3D?.geometry,
+      let contour = try? SpatialProfile3D.latheContour(profile),
+      let minY = profile.map(\.y).min(), let maxY = profile.map(\.y).max(),
+      let maxRadius = profile.map(\.radius).max(), let inverse = inverseLinear(vessels[0])
+    else { return ["flask-part-roles"] }
+    let height = maxY - minY
+    let probeY = maxY - height * 0.05
+    var crossings: [Double] = []
+    for index in contour.indices {
+      let a = contour[index]
+      let b = contour[(index + 1) % contour.count]
+      if (a.y > probeY) != (b.y > probeY) {
+        crossings.append(a.x + (probeY - a.y) * (b.x - a.x) / (b.y - a.y))
+      }
+    }
+    crossings.sort()
+    let topmostRadius = contour.filter { $0.y == maxY }.map(\.x).min() ?? 0
+    guard crossings.count == 2, let inner = crossings.first, let outer = crossings.last,
+      inner > maxRadius * 0.03, topmostRadius > maxRadius * 0.03,
+      outer > inner, maxRadius > outer * 1.15
+    else { return ["flask-open-neck-and-bulb"] }
+    var unmet: [String] = []
+    let origin = point(.zero, in: vessels[0])
+    let rimCenter = inverse * (point(.zero, in: rims[0]) - origin)
+    let vesselAxis = normalized(direction(.init(x: 0, y: 1, z: 0), in: vessels[0]))
+    let rimAxis = normalized(direction(.init(x: 0, y: 1, z: 0), in: rims[0]))
+    if !rimCenter.x.isFinite || !rimCenter.y.isFinite || !rimCenter.z.isFinite
+      || hypot(rimCenter.x, rimCenter.z) > outer * 0.15
+      || abs(rimCenter.y - maxY) > height * 0.1
+      || vesselAxis == nil || rimAxis == nil
+      || abs(simd_dot(vesselAxis ?? .zero, rimAxis ?? .zero)) < cos(15 * Double.pi / 180)
+    {
+      unmet.append("flask-rim-assembled")
+    }
+    if case .torus(let radius, let pipe, _, _)? = rims[0].node.spatial3D?.geometry {
+      let scale = simd_length(inverse * direction(.init(x: 1, y: 0, z: 0), in: rims[0]))
+      if abs(radius * scale - outer) > max(outer * 0.3, pipe * scale * 2) {
+        unmet.append("flask-rim-assembled")
+      }
+    }
+    let stopper = inverse * (point(.zero, in: stoppers[0]) - origin)
+    if case .cone(let top, let bottom, _, _)? = stoppers[0].node.spatial3D?.geometry {
+      if abs(top - bottom) <= max(top, bottom) * 0.15
+        || hypot(stopper.x, stopper.z) <= outer
+        || hypot(stopper.x, stopper.z) > maxRadius * 3
+        || stopper.y < minY + height * 0.4 || stopper.y > maxY + height * 0.5
+      {
+        unmet.append("flask-separated-tapered-stopper")
+      }
+    }
+    return Array(Set(unmet)).sorted()
+  }
+
+  private static func impeller(document: SceneDocument, poses: [ScenePose3D]) -> [String] {
+    guard document.animations.isEmpty else { return ["impeller-static"] }
+    let hubs = parts(words: ["hub"], document: document, poses: poses) {
+      if case .cylinder = $0 { return true }
+      return false
+    }
+    let namedBlades = parts(words: ["blade"], document: document, poses: poses) {
+      if case .extrusion = $0 { return true }
+      return false
+    }
+    let blades = poses.filter {
+      if case .extrusion? = $0.node.spatial3D?.geometry { return true }
+      return false
+    }
+    guard hubs.count == 1, !namedBlades.isEmpty, blades.count == 4,
+      ([hubs[0]] + blades).allSatisfy(pendulumMaterialIsVisible),
+      case .cylinder(let radius, let height, _)? = hubs[0].node.spatial3D?.geometry,
+      let inverse = inverseLinear(hubs[0])
+    else { return ["impeller-part-roles"] }
+    let origin = point(.zero, in: hubs[0])
+    var angles: [Double] = []
+    for blade in blades {
+      guard case .extrusion(let profile, let depth)? = blade.node.spatial3D?.geometry,
+        profile.count >= 5, significantCorners(profile) >= 5
+      else { return ["impeller-blade-outline"] }
+      let local = profile.map {
+        inverse * (point(.init(x: $0.x, y: $0.y, z: 0), in: blade) - origin)
+      }
+      let joined = local.contains {
+        hypot($0.x, $0.z) <= radius * 1.000_001 && abs($0.y) <= height / 2
+      }
+      let farthest = local.map { hypot($0.x, $0.z) }.max() ?? 0
+      let thickness = simd_length(inverse * direction(.init(x: 0, y: 0, z: depth), in: blade))
+      if !joined || farthest < radius * 1.5 || thickness > farthest * 0.3 {
+        return ["impeller-blades-join-hub"]
+      }
+      let center = local.reduce(SIMD3<Double>.zero, +) / Double(local.count)
+      guard finite(center) != nil, hypot(center.x, center.z) > radius * 0.5 else {
+        return ["impeller-radial-arrangement"]
+      }
+      angles.append(atan2(center.z, center.x))
+    }
+    angles.sort()
+    for index in angles.indices {
+      let next = index + 1 < angles.count ? angles[index + 1] : angles[0] + 2 * Double.pi
+      let gap = next - angles[index]
+      if gap < 30 * Double.pi / 180 || gap > 150 * Double.pi / 180 {
+        return ["impeller-radial-arrangement"]
+      }
+    }
+    return []
+  }
+
+  private static func significantCorners(_ profile: [Point2D]) -> Int {
+    guard profile.count >= 3,
+      let minX = profile.map(\.x).min(), let maxX = profile.map(\.x).max(),
+      let minY = profile.map(\.y).min(), let maxY = profile.map(\.y).max()
+    else { return 0 }
+    let span = max(maxX - minX, maxY - minY)
+    let threshold = span * span * 0.005
+    var count = 0
+    for index in profile.indices {
+      let before = profile[(index + profile.count - 1) % profile.count]
+      let point = profile[index]
+      let after = profile[(index + 1) % profile.count]
+      let cross =
+        (point.x - before.x) * (after.y - point.y)
+        - (point.y - before.y) * (after.x - point.x)
+      if abs(cross) > threshold { count += 1 }
+    }
+    return count
   }
 
   private static func pendulum(document: SceneDocument, poses: [ScenePose3D]) -> [String] {

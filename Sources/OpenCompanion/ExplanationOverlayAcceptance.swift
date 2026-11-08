@@ -59,10 +59,11 @@ import simd
       try await Task.sleep(for: .milliseconds(20))
     }
     let (visual, clear, canvas) = try ownPresentation(document: document, overlay: overlay)
-    guard visual.ignoresMouseEvents, !clear.ignoresMouseEvents,
+    guard !visual.ignoresMouseEvents, canvas.overlaySurfaceInteractive, !clear.ignoresMouseEvents,
       !visual.canBecomeKey, !clear.canBecomeKey, visual.sharingType == .none,
       clear.sharingType == .none, !visual.isOpaque,
-      canvas.layer?.backgroundColor?.alpha == 0,
+      canvas.overlayTrayEnabled, canvas.layer?.backgroundColor?.alpha == 1,
+      visual.frame.contains(clear.frame),
       canvas.spatialStage?.allowsCameraControl == false,
       NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground
     else {
@@ -153,6 +154,7 @@ import simd
     let composite = try canvas.explanationSnapshot()
     try write(composite, to: output.appendingPathComponent("explanation.png"))
     let finalCoverage = coverage(composite)
+    let backdropVisible = opaqueTrayBackdrop(composite, canvasSize: canvas.bounds.size)
     let geometryPixels = matchingGeometryPixels(
       meshSnapshot, composite: baseline, stageFrame: stage.frame, canvasSize: canvas.bounds.size)
     let labelFrame = canvas.canvasFrame(forDocumentRect: initial)
@@ -190,7 +192,7 @@ import simd
       "labelPixels": labelPixels, "leaderPixels": leaderPixels,
       "predicates": [
         "finalVisibleOver500": finalCoverage.visible > 500,
-        "finalTransparentOver500": finalCoverage.transparent > 500,
+        "opaqueTrayBackdropVisible": backdropVisible,
         "geometrySamplesAtLeast20": geometryPixels.samples >= 20,
         "geometryMatchFractionAtLeast0_65": geometryMatchFraction.map { $0 >= 0.65 } ?? false,
         "labelPixelsAtLeast12": labelPixels >= 12,
@@ -221,13 +223,13 @@ import simd
     }
     try finalCompositeMetricBytes.write(
       to: output.appendingPathComponent("final-composite-metrics.json"), options: .atomic)
-    guard finalCoverage.visible > 500, finalCoverage.transparent > 500,
+    guard finalCoverage.visible > 500, backdropVisible,
       geometryPixels.samples >= 20,
       Double(geometryPixels.matches) / Double(geometryPixels.samples) >= 0.65,
       labelPixels >= 12, leaderPixels >= 6
     else {
       throw ProviderError.message(
-        "The final native composite lacks correctly placed geometry, label glyphs, leaders or transparency."
+        "The final native composite lacks correctly placed geometry, label glyphs, leaders or its readable tray backdrop."
       )
     }
     let camera = try require(stage.pointOfView, "The native stage has no camera.")
@@ -266,6 +268,7 @@ import simd
     }.count
     try write(
       canvas.explanationSnapshot(), to: output.appendingPathComponent("camera-projection.png"))
+    let localOrbitCPU = try await measureLocalOrbitCPU(canvas)
 
     let stale = try require(overlay.presentationLease, "Missing presentation authority.")
     overlay.dismiss()
@@ -302,9 +305,11 @@ import simd
       "anchoredLabelCount": document.nodes.filter { $0.spatial3D?.labelAnchor != nil }.count,
       "visibleCompleteLabelCount": expectedLabels.count,
       "overlappingLabelPairs": 0,
-      "emptyFirstGroupRemainedHidden": true, "visualWindowEntirelyClickThrough": true,
+      "emptyFirstGroupRemainedHidden": true, "visualWindowEntirelyClickThrough": false,
+      "opaqueTrayBackdropVisible": backdropVisible,
+      "clearControlInsideTray": visual.frame.contains(clear.frame),
       "visualWindowClickThroughScope":
-        "Passive presentation; Option arming owns its bounded panel.",
+        "The visible bounded tray owns local input; no global scrolling is captured.",
       "clearControlBounded": [clear.frame.width, clear.frame.height],
       "transparentMeshPixels": meshCoverage.transparent,
       "visibleMeshPixels": meshCoverage.visible,
@@ -320,6 +325,7 @@ import simd
       "nativeLabelsSettledWithScenePaused": true,
       "manualLabelClockAdvanceUsed": false,
       "cameraProjectionProgrammaticallyChanged": true, "physicalOrbitTested": false,
+      "localOrbitCPU": localOrbitCPU,
       "syntheticOwnViewOrbit": syntheticOrbit,
       "windowServerOrbitInputTested": false,
       "cameraSurfaceSettleWaitMS": cameraSurfaceSettleWaitMS,
@@ -373,7 +379,7 @@ import simd
     let pointer = orbitScreenPoint(point, canvas: canvas, panel: visual)
     let before = camera.simdWorldTransform
     diagnostics["initial"] = controller.diagnostics
-    guard visual.ignoresMouseEvents, !canvas.overlayCameraArmed,
+    guard !visual.ignoresMouseEvents, canvas.overlaySurfaceInteractive, !canvas.overlayCameraArmed,
       controller.diagnostics.phase == "passive", !controller.diagnostics.tapEnabled,
       !visual.canBecomeKey, !clear.canBecomeKey, !canvas.acceptsFirstResponder,
       stage.acceptsFirstResponder == false, stage.allowsCameraControl == false,
@@ -389,7 +395,7 @@ import simd
     controller.reconcileForAcceptance(
       pointer: CGPoint(x: visual.frame.minX - 20, y: visual.frame.minY - 20),
       modifiers: .option, buttons: [])
-    guard visual.ignoresMouseEvents, controller.diagnostics.phase == "passive" else {
+    guard !visual.ignoresMouseEvents, controller.diagnostics.phase == "passive" else {
       throw ProviderError.message("Option away from visible geometry acquired the panel.")
     }
     controller.reconcileForAcceptance(
@@ -408,7 +414,7 @@ import simd
       with: try orbitMouse(
         .leftMouseDown, at: point, canvas: canvas, flags: [.control, .option]))
     guard !canvas.isOverlayCameraDragging, controller.diagnostics.starts == 0,
-      visual.ignoresMouseEvents
+      !canvas.overlayCameraArmed
     else { throw ProviderError.message("A Control+Option mouse-down escaped the host veto.") }
     controller.reconcileForAcceptance(pointer: pointer, modifiers: .option, buttons: [])
     let beforeLeaders = try verifyLeaderAttachments(
@@ -430,7 +436,7 @@ import simd
     diagnostics["after-drag"] = controller.diagnostics
     guard camera.simdWorldTransform != before, !canvas.isOverlayCameraDragging,
       canvas.overlayCameraDragEventCount == 1, controller.diagnostics.starts == 1,
-      controller.diagnostics.ends == 1, visual.ignoresMouseEvents, !canvas.overlayCameraArmed,
+      controller.diagnostics.ends == 1, !visual.ignoresMouseEvents, !canvas.overlayCameraArmed,
       stage.defaultCameraController.isInertiaRunning == false,
       model.scene == document, model.messages.map(\.id) == messageIDs,
       NSWorkspace.shared.frontmostApplication?.processIdentifier == foreground
@@ -453,7 +459,7 @@ import simd
       canvas.projectedLabelText(id: "orbit-label") == "Orbit block",
       CGRect(x: 0, y: 0, width: document.width, height: document.height).contains(label),
       canvas.unresolvedLabelOverlapCount == 0, pixels >= 12,
-      orbitCoverage.visible > 500, orbitCoverage.transparent > 500
+      orbitCoverage.visible > 500, opaqueTrayBackdrop(composite, canvasSize: canvas.bounds.size)
     else {
       throw ProviderError.message("Synthetic orbit lost the native label, surface or alpha pixels.")
     }
@@ -489,7 +495,7 @@ import simd
     controller.refresh()
     diagnostics["generation-cancelled"] = controller.diagnostics
     guard model.taskGeneration > generation, !canvas.isOverlayCameraDragging,
-      visual.ignoresMouseEvents, !canvas.overlayCameraArmed,
+      !canvas.overlayCameraArmed,
       controller.diagnostics.phase == "passive"
     else { throw ProviderError.message("A changed task generation retained orbit ownership.") }
 
@@ -564,7 +570,8 @@ import simd
       "syntheticOwnViewEvents": true, "globalInputPosted": false,
       "externalModifierDeliveryTested": false, "windowServerInputTested": false,
       "humanPhysicalOrbitTested": false, "ambientObservationEnabled": false,
-      "passiveWindowIgnoresMouseEvents": true, "armedOwnershipIsBoundedPanel": true,
+      "passiveWindowIgnoresMouseEvents": false, "armedOwnershipIsBoundedPanel": true,
+      "visibleTrayOwnsLocalInput": true,
       "transparentPixelClickThroughWhileArmedClaimed": false,
       "cameraChangedThroughOwnViewDragHandler": true, "canonicalDocumentUnchanged": true,
       "requestedLeadersVerifiedBeforeAndAfterDrag": afterLeaders.count,
@@ -586,6 +593,37 @@ import simd
       }
       try await Task.sleep(for: .milliseconds(20))
     }
+  }
+
+  /// Authored native camera submissions, without system event creation/posting.
+  /// These costs exclude GPU completion, display refresh, input dispatch and AI.
+  private static func measureLocalOrbitCPU(_ canvas: RetainedCanvasView) async throws -> [String:
+    Any]
+  {
+    let identity = (canvas.renderedDocumentID, canvas.renderedDocumentRevision)
+    var milliseconds: [Double] = []
+    for index in 0..<120 {
+      try Task.checkCancellation()
+      let start = ProcessInfo.processInfo.systemUptime
+      guard canvas.orbitOverlayCamera(delta: CGPoint(x: index < 60 ? 0.005 : -0.005, y: 0)) else {
+        throw ProviderError.message("A mounted tray refused the authored local orbit sample.")
+      }
+      milliseconds.append((ProcessInfo.processInfo.systemUptime - start) * 1_000)
+      if index % 8 == 0 { await Task.yield() }
+    }
+    guard canvas.renderedDocumentID == identity.0, canvas.renderedDocumentRevision == identity.1
+    else {
+      throw ProviderError.message("Local orbit changed the explanation document.")
+    }
+    milliseconds.sort()
+    return [
+      "samples": milliseconds.count, "p50MS": milliseconds[60],
+      "p95MS": milliseconds[114], "maxMS": milliseconds[119],
+      "scope":
+        "Authored local camera/label CPU submission only; not displayed FPS or trackpad latency.",
+      "providerCalled": false, "systemInputPosted": false,
+      "documentUnchanged": true, "displayedFPSMeasured": false,
+    ]
   }
 
   private static func orbitPoint(canvas: RetainedCanvasView, stage: SCNView) throws -> CGPoint {
@@ -872,6 +910,29 @@ import simd
       }
     }
     return first
+  }
+
+  private static func opaqueTrayBackdrop(_ bitmap: NSBitmapImageRep, canvasSize: CGSize) -> Bool {
+    guard bitmap.pixelsWide > 0, bitmap.pixelsHigh > 0,
+      canvasSize.width > 80, canvasSize.height > 40
+    else { return false }
+    let expected = NSColor(sceneHex: "#101114").usingColorSpace(.deviceRGB)!
+    var matches = 0
+    for x in [CGFloat(30), canvasSize.width / 2, canvasSize.width - 30] {
+      let px = min(bitmap.pixelsWide - 1, Int(x / canvasSize.width * CGFloat(bitmap.pixelsWide)))
+      let py = min(
+        bitmap.pixelsHigh - 1,
+        Int((canvasSize.height - 5) / canvasSize.height * CGFloat(bitmap.pixelsHigh)))
+      guard let color = bitmap.colorAt(x: px, y: py)?.usingColorSpace(.deviceRGB) else { continue }
+      if color.alphaComponent >= 0.98,
+        abs(color.redComponent - expected.redComponent) < 0.04,
+        abs(color.greenComponent - expected.greenComponent) < 0.04,
+        abs(color.blueComponent - expected.blueComponent) < 0.04
+      {
+        matches += 1
+      }
+    }
+    return matches >= 2
   }
 
   private static func coverage(_ bitmap: NSBitmapImageRep) -> (visible: Int, transparent: Int) {

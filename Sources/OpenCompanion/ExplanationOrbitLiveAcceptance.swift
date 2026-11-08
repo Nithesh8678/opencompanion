@@ -103,7 +103,8 @@ import simd
       && final.optionPresses > initialPresses && final.optionReleases > initialReleases
       && final.phase == "passive" && final.observationAvailable && final.tapEnabled
       && !NSEvent.modifierFlags.contains(.option) && NSEvent.pressedMouseButtons == 0
-      && final.panelIgnoresMouseEvents && !final.canvasArmed && cameraMoved
+      && !final.panelIgnoresMouseEvents && canvas.overlaySurfaceInteractive && !final.canvasArmed
+      && cameraMoved
       && !canvas.isOverlayCameraDragging && !stage.defaultCameraController.isInertiaRunning
       && model.scene == document
       && NSWorkspace.shared.frontmostApplication?.processIdentifier == originalForeground
@@ -126,7 +127,8 @@ import simd
         "foregroundPreserved": NSWorkspace.shared.frontmostApplication?.processIdentifier
           == originalForeground,
         "documentUnchanged": model.scene == document,
-        "passiveAfterRelease": final.panelIgnoresMouseEvents,
+        "gestureEndedAfterRelease": final.phase == "passive",
+        "boundedTrayOwnsInput": !final.panelIgnoresMouseEvents,
         "humanPhysicalInputVerified": false, "inputSource": "unverified",
         "inputPostedByHelper": false, "desktopCaptured": false, "providerCalled": false,
         "audioUsed": false,

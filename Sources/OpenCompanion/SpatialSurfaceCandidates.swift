@@ -47,6 +47,29 @@ enum SpatialSurfaceCandidates {
       samples.append(contentsOf: [
         .init(x: 0, y: halfHeight, z: 0), .init(x: 0, y: -halfHeight, z: 0),
       ])
+    case .cone(let top, let bottom, let height, _):
+      guard
+        let contour = try? SpatialProfile3D.latheContour([
+          .init(radius: bottom, y: -height / 2), .init(radius: top, y: height / 2),
+        ])
+      else { return [] }
+      (closest, samples) = revolutionPoints(contour, hint: hint)
+    case .capsule(let radius, let height, _):
+      let halfStraight = (height - 2 * radius) / 2
+      let center = Vector3D(x: 0, y: clamped(hint.y, -halfStraight, halfStraight), z: 0)
+      let unit = normalized(
+        .init(x: hint.x, y: hint.y - center.y, z: hint.z), fallback: .init(x: 1, y: 0, z: 0))
+      closest = .init(x: unit.x * radius, y: center.y + unit.y * radius, z: unit.z * radius)
+      samples = directions.map { direction in
+        let unit = normalized(direction, fallback: .init(x: 1, y: 0, z: 0))
+        return .init(
+          x: unit.x * radius, y: sign(unit.y) * halfStraight + unit.y * radius, z: unit.z * radius)
+      }
+    case .lathe(let profile, _):
+      guard let contour = try? SpatialProfile3D.latheContour(profile) else { return [] }
+      (closest, samples) = revolutionPoints(contour, hint: hint)
+    case .extrusion(let profile, let depth):
+      (closest, samples) = extrusionPoints(profile, depth: depth, hint: hint)
     case .torus(let ringRadius, let pipeRadius, _, _):
       let radial = radialDirection(hint)
       let center = Vector3D(x: radial.x * ringRadius, y: 0, z: radial.z * ringRadius)
@@ -145,6 +168,75 @@ enum SpatialSurfaceCandidates {
     }
     return result
   }()
+
+  /// Profile sizes are admitted at <=34 vertices including implicit axis caps.
+  /// An axis-to-axis edge is internal material, not a candidate surface.
+  private static func revolutionPoints(_ contour: [Point2D], hint: Vector3D) -> (
+    Vector3D, [Vector3D]
+  ) {
+    let radial = radialDirection(hint)
+    let query = Point2D(x: min(1e9, hypot(hint.x, hint.z)), y: clamped(hint.y, -1e9, 1e9))
+    var boundary: [Vector3D] = []
+    var samples: [Vector3D] = []
+    for index in contour.indices {
+      let a = contour[index]
+      let b = contour[(index + 1) % contour.count]
+      if a.x == 0, b.x == 0 { continue }
+      let p = segmentPoint(query, a, b)
+      boundary.append(.init(x: radial.x * p.x, y: p.y, z: radial.z * p.x))
+      for value in [a, .init(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2), b] {
+        for angle in [0.0, .pi / 2, .pi, 3 * .pi / 2] {
+          samples.append(.init(x: value.x * cos(angle), y: value.y, z: value.x * sin(angle)))
+        }
+      }
+    }
+    return (nearest(boundary, to: hint), samples)
+  }
+
+  private static func extrusionPoints(_ profile: [Point2D], depth: Double, hint: Vector3D) -> (
+    Vector3D, [Vector3D]
+  ) {
+    let query = Point2D(x: clamped(hint.x, -1e9, 1e9), y: clamped(hint.y, -1e9, 1e9))
+    var boundary: [Vector3D] = []
+    var samples: [Vector3D] = []
+    var inside = false
+    for index in profile.indices {
+      let a = profile[index]
+      let b = profile[(index + 1) % profile.count]
+      let p = segmentPoint(query, a, b)
+      boundary.append(.init(x: p.x, y: p.y, z: clamped(hint.z, -depth / 2, depth / 2)))
+      if (a.y > query.y) != (b.y > query.y),
+        query.x < (b.x - a.x) * (query.y - a.y) / (b.y - a.y) + a.x
+      {
+        inside.toggle()
+      }
+      for z in [-depth / 2, depth / 2] {
+        samples.append(.init(x: a.x, y: a.y, z: z))
+        samples.append(.init(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: z))
+      }
+    }
+    if inside {
+      for z in [-depth / 2, depth / 2] { boundary.append(.init(x: query.x, y: query.y, z: z)) }
+    }
+    if let triangles = try? SpatialProfile3D.triangulation(profile) {
+      for index in stride(from: 0, to: triangles.count, by: 3) {
+        let a = profile[triangles[index]]
+        let b = profile[triangles[index + 1]]
+        let c = profile[triangles[index + 2]]
+        for z in [-depth / 2, depth / 2] {
+          samples.append(.init(x: (a.x + b.x + c.x) / 3, y: (a.y + b.y + c.y) / 3, z: z))
+        }
+      }
+    }
+    return (nearest(boundary, to: hint), samples)
+  }
+
+  private static func segmentPoint(_ query: Point2D, _ a: Point2D, _ b: Point2D) -> Point2D {
+    let dx = b.x - a.x
+    let dy = b.y - a.y
+    let t = clamped(((query.x - a.x) * dx + (query.y - a.y) * dy) / (dx * dx + dy * dy), 0, 1)
+    return .init(x: a.x + t * dx, y: a.y + t * dy)
+  }
 
   private static func boxPoint(
     _ hint: Vector3D, half: Vector3D, inner: Vector3D, chamfer: Double

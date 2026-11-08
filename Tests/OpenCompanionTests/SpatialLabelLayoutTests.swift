@@ -138,14 +138,8 @@ struct SpatialLabelLayoutTests {
         #expect(layer.bounds.width >= intrinsic)
         #expect(CTTypesetterSuggestLineBreak(typesetter, 0, layer.bounds.width) == word.utf16.count)
         #expect(layer.bounds.height < 2 * (ascent + descent + leading))
-        if presentation == .passiveOverlay,
-          let handwritten = NSFont(name: "ChalkboardSE-Regular", size: font.pointSize)
-        {
-          #expect(font.fontName == handwritten.fontName)
-        } else {
-          #expect(
-            font.fontName == NSFont.systemFont(ofSize: font.pointSize, weight: .medium).fontName)
-        }
+        #expect(
+          font.fontName == NSFont.systemFont(ofSize: font.pointSize, weight: .medium).fontName)
       }
       #expect(view.projectedLabelFrames.count == 3 && view.unresolvedLabelOverlapCount == 0)
     }

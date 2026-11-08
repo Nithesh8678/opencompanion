@@ -5,6 +5,39 @@ import Testing
 @testable import OpenCompanion
 
 @MainActor struct VoiceNarrationTests {
+  @Test func initializationStopAndRejectedNarrationNeverCreateNativeSynthesis() {
+    let service = VoiceService()
+    #expect(!service.hasNativeSynthesizer && !service.hasPendingSpeech)
+    service.stop()
+    service.stop()
+    #expect(!service.hasNativeSynthesizer && !service.hasPendingSpeech)
+    let empty = service.speak("", context: .init(generation: 1, narrationID: UUID()))
+    let oversized = service.speak(String(repeating: "x", count: 32_001))
+    #expect(!empty && !oversized && !service.hasNativeSynthesizer)
+  }
+
+  @Test func injectedSpeechPreservesNarrationAndCancellationWithoutNativeSynthesis() throws {
+    let fixture = NarrationFixture()
+    #expect(!fixture.service.hasNativeSynthesizer)
+    fixture.service.stop()
+    let context = VoiceNarrationContext(generation: 21, narrationID: UUID())
+    let admitted = fixture.service.speak("Public injected narration.", context: context)
+    let queued = try #require(fixture.updates.first)
+    let id = ObjectIdentifier(try #require(fixture.utterances.first))
+    #expect(admitted && queued.kind == .enqueued && queued.context == context)
+    #expect(!fixture.service.hasNativeSynthesizer && fixture.service.hasPendingSpeech)
+    fixture.deliver(.started, id: id, token: queued.token)
+    fixture.deliver(.range(location: 0, length: 6), id: id, token: queued.token)
+    fixture.service.stop()
+    fixture.deliver(.finished, id: id, token: queued.token)
+    #expect(fixture.updates.map(\.kind) == [.enqueued, .started, .range, .cancelled])
+    #expect(fixture.updates.last?.cancellationReason == .stop)
+    #expect(fixture.updates.last?.context == context)
+    #expect(fixture.updates.last?.revealedUTF16End == 6)
+    #expect(fixture.nativeStops == 2)
+    #expect(!fixture.service.hasNativeSynthesizer && !fixture.service.hasPendingSpeech)
+  }
+
   @Test func typedAdmissionReturnsIdentityAndLegacySpeechKeepsItsOriginalCallbacks() throws {
     let fixture = NarrationFixture()
     let context = VoiceNarrationContext(generation: 7, narrationID: UUID())

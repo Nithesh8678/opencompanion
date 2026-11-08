@@ -180,6 +180,19 @@ struct SceneCanvas: NSViewRepresentable {
   }
   var shouldBeginOverlayCameraInteraction: ((CGPoint, NSEvent.ModifierFlags) -> Bool)?
   var onOverlayCameraInteraction: ((CanvasCameraInteractionEvent) -> Void)?
+  var onOverlayScrollInteraction: ((NSEvent) -> Bool)?
+  /// Input belongs to the visible bounded tray, independently of Option-drag.
+  var overlaySurfaceInteractive = false
+  var overlayTrayEnabled = false {
+    didSet {
+      updateCanvasBackground()
+      layer?.cornerRadius = overlayTrayEnabled ? 18 : 0
+      layer?.masksToBounds = overlayTrayEnabled
+    }
+  }
+  var overlayHeaderInset: CGFloat = 0 {
+    didSet { if overlayHeaderInset != oldValue { applyLayout() } }
+  }
   private var hasTypedSpatialContent = false
   private var poses: [ScenePose] = []
   private var dragParentInverse: AffineTransform2D = .identity
@@ -272,12 +285,20 @@ struct SceneCanvas: NSViewRepresentable {
   required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
   override func hitTest(_ point: NSPoint) -> NSView? {
     if presentation == .editor { return super.hitTest(point) }
+    if overlaySurfaceInteractive {
+      let local = convert(point, from: superview)
+      guard bounds.contains(local) else { return nil }
+      // Let the tray's native header controls receive clicks. SceneKit input
+      // stays routed through this host so it cannot edit/zoom a passive scene.
+      return super.hitTest(point) is NSControl ? super.hitTest(point) : self
+    }
     guard overlayCameraArmed else { return nil }
     let local = convert(point, from: superview)
     return visibleSpatialMesh(atCanvasPoint: local) == nil ? nil : self
   }
   override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-    presentation == .passiveOverlay ? overlayCameraArmed : super.acceptsFirstMouse(for: event)
+    presentation == .passiveOverlay
+      ? overlaySurfaceInteractive || overlayCameraArmed : super.acceptsFirstMouse(for: event)
   }
   override func resetCursorRects() {
     super.resetCursorRects()
@@ -467,11 +488,17 @@ struct SceneCanvas: NSViewRepresentable {
     updateDisplayLink()
   }
   private func applyLayout() {
-    ratio = max(0.0001, min(bounds.width / document.width, bounds.height / document.height))
+    let inset =
+      presentation == .passiveOverlay && overlayHeaderInset.isFinite
+      ? min(max(0, overlayHeaderInset), max(0, bounds.height - 40)) : 0
+    let area = CGRect(x: 0, y: inset, width: bounds.width, height: max(1, bounds.height - inset))
+    ratio = max(0.0001, min(area.width / document.width, area.height / document.height))
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     content.anchorPoint = .zero
-    content.position = CGPoint(x: max(0, (bounds.width - document.width * ratio) / 2), y: 0)
+    content.position = CGPoint(
+      x: max(0, (area.width - document.width * ratio) / 2),
+      y: inset)
     content.bounds = CGRect(x: 0, y: 0, width: document.width, height: document.height)
     content.setAffineTransform(CGAffineTransform(scaleX: ratio, y: ratio))
     spatialLabels.anchorPoint = .zero
@@ -481,8 +508,8 @@ struct SceneCanvas: NSViewRepresentable {
     CATransaction.commit()
     if let stage {
       stage.frame = CGRect(
-        x: bounds.width * 0.08, y: bounds.height * 0.15, width: bounds.width * 0.84,
-        height: bounds.height * 0.7)
+        x: area.width * 0.08, y: inset + area.height * 0.15, width: area.width * 0.84,
+        height: area.height * 0.7)
       if hasTypedSpatialContent, cameraFitSize != stage.bounds.size {
         fitCameraToGeometry()
         cameraFitSize = stage.bounds.size
@@ -592,7 +619,9 @@ struct SceneCanvas: NSViewRepresentable {
               ofSize: max(10, node.fontSize), weight: node.fontSize >= 24 ? .semibold : .regular)
             textLayer.fontSize = max(10, node.fontSize)
           }
-          textLayer.foregroundColor = NSColor(sceneHex: node.color).cgColor
+          textLayer.foregroundColor =
+            (anchored && presentation == .passiveOverlay
+            ? NSColor(sceneHex: "#F2F4F8") : NSColor(sceneHex: node.color)).cgColor
           textLayer.isWrapped = true
           textLayer.truncationMode = .end
           textLayer.alignmentMode = .left
@@ -662,11 +691,6 @@ struct SceneCanvas: NSViewRepresentable {
 
   private func spatialLabelFont(_ node: SceneNode) -> NSFont {
     let size = min(22, max(15, node.fontSize * ratio)) / ratio
-    if presentation == .passiveOverlay,
-      let handwritten = NSFont(name: "ChalkboardSE-Regular", size: size)
-    {
-      return handwritten
-    }
     return NSFont.systemFont(ofSize: size, weight: .medium)
   }
 
@@ -755,17 +779,21 @@ struct SceneCanvas: NSViewRepresentable {
         options: [SCNView.Option.preferredRenderingAPI.rawValue: SCNRenderingAPI.metal.rawValue])
       view.scene = SCNScene()
       view.allowsCameraControl = presentation == .editor
-      view.autoenablesDefaultLighting = true
       view.backgroundColor = .clear
       view.scene?.background.contents = NSColor.clear
       let camera = SCNNode()
       camera.camera = SCNCamera()
       camera.position = SCNVector3(0, 1.5, 9)
+      SpatialPresentationStyle.configure(view, camera: camera)
       view.scene?.rootNode.addChildNode(camera)
       view.pointOfView = camera
       view.defaultCameraController.inertiaEnabled = false
       view.canBecomeKeyResponder = { [weak self] in self?.presentation == .editor }
       view.onCameraChanged = { [weak self] in self?.updateCameraProjection() }
+      view.onOverlayScroll = { [weak self] event in
+        guard let self, self.presentation == .passiveOverlay else { return false }
+        return self.onOverlayScrollInteraction?(event) ?? false
+      }
       addSubview(view)
       stage = view
     }
@@ -872,7 +900,7 @@ struct SceneCanvas: NSViewRepresentable {
   private func updateCanvasBackground() {
     layer?.backgroundColor =
       presentation == .passiveOverlay
-      ? NSColor.clear.cgColor
+      ? (overlayTrayEnabled ? NSColor(sceneHex: "#101114") : NSColor.clear).cgColor
       : (hasTypedSpatialContent ? NSColor(white: 0.055, alpha: 1) : NSColor.white).cgColor
   }
 
@@ -880,12 +908,8 @@ struct SceneCanvas: NSViewRepresentable {
     guard let geometry = node.geometry else { return }
     let key = source.fill == "transparent" ? source.color : source.fill
     guard materialKeys[source.id] != key || geometry.firstMaterial == nil else { return }
-    let material = geometry.firstMaterial ?? SCNMaterial()
-    material.diffuse.contents = NSColor(
-      sceneHex: source.fill == "transparent" ? source.color : source.fill)
-    material.lightingModel = .blinn
-    material.specular.contents = NSColor(white: 0.6, alpha: 1)
-    material.shininess = 0.35
+    let material = SpatialPresentationStyle.material(
+      color: NSColor(sceneHex: source.fill == "transparent" ? source.color : source.fill))
     geometry.materials = [material]
     materialKeys[source.id] = key
   }
@@ -1098,7 +1122,8 @@ struct SceneCanvas: NSViewRepresentable {
       // explicitly into this flipped canvas before applying native point offsets.
       let native = stage.convert(
         CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y)), to: self)
-      let point = CGPoint(x: (native.x - content.position.x) / ratio, y: native.y / ratio)
+      let point = CGPoint(
+        x: (native.x - content.position.x) / ratio, y: (native.y - content.position.y) / ratio)
       items.append(
         .init(
           id: source.id, anchor: point,
@@ -1133,8 +1158,11 @@ struct SceneCanvas: NSViewRepresentable {
         spatialLabels.addSublayer(leader)
       }
       leader.isHidden = !anchor.leader || projectedLabelAttachments[source.id]?.isResolved != true
-      leader.fillColor = NSColor(sceneHex: source.color).cgColor
-      leader.strokeColor = NSColor(sceneHex: source.color).cgColor
+      let leaderColor =
+        presentation == .passiveOverlay
+        ? NSColor(sceneHex: "#CFD5DF") : NSColor(sceneHex: source.color)
+      leader.fillColor = leaderColor.cgColor
+      leader.strokeColor = leaderColor.cgColor
       leader.lineWidth = 1.2 / ratio
       leader.lineCap = .round
       leader.opacity = Float(source.opacity)
@@ -1169,7 +1197,9 @@ struct SceneCanvas: NSViewRepresentable {
             else { continue }
             let native = stage.convert(
               CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y)), to: self)
-            let point = CGPoint(x: (native.x - content.position.x) / ratio, y: native.y / ratio)
+            let point = CGPoint(
+              x: (native.x - content.position.x) / ratio, y: (native.y - content.position.y) / ratio
+            )
             minimum = CGPoint(x: min(minimum.x, point.x), y: min(minimum.y, point.y))
             maximum = CGPoint(x: max(maximum.x, point.x), y: max(maximum.y, point.y))
           }
@@ -1579,6 +1609,51 @@ struct SceneCanvas: NSViewRepresentable {
     updateDisplayLink()
   }
 
+  /// Local two-finger deltas only; the overlay controller authenticates the
+  /// mounted lease and gesture phases before calling. No scene/document edit,
+  /// provider request, global event interception, or frame timer is involved.
+  @discardableResult func orbitOverlayCamera(delta: CGPoint) -> Bool {
+    guard presentation == .passiveOverlay, overlaySurfaceInteractive,
+      !isOverlayCameraDragging, delta.x.isFinite, delta.y.isFinite,
+      abs(delta.x) <= .pi, abs(delta.y) <= .pi,
+      delta != .zero, !isHiddenOrHasHiddenAncestor,
+      let stage, !stage.isHidden, let camera = stage.pointOfView
+    else { return false }
+    let target = stage.defaultCameraController.target
+    let old = camera.worldPosition
+    let offset = SIMD3(Double(old.x - target.x), Double(old.y - target.y), Double(old.z - target.z))
+    let radius = simd_length(offset)
+    guard radius.isFinite, radius > 0.000_001, radius < 1_000_000 else { return false }
+    let yaw = atan2(offset.x, offset.z) - Double(min(0.20, max(-0.20, delta.x)))
+    let pitch = min(
+      Double.pi * 0.46,
+      max(
+        -Double.pi * 0.46,
+        asin(min(1, max(-1, offset.y / radius)))
+          + Double(min(0.20, max(-0.20, delta.y)))))
+    let next = SIMD3(
+      radius * cos(pitch) * sin(yaw), radius * sin(pitch), radius * cos(pitch) * cos(yaw))
+    stage.defaultCameraController.stopInertia()
+    SCNTransaction.begin()
+    SCNTransaction.animationDuration = 0
+    camera.position = SCNVector3(
+      Float(Double(target.x) + next.x), Float(Double(target.y) + next.y),
+      Float(Double(target.z) + next.z))
+    camera.look(at: target)
+    SCNTransaction.commit()
+    overlayCameraAdjusted = true
+    updateCameraProjection()
+    return true
+  }
+
+  override func scrollWheel(with event: NSEvent) {
+    if presentation == .passiveOverlay {
+      _ = onOverlayScrollInteraction?(event)
+      return
+    }
+    super.scrollWheel(with: event)
+  }
+
   func projectedLeaderPath(id: String) -> CGPath? {
     guard let leader = leaderLayers[id], !leader.isHidden else { return nil }
     return leader.path
@@ -1678,7 +1753,15 @@ struct SceneCanvas: NSViewRepresentable {
     context.clear(bounds)
     if let color = layer?.backgroundColor {
       context.setFillColor(color)
-      context.fill(bounds)
+      if presentation == .passiveOverlay && overlayTrayEnabled {
+        let outline = CGPath(roundedRect: bounds, cornerWidth: 18, cornerHeight: 18, transform: nil)
+        context.addPath(outline)
+        context.fillPath()
+        context.addPath(outline)
+        context.clip()
+      } else {
+        context.fill(bounds)
+      }
     }
     func draw(_ layer: CALayer) {
       context.saveGState()
@@ -1694,6 +1777,15 @@ struct SceneCanvas: NSViewRepresentable {
         respectFlipped: true, hints: nil)
     }
     if includeSpatialLabels { draw(spatialLabels) }
+    // SceneKit snapshots exclude AppKit's header views. Composite those own
+    // native labels after the scene, using their actual retained layer frames.
+    for header in subviews where header !== stage && !header.isHidden {
+      guard let headerLayer = header.layer else { continue }
+      context.saveGState()
+      context.translateBy(x: header.frame.minX, y: header.frame.minY)
+      headerLayer.render(in: context)
+      context.restoreGState()
+    }
     return bitmap
   }
   override func mouseDown(with event: NSEvent) {
@@ -1703,7 +1795,8 @@ struct SceneCanvas: NSViewRepresentable {
     }
     guard presentation == .editor else { return }
     let point = convert(event.locationInWindow, from: nil)
-    let local = CGPoint(x: (point.x - content.position.x) / ratio, y: point.y / ratio)
+    let local = CGPoint(
+      x: (point.x - content.position.x) / ratio, y: (point.y - content.position.y) / ratio)
     if drawing {
       guard CGRect(x: 0, y: 0, width: document.width, height: document.height).contains(local)
       else { return }
@@ -1734,7 +1827,8 @@ struct SceneCanvas: NSViewRepresentable {
       return
     }
     let point = convert(event.locationInWindow, from: nil)
-    let local = Point2D(x: (point.x - content.position.x) / ratio, y: point.y / ratio)
+    let local = Point2D(
+      x: (point.x - content.position.x) / ratio, y: (point.y - content.position.y) / ratio)
     if drawing {
       guard !activeStroke.isEmpty, activeStroke.count < 8192 else { return }
       let bounded = Point2D(
@@ -1773,6 +1867,7 @@ struct SceneCanvas: NSViewRepresentable {
 /// changes its camera. Inertia is disabled so there is no hidden idle clock.
 @MainActor private final class ExplanationSceneView: SCNView {
   var onCameraChanged: (() -> Void)?
+  var onOverlayScroll: ((NSEvent) -> Bool)?
   var canBecomeKeyResponder: (() -> Bool)?
   override var acceptsFirstResponder: Bool { canBecomeKeyResponder?() ?? false }
   override var isOpaque: Bool { false }
@@ -1782,6 +1877,7 @@ struct SceneCanvas: NSViewRepresentable {
     onCameraChanged?()
   }
   override func scrollWheel(with event: NSEvent) {
+    if onOverlayScroll?(event) == true { return }
     super.scrollWheel(with: event)
     onCameraChanged?()
   }

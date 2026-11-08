@@ -215,6 +215,96 @@ struct ExplanationOrbitStateTests {
     }
   }
 
+  @Test func localScrollNeedsTheOwnedSurfaceButNoOptionOrMeshHit() {
+    var state = ExplanationOrbitState()
+    var input = ready()
+    input.modifiers = []
+    input.pointerOnVisibleMesh = false
+    let outside = state.beginScroll(input)
+    #expect(!outside && state.phase == .passive)
+    input.pointerInsideSurface = true
+    let began = state.beginScroll(input)
+    #expect(began && state.phase == .scrolling && state.authority == input.authority)
+    input.pointerInsideSurface = false
+    let leftSurface = state.update(input)
+    #expect(leftSurface == .passive && state.authority == nil)
+  }
+
+  @Test(arguments: [
+    ExplanationOrbitState.Modifiers.option, .control, [.option, .control], .command, .shift,
+    .function, .help, .init(rawValue: 1 << 15),
+  ])
+  func localScrollRefusesSignificantModifiers(_ modifiers: ExplanationOrbitState.Modifiers) {
+    var state = ExplanationOrbitState()
+    var input = ready()
+    input.pointerInsideSurface = true
+    input.modifiers = modifiers
+    let began = state.beginScroll(input)
+    #expect(!began && state.phase == .passive)
+  }
+
+  @Test func scrollAuthorityCannotBeReplacedOrEndedByAnOldGesture() {
+    var state = ExplanationOrbitState()
+    var input = ready()
+    input.modifiers = [.capsLock, .numericPad]
+    input.pointerInsideSurface = true
+    let began = state.beginScroll(input)
+    let old = input
+    input.authority = .init(lease: UUID(), documentID: "new-scene", generation: 8, displayID: 1)
+    let replaced = state.beginScroll(input)
+    let wrongEnd = state.endScroll(input)
+    #expect(began && !replaced && !wrongEnd && state.authority == old.authority)
+    let revoked = state.update(input)
+    #expect(revoked == .passive)
+    let next = state.beginScroll(input)
+    let staleEnd = state.endScroll(old)
+    #expect(next && !staleEnd && state.phase == .scrolling)
+    input.buttons = .left
+    let pressed = state.update(input)
+    #expect(pressed == .passive && state.authority == nil)
+  }
+
+  @Test func scrollStopsOnHiddenOrUnavailableSurfaceAndNeverStartsDuringADrag() {
+    var state = ExplanationOrbitState()
+    var input = ready()
+    state.update(input)
+    input.buttons = .left
+    state.beginDrag(input)
+    input.buttons = []
+    input.modifiers = []
+    input.pointerInsideSurface = true
+    let whileDragging = state.beginScroll(input)
+    #expect(!whileDragging)
+    state.cancel()
+    for unavailable in 0..<5 {
+      var value = input
+      switch unavailable {
+      case 0: value.presentationVisible = false
+      case 1: value.awake = false
+      case 2: value.sessionActive = false
+      case 3: value.displayAvailable = false
+      default: value.spatialReady = false
+      }
+      let began = state.beginScroll(value)
+      #expect(!began && state.phase == .passive)
+    }
+  }
+
+  @Test func authoredScrollGainIsFiniteBoundedAndPreservesBothAxes() {
+    #expect(
+      ExplanationOrbitState.scrollDelta(x: 10, y: -5, precise: true) == CGPoint(x: 0.08, y: -0.04))
+    #expect(
+      ExplanationOrbitState.scrollDelta(x: 1, y: -1, precise: false) == CGPoint(x: 0.035, y: -0.035)
+    )
+    #expect(
+      ExplanationOrbitState.scrollDelta(x: 4096, y: -4096, precise: true)
+        == CGPoint(x: 0.20, y: -0.20))
+    for value in [Double.nan, .infinity, -.infinity, 4097, -4097] {
+      #expect(ExplanationOrbitState.scrollDelta(x: value, y: 0, precise: true) == nil)
+      #expect(ExplanationOrbitState.scrollDelta(x: 0, y: value, precise: true) == nil)
+    }
+  }
+
   private func ready() -> ExplanationOrbitState.Input {
     .init(
       authority: .init(lease: UUID(), documentID: "public-scene", generation: 7, displayID: 1),

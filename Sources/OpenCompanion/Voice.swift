@@ -75,8 +75,9 @@ struct VoiceNarrationText: Sendable {
   }
 }
 
-/// Tests can observe native requests without starting audio or changing privacy
-/// permissions. Production always uses its retained AVSpeechSynthesizer.
+/// Tests can observe speech requests without creating a native synthesizer,
+/// starting audio, or changing privacy permissions. Production creates and
+/// retains its synthesizer only when the first real utterance is admitted.
 @MainActor struct VoiceSpeechDriver {
   let speak: (AVSpeechUtterance) -> Void
   let stop: () -> Void
@@ -216,7 +217,7 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
 }
 
 @MainActor final class VoiceService: NSObject, AVSpeechSynthesizerDelegate {
-  private let synthesizer = AVSpeechSynthesizer()
+  private var nativeSynthesizer: AVSpeechSynthesizer?
   private let speechDriver: VoiceSpeechDriver?
   private var engine: AVAudioEngine?
   private var tapInstalled = false
@@ -238,6 +239,8 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
   }
   private var utterances: [ObjectIdentifier: UtteranceRecord] = [:]
   var hasPendingSpeech: Bool { !utterances.isEmpty }
+  /// Content-free resource diagnostic; reading it never initializes synthesis.
+  var hasNativeSynthesizer: Bool { nativeSynthesizer != nil }
   private nonisolated let utteranceTokens = VoiceUtteranceTokens()
   var onInputState: ((VoiceInputSnapshot) -> Void)?
   var onTranscript: ((UUID, VoiceInputMode, String, Bool) -> Void)?
@@ -252,13 +255,11 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
   override init() {
     speechDriver = nil
     super.init()
-    synthesizer.delegate = self
   }
 
   init(speechDriver: VoiceSpeechDriver) {
     self.speechDriver = speechDriver
     super.init()
-    synthesizer.delegate = self
   }
 
   convenience init(
@@ -286,16 +287,32 @@ final class VoiceUtteranceTokens: @unchecked Sendable {
     let record = UtteranceRecord(
       utterance: utterance, token: token, context: context, text: boundedText)
     utterances[id] = record
-    if let speechDriver { speechDriver.speak(utterance) } else { synthesizer.speak(utterance) }
+    if let speechDriver { speechDriver.speak(utterance) } else { speakNatively(utterance) }
     emit(.enqueued, record: record, observedUptime: ProcessInfo.processInfo.systemUptime)
     return true
+  }
+
+  private func speakNatively(_ utterance: AVSpeechUtterance) {
+    let synthesizer: AVSpeechSynthesizer
+    if let existing = nativeSynthesizer {
+      synthesizer = existing
+    } else {
+      synthesizer = AVSpeechSynthesizer()
+      synthesizer.delegate = self
+      nativeSynthesizer = synthesizer
+    }
+    synthesizer.speak(utterance)
   }
 
   func stop() {
     let cancelled = Array(utterances.values)
     utteranceTokens.removeAll()
     utterances.removeAll()
-    if let speechDriver { speechDriver.stop() } else { synthesizer.stopSpeaking(at: .immediate) }
+    if let speechDriver {
+      speechDriver.stop()
+    } else {
+      nativeSynthesizer?.stopSpeaking(at: .immediate)
+    }
     cancelInput()
     onState?("Ready")
     let observed = ProcessInfo.processInfo.systemUptime

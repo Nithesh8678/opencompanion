@@ -6,6 +6,58 @@ import Testing
 @testable import OpenCompanion
 
 @Suite @MainActor struct SpatialRendererTests {
+  @Test func retainedStudioRigAndPhysicalMaterialDoNotAllocateAgainOnPlayback() throws {
+    let view = RetainedCanvasView(frame: CGRect(x: 0, y: 0, width: 620, height: 420))
+    let document = try fixture().validated()
+    view.render(document, time: 0, selectedID: nil)
+    let stage = try #require(view.spatialStage)
+    let camera = try #require(stage.pointOfView)
+    let material = try #require(view.spatialNode(id: "rotor")?.geometry?.firstMaterial)
+    #expect(stage.antialiasingMode == .multisampling4X && !stage.rendersContinuously)
+    #expect(!stage.autoenablesDefaultLighting && camera.childNodes.count == 4)
+    #expect(camera.camera?.wantsHDR == true)
+    #expect(material.lightingModel == .physicallyBased)
+    #expect(material.diffuse.contents is NSColor)
+    view.render(document, time: 0.3, selectedID: nil)
+    #expect(view.spatialNode(id: "rotor")?.geometry?.firstMaterial === material)
+    #expect(camera.childNodes.count == 4)
+  }
+
+  @Test func localSwipePreservesDistanceAndDocumentAndReprojectsLabels() throws {
+    let view = RetainedCanvasView(
+      frame: CGRect(x: 0, y: 0, width: 620, height: 420), motionPolicy: .reducedMotion)
+    view.presentation = .passiveOverlay
+    view.overlaySurfaceInteractive = true
+    view.overlayHeaderInset = 44
+    let document = try fixture().validated()
+    view.render(document, time: 0, selectedID: nil)
+    let stage = try #require(view.spatialStage)
+    let camera = try #require(stage.pointOfView)
+    let before = camera.position
+    let target = stage.defaultCameraController.target
+    let initialLeader = try #require(view.projectedLeaderPath(id: "label"))
+    let radius = hypot(hypot(before.x - target.x, before.y - target.y), before.z - target.z)
+    #expect(view.orbitOverlayCamera(delta: CGPoint(x: 0.18, y: 0.072)))
+    let after = camera.position
+    let newRadius = hypot(hypot(after.x - target.x, after.y - target.y), after.z - target.z)
+    #expect(abs(radius - newRadius) < 0.0001)
+    #expect(abs(after.x - before.x) > 0.01)
+    let movedLeader = try #require(view.projectedLeaderPath(id: "label"))
+    #expect(movedLeader.boundingBoxOfPath != initialLeader.boundingBoxOfPath)
+    #expect(
+      view.renderedDocumentID == document.id && view.renderedDocumentRevision == document.revision)
+    #expect(stage.frame.minY >= 44)
+    let renderedLabel = try #require(view.projectedLabelFrame(id: "label"))
+    #expect(view.canvasFrame(forDocumentRect: renderedLabel).minY >= 44)
+    #expect(!view.orbitOverlayCamera(delta: CGPoint(x: CGFloat.nan, y: 1)))
+    #expect(!view.orbitOverlayCamera(delta: CGPoint(x: 1, y: CGFloat.infinity)))
+    #expect(!view.orbitOverlayCamera(delta: .zero))
+    view.overlaySurfaceInteractive = false
+    #expect(!view.orbitOverlayCamera(delta: CGPoint(x: 1, y: 1)))
+    #expect(
+      camera.position.x == after.x && camera.position.y == after.y && camera.position.z == after.z)
+  }
+
   @Test func failedRuntimePoseCannotClaimSuccessfulRenderOrReplaceRetainedNativeIdentity() throws {
     let view = RetainedCanvasView(frame: CGRect(x: 0, y: 0, width: 620, height: 420))
     let original = try fixture().validated()

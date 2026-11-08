@@ -1,11 +1,13 @@
+import CoreGraphics
 import Foundation
 
-/// Pure admission policy for an explicitly Option-armed, bounded explanation
-/// panel. A native caller supplies actual visible-triangle hits and maps its
+/// Pure admission policy for a bounded explanation card. Option drag requires
+/// a visible-triangle hit; local two-finger scroll requires the card's surface.
+/// A native caller supplies actual geometry hits and maps its
 /// modifier/button flags symbolically. This does not route, repost or synthesize
 /// input, prove transparent-pixel hit behavior, focus a window or edit a scene.
 struct ExplanationOrbitState: Equatable, Sendable {
-  enum Phase: String, Codable, Sendable { case passive, armed, dragging }
+  enum Phase: String, Codable, Sendable { case passive, armed, dragging, scrolling }
 
   struct Authority: Equatable, Sendable {
     let lease: UUID
@@ -52,10 +54,18 @@ struct ExplanationOrbitState: Equatable, Sendable {
     var displayAvailable: Bool
     var spatialReady: Bool
     var pointerOnVisibleMesh: Bool
+    var pointerInsideSurface = false
 
-    fileprivate var canOwnPanel: Bool {
-      authority?.isValid == true && modifiers.isOptionOnly && presentationVisible
+    fileprivate var canOwnSurface: Bool {
+      authority?.isValid == true && presentationVisible
         && awake && sessionActive && displayAvailable && spatialReady
+    }
+
+    fileprivate var canOwnPanel: Bool { canOwnSurface && modifiers.isOptionOnly }
+
+    fileprivate var canScroll: Bool {
+      canOwnSurface && modifiers.subtracting([.capsLock, .numericPad]).isEmpty
+        && buttons.isEmpty && pointerInsideSurface
     }
   }
 
@@ -89,6 +99,11 @@ struct ExplanationOrbitState: Equatable, Sendable {
         return phase
       }
     // A drag admitted on real geometry retains ownership outside its mesh.
+    case .scrolling:
+      guard input.canScroll, input.authority == authority else {
+        cancel()
+        return phase
+      }
     }
     return phase
   }
@@ -112,6 +127,30 @@ struct ExplanationOrbitState: Equatable, Sendable {
     cancel()
     update(input)
     return true
+  }
+
+  /// Only a local gesture delivered to the owned card can call this. Momentum
+  /// cannot acquire a new owner; the native caller enforces gesture phases.
+  @discardableResult mutating func beginScroll(_ input: Input) -> Bool {
+    guard phase != .dragging, input.canScroll else { return false }
+    if phase == .scrolling, input.authority != authority { return false }
+    authority = input.authority
+    phase = .scrolling
+    return true
+  }
+
+  @discardableResult mutating func endScroll(_ input: Input) -> Bool {
+    guard phase == .scrolling, input.authority == authority else { return false }
+    cancel()
+    return true
+  }
+
+  /// Host-authored gain, not a reference-app cadence. No inertia is synthesized;
+  /// every returned rotation comes from one finite local wheel/trackpad event.
+  static func scrollDelta(x: Double, y: Double, precise: Bool) -> CGPoint? {
+    guard x.isFinite, y.isFinite, abs(x) <= 4_096, abs(y) <= 4_096 else { return nil }
+    let gain = precise ? 0.008 : 0.035
+    return CGPoint(x: max(-0.20, min(0.20, x * gain)), y: max(-0.20, min(0.20, y * gain)))
   }
 
   mutating func cancel() {

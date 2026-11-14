@@ -205,6 +205,8 @@ enum GuidancePublicAppAcceptance {
         "captureAttempted": captureAttempted,
         "captureScope": "exact-selected-public-window",
         "fullDisplayCapture": false, "backdropRequired": false,
+        "captureIdentityIsWholeWindowVisibilityProof": false,
+        "productionPerTargetVisibilityUnchanged": true,
         "selectedWindowID": selectedWindowID as Any? ?? NSNull(),
         "foregroundPreservedBeforeCleanup": foregroundPreserved,
         "selectedWindowRect": selectedWindowRect.map(json) ?? NSNull(),
@@ -672,19 +674,11 @@ enum GuidancePublicAppAcceptance {
     }
     let focus = try focusedAXWindow(
       pid: app.processIdentifier, primaryTop: primaryTop, scenario: scenario)
-    var windows = try windowStack(screen: screen.frame, primaryTop: primaryTop)
-    // Safari can place a small separate native chrome window above its focused
-    // page. A same-process window is never sufficient proof on its own.
-    if let matching = windows.firstIndex(where: {
-      $0.pid == app.processIdentifier && sameGeometry($0.rect, focus.rect)
-    }) {
-      guard matching <= 8 else { throw Refusal("public-window-front-stack-budget") }
-      let chromeDeadline = ProcessInfo.processInfo.systemUptime + 0.25
-      for index in 0..<matching where windows[index].pid == app.processIdentifier {
-        windows[index].verifiedFocusedChrome = verifiesFocusedChrome(
-          windows[index].rect, focused: focus, primaryTop: primaryTop, deadline: chromeDeadline)
-      }
-    }
+    let windows = try windowStack(
+      screen: screen.frame, primaryTop: primaryTop, foregroundPID: app.processIdentifier)
+    // Independent selected-window capture excludes other/child windows. This
+    // chooses capture identity only; production separately verifies visibility
+    // at each actual target before native admission and user continuation.
     let front = try selectPublicWindow(
       windows, focusedRect: focus.rect, pid: app.processIdentifier, screen: screen.frame)
     return .init(
@@ -714,12 +708,11 @@ enum GuidancePublicAppAcceptance {
     let pid: pid_t
     let rect: CGRect
     let alpha: Double
-    var verifiedFocusedChrome = false
   }
 
-  /// Authored metadata seam: selection requires one exact focused-window match.
-  /// Higher foreign windows or unverified same-process popups never disappear
-  /// merely because the requested page is present farther down the stack.
+  /// Authored metadata seam for independent capture identity, not visibility.
+  /// Foreign/auxiliary windows ahead are excluded by selected-window capture;
+  /// production target visibility remains a separate, unchanged native gate.
   static func selectPublicWindow(
     _ windows: [WindowCandidate], focusedRect: CGRect, pid: pid_t, screen: CGRect
   ) throws -> WindowCandidate {
@@ -729,15 +722,9 @@ enum GuidancePublicAppAcceptance {
     let matches = windows.indices.filter {
       windows[$0].pid == pid && sameGeometry(windows[$0].rect, focusedRect)
     }
-    guard matches.count == 1, let index = matches.first, index <= 8,
+    guard matches.count == 1, let index = matches.first,
       windows[index].id > 0, windows[index].alpha == 1, screen.contains(windows[index].rect)
     else { throw Refusal("focused-public-window-unverified") }
-    for candidate in windows[..<index] {
-      guard candidate.id > 0, candidate.alpha.isFinite, candidate.alpha > 0,
-        candidate.alpha <= 1, candidate.pid == pid, candidate.verifiedFocusedChrome,
-        boundedTopChrome(candidate.rect, focusedRect: focusedRect)
-      else { throw Refusal("public-window-occlusion-unverified") }
-    }
     return windows[index]
   }
 
@@ -747,15 +734,7 @@ enum GuidancePublicAppAcceptance {
       && abs(lhs.width - rhs.width) <= 1 && abs(lhs.height - rhs.height) <= 1
   }
 
-  private static func boundedTopChrome(_ rect: CGRect, focusedRect: CGRect) -> Bool {
-    GuidanceObservationScope.valid(rect) && focusedRect.contains(rect)
-      && rect.width <= 320 && rect.height <= 48 && rect.width * rect.height <= 15_360
-      && rect.minY >= focusedRect.maxY - 64
-  }
-
   private struct FocusedAXWindow {
-    let app: AXUIElement
-    let window: AXUIElement
     let rect: CGRect
   }
 
@@ -783,47 +762,7 @@ enum GuidancePublicAppAcceptance {
         url.lastPathComponent == "OpenCompanion Public Guide.rtf"
       else { throw Refusal("textedit-public-document-mismatch") }
     }
-    return .init(app: app, window: window, rect: rect)
-  }
-
-  private static func verifiesFocusedChrome(
-    _ rect: CGRect, focused: FocusedAXWindow, primaryTop: CGFloat, deadline: TimeInterval
-  ) -> Bool {
-    guard boundedTopChrome(rect, focusedRect: focused.rect),
-      ProcessInfo.processInfo.systemUptime < deadline
-    else { return false }
-    var element: AXUIElement?
-    guard
-      AXUIElementCopyElementAtPosition(
-        focused.app, Float(rect.midX), Float(primaryTop - rect.midY), &element) == .success,
-      var current = element
-    else { return false }
-    let controls: Set<String> = [
-      "AXButton", "AXMenuButton", "AXPopUpButton", "AXTextField", "AXSearchField",
-      "AXCheckBox", "AXRadioButton",
-    ]
-    var ownedControl = false
-    for _ in 0..<8 {
-      guard ProcessInfo.processInfo.systemUptime < deadline else { return false }
-      AXUIElementSetMessagingTimeout(current, 0.03)
-      guard let role = axValue(current, kAXRoleAttribute as CFString) as? String,
-        role.utf8.count <= 128, role != "AXWebArea"
-      else { return false }
-      if role == "AXWindow" {
-        return ownedControl && CFEqual(current, focused.window)
-      }
-      if controls.contains(role),
-        let owner = axValue(current, kAXWindowAttribute as CFString),
-        CFGetTypeID(owner) == AXUIElementGetTypeID(), CFEqual(owner, focused.window)
-      {
-        ownedControl = true
-      }
-      guard let parent = axValue(current, kAXParentAttribute as CFString),
-        CFGetTypeID(parent) == AXUIElementGetTypeID()
-      else { return false }
-      current = parent as! AXUIElement
-    }
-    return false
+    return .init(rect: rect)
   }
 
   private static func axValue(_ element: AXUIElement, _ attribute: CFString) -> CFTypeRef? {
@@ -848,7 +787,9 @@ enum GuidancePublicAppAcceptance {
       x: point.x, y: primaryTop - point.y - size.height, width: size.width, height: size.height)
     return GuidanceObservationScope.valid(rect) ? rect : nil
   }
-  @MainActor private static func windowStack(screen: CGRect, primaryTop: CGFloat) throws
+  @MainActor private static func windowStack(
+    screen: CGRect, primaryTop: CGFloat, foregroundPID: pid_t
+  ) throws
     -> [WindowCandidate]
   {
     guard
@@ -857,14 +798,15 @@ enum GuidancePublicAppAcceptance {
       windows.count <= 4_096
     else { throw Refusal("window-stack-unavailable") }
     return try windows.compactMap { info in
+      // Other owners are outside this independent-window capture identity.
+      // Do not treat their ordering or metadata as a visibility assertion.
+      guard let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+        pid == foregroundPID
+      else { return nil }
       guard let layer = (info[kCGWindowLayer as String] as? NSNumber)?.intValue else {
         throw Refusal("window-stack-entry-unverified")
       }
       guard layer == 0 else { return nil }
-      guard let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value else {
-        throw Refusal("window-stack-owner-unverified")
-      }
-      guard pid != ProcessInfo.processInfo.processIdentifier else { return nil }
       guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
         let alpha = (info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue,
         alpha.isFinite, (0...1).contains(alpha),

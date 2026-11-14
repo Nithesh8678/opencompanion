@@ -9,29 +9,28 @@ struct GuidancePublicWindowSelectionTests {
   private let chrome = CGRect(x: 134, y: 904, width: 66, height: 20)
   private typealias Candidate = GuidancePublicAppAcceptance.WindowCandidate
 
-  @Test func selectsFocusedMainInsteadOfVerifiedSmallChrome() throws {
+  @Test func selectsFocusedMainInsteadOfSmallAuxiliary() throws {
     let window = try GuidancePublicAppAcceptance.selectPublicWindow(
       [
-        Candidate(id: 1, pid: 42, rect: chrome, alpha: 1, verifiedFocusedChrome: true),
+        Candidate(id: 1, pid: 42, rect: chrome, alpha: 1),
         Candidate(id: 2, pid: 42, rect: main, alpha: 1),
       ], focusedRect: main, pid: 42, screen: screen)
     #expect(window.id == 2)
     #expect(window.rect == main)
   }
 
-  @Test func foreignAheadAndUnverifiedSameProcessWindowsRefuse() {
-    for preceding in [
-      Candidate(id: 1, pid: 99, rect: chrome, alpha: 1, verifiedFocusedChrome: true),
-      Candidate(id: 1, pid: 42, rect: chrome, alpha: 1),
-      Candidate(
-        id: 1, pid: 42, rect: CGRect(x: 200, y: 200, width: 66, height: 20),
-        alpha: 1, verifiedFocusedChrome: true),
-    ] {
-      #expect(throws: (any Error).self) {
-        try GuidancePublicAppAcceptance.selectPublicWindow(
-          [preceding, Candidate(id: 2, pid: 42, rect: main, alpha: 1)],
-          focusedRect: main, pid: 42, screen: screen)
-      }
+  @Test func foreignAndAuxiliaryOrderingDoesNotAuthorizeOrRefuseIndependentCapture() throws {
+    let selected = try GuidancePublicAppAcceptance.selectPublicWindow(
+      [
+        Candidate(id: 1, pid: 99, rect: main, alpha: 1),
+        Candidate(id: 2, pid: 42, rect: chrome, alpha: 1),
+        Candidate(id: 3, pid: 42, rect: main, alpha: 1),
+      ], focusedRect: main, pid: 42, screen: screen)
+    #expect(selected.id == 3)
+    #expect(throws: (any Error).self) {
+      try GuidancePublicAppAcceptance.selectPublicWindow(
+        [Candidate(id: 1, pid: 99, rect: main, alpha: 1)],
+        focusedRect: main, pid: 42, screen: screen)
     }
   }
 
@@ -57,8 +56,7 @@ struct GuidancePublicWindowSelectionTests {
     let window = try GuidancePublicAppAcceptance.selectPublicWindow(
       [
         Candidate(
-          id: 1, pid: 42, rect: chrome.offsetBy(dx: -1_600, dy: -100), alpha: 1,
-          verifiedFocusedChrome: true),
+          id: 1, pid: 42, rect: chrome.offsetBy(dx: -1_600, dy: -100), alpha: 1),
         Candidate(id: 2, pid: 42, rect: shiftedMain, alpha: 1),
       ], focusedRect: shiftedMain, pid: 42, screen: shiftedScreen)
     #expect(window.id == 2)

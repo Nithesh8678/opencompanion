@@ -802,17 +802,21 @@ enum GuidancePublicAppAcceptance {
       "AXButton", "AXMenuButton", "AXPopUpButton", "AXTextField", "AXSearchField",
       "AXCheckBox", "AXRadioButton",
     ]
+    var ownedControl = false
     for _ in 0..<8 {
       guard ProcessInfo.processInfo.systemUptime < deadline else { return false }
       AXUIElementSetMessagingTimeout(current, 0.03)
       guard let role = axValue(current, kAXRoleAttribute as CFString) as? String,
-        role.utf8.count <= 128, role != "AXWebArea", role != "AXWindow"
+        role.utf8.count <= 128, role != "AXWebArea"
       else { return false }
+      if role == "AXWindow" {
+        return ownedControl && CFEqual(current, focused.window)
+      }
       if controls.contains(role),
         let owner = axValue(current, kAXWindowAttribute as CFString),
         CFGetTypeID(owner) == AXUIElementGetTypeID(), CFEqual(owner, focused.window)
       {
-        return true
+        ownedControl = true
       }
       guard let parent = axValue(current, kAXParentAttribute as CFString),
         CFGetTypeID(parent) == AXUIElementGetTypeID()

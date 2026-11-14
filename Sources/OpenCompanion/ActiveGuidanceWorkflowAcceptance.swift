@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import CompanionCore
 import ImageIO
+import Vision
 
 /// Explicit public-fixture integration check. It observes the real capture,
 /// provider, active-screen observer and native marks; it never drives input.
@@ -38,6 +39,7 @@ import ImageIO
     private var initialForm: GuidanceFixtureStateAcceptance.Snapshot?
     private var finalBefore: GuidanceFixtureStateAcceptance.Snapshot?
     private var finalAfter: GuidanceFixtureStateAcceptance.Snapshot?
+    private var finalImageProof: [String: Any]?
     private var callbackFailure: String?
 
     init(model: AppModel, cursor: CursorCompanionCoordinator, output: URL) {
@@ -178,12 +180,23 @@ import ImageIO
             count("guidance.capture.accepted") >= 4,
             !events().filter({ $0["event"]?.hasPrefix("guidance.live.changed.") == true }).isEmpty,
             model.guidanceProviderStatus.lowercased().contains("terra"),
-            model.guidanceProviderStatus.lowercased().contains("low effort"),
-            frame.groundingCandidates.contains(where: {
-              $0.source == .ocr && normalized($0.label).contains("releaseqa")
-            })
+            model.guidanceProviderStatus.lowercased().contains("low effort")
           else { throw refuse("final-production-evidence-incomplete") }
           finalBefore = before
+          let finalGeneration = model.taskGeneration
+          let finalIdentity = ScreenEvidenceIdentity(frame)
+          phase = "verifyingFinalCapturedImage"
+          try progress()
+          let imageVerified = try await verifyFinalImage(frame)
+          try Task.checkCancellation()
+          try verifyFixture()
+          guard model.taskGeneration == finalGeneration,
+            finalIdentity.matches(model.evidence), model.scene == originalScene,
+            model.guidanceSession.workflow?.id == workflowID,
+            model.guidanceSession.workflow?.phase == .modelReportedComplete,
+            !model.busy, model.error == nil, callbackFailure == nil, targetFrames.count == 3
+          else { throw refuse("final-image-proof-ownership-changed") }
+          guard imageVerified else { throw refuse("final-capture-visible-input-not-verified") }
           phase = "verifyingFinalNativeState"
           try progress()
           let after = try await GuidanceFixtureStateAcceptance.snapshot(
@@ -192,7 +205,8 @@ import ImageIO
           try verifyFixture()
           guard after.capturedAtUptime >= frame.capturedAt,
             after.tableNameMatchesReleaseQA, !after.protectDataChecked,
-            ScreenEvidenceIdentity(frame).matches(model.evidence), !model.busy
+            finalIdentity.matches(model.evidence), model.taskGeneration == finalGeneration,
+            model.scene == originalScene, !model.busy
           else { throw refuse("native-postcondition-not-stable") }
           finalAfter = after
           passed = true
@@ -200,6 +214,69 @@ import ImageIO
         }
         try await Task.sleep(for: .milliseconds(100))
       }
+    }
+
+    /// Acceptance-only fallback. It reads one immutable, already header-checked
+    /// public capture; no live desktop request or production OCR setting changes.
+    private func verifyFinalImage(_ frame: ScreenEvidence) async throws -> Bool {
+      try recordFrame(frame)
+      let fastContains = frame.groundingCandidates.contains {
+        $0.source == .ocr && normalized($0.label).contains("releaseqa")
+      }
+      let began = ProcessInfo.processInfo.systemUptime
+      finalImageProof = [
+        "frameID": frame.frameID.uuidString, "revision": frame.revision,
+        "width": frame.imageWidth, "height": frame.imageHeight,
+        "productionFastOCRContainsReleaseQA": fastContains,
+        "accurateOCRAttempted": !fastContains, "imageContainsReleaseQA": fastContains,
+        "accurateOCRContainsReleaseQA": NSNull(),
+        "source": "immutable-final-production-capture", "rawOCRSaved": false,
+      ]
+      if fastContains { return true }
+      let image = frame.image
+      let width = frame.imageWidth
+      let height = frame.imageHeight
+      let worker = Task.detached(priority: .userInitiated) { @Sendable in
+        try Task.checkCancellation()
+        guard image.count <= 12 * 1_024 * 1_024,
+          (1...8_192).contains(width), (1...8_192).contains(height),
+          let source = CGImageSourceCreateWithData(image as CFData, nil),
+          CGImageSourceGetCount(source) == 1,
+          CGImageSourceGetType(source) as String? == "public.jpeg",
+          let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+          (properties[kCGImagePropertyPixelWidth] as? Int) == width,
+          (properties[kCGImagePropertyPixelHeight] as? Int) == height,
+          (properties[kCGImagePropertyOrientation] as? Int ?? 1) == 1
+        else { throw ProviderError.message("The final public OCR image header was invalid.") }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["en-US"]
+        try VNImageRequestHandler(data: image).perform([request])
+        try Task.checkCancellation()
+        return (request.results ?? []).prefix(250).contains { observation in
+          guard let text = observation.topCandidates(1).first?.string,
+            text.utf8.count <= 2_048
+          else { return false }
+          return text.lowercased().filter { $0.isLetter || $0.isNumber }.contains("releaseqa")
+        }
+      }
+      let found: Bool
+      do {
+        found = try await withTaskCancellationHandler {
+          try await worker.value
+        } onCancel: {
+          worker.cancel()
+        }
+      } catch {
+        if !(error is CancellationError) { failure = "final-accurate-ocr-failed" }
+        throw error
+      }
+      try Task.checkCancellation()
+      let elapsed = (ProcessInfo.processInfo.systemUptime - began) * 1_000
+      finalImageProof?["accurateOCRContainsReleaseQA"] = found
+      finalImageProof?["imageContainsReleaseQA"] = found
+      finalImageProof?["accurateOCRElapsedMS"] = elapsed.isFinite ? max(0, elapsed) : 0
+      return found
     }
 
     private func prepare(generation: UInt64) async throws {
@@ -443,6 +520,7 @@ import ImageIO
         "taskComplete": passed, "fixturePostconditionVerified": finalAfter != nil && passed,
         "initialPage": "Practice Project", "initialFormState": encoded(initialForm),
         "beforeFinalCapture": encoded(finalBefore), "afterFinalCapture": encoded(finalAfter),
+        "finalCapturedImageProof": finalImageProof as Any? ?? NSNull(),
         "preparationCount": preparations.count, "frames": frames, "targets": targets,
         "preparationCheckpoints": preparations.map {
           [

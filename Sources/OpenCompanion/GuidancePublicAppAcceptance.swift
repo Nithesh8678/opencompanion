@@ -4,7 +4,7 @@ import CoreText
 import Foundation
 
 /// Public, externally driven native task checks. This helper never launches or
-/// activates an app, posts input, changes a permission, or records audio/pixels.
+/// activates an app, posts input, changes a permission, or saves audio/screenshots.
 enum GuidancePublicAppAcceptance {
   private enum Scenario: String, Sendable {
     case browser, textedit, calculator
@@ -34,8 +34,6 @@ enum GuidancePublicAppAcceptance {
     let displayID: CGDirectDisplayID
     let screenRect: CGRect
     let primaryTop: CGFloat
-    let backdropPID: pid_t
-    let backdropWindowID: CGWindowID
   }
 
   private struct State: Codable, Sendable, Equatable {
@@ -104,6 +102,12 @@ enum GuidancePublicAppAcceptance {
     var ownedWorkflowID: UUID?
     let priorPrepare = model.onPrepareScreenGuidance
     let priorTarget = model.onScreenGuidanceTargetAccepted
+    let priorRefreshScope = model.validateGuidanceRefreshScope
+    var selectedSeed: ScreenEvidenceIdentity?
+    var selectedWindowRect: CGRect?
+    var selectedWindowID: CGWindowID?
+    var selectedPID: pid_t?
+    var captureAttempted = false
     let initialScene = model.scene
     let traceStart = model.diagnosticEvents.count
     let terminalURL = output.appendingPathComponent("guidance-public-app-acceptance.json")
@@ -116,11 +120,16 @@ enum GuidancePublicAppAcceptance {
       guard ownsModel else { return }
       model.onPrepareScreenGuidance = priorPrepare
       model.onScreenGuidanceTargetAccepted = priorTarget
+      model.validateGuidanceRefreshScope = priorRefreshScope
       model.setGuidanceModeArmed(false)
       cursor.shutdown()
     }
     defer {
       let providerIdleBeforeCleanup = !model.busy
+      let foregroundPreserved =
+        selectedPID.map {
+          NSWorkspace.shared.frontmostApplication?.processIdentifier == $0
+        } ?? false
       restore()
       let events = Array(model.diagnosticEvents.dropFirst(traceStart))
       let counts = Dictionary(grouping: events.compactMap { $0["event"] }, by: { $0 })
@@ -136,6 +145,16 @@ enum GuidancePublicAppAcceptance {
             ?? "unknown").prefix(128)),
         "elapsedMS": (ProcessInfo.processInfo.systemUptime - began) * 1_000,
         "actualArmedAppModelPath": nativePathStarted,
+        "captureAttempted": captureAttempted,
+        "captureScope": "exact-selected-public-window",
+        "fullDisplayCapture": false, "backdropRequired": false,
+        "selectedWindowID": selectedWindowID as Any? ?? NSNull(),
+        "foregroundPreservedBeforeCleanup": foregroundPreserved,
+        "selectedWindowRect": selectedWindowRect.map(json) ?? NSNull(),
+        "initialSelectedFrameID": selectedSeed?.frameID.uuidString as Any? ?? NSNull(),
+        "providerApplicationAXEnrichmentOmitted": selectedSeed != nil,
+        "providerEvidence":
+          "Selected-window image and window-scoped OCR; application-wide AX enrichment is omitted. Independent public AX reads verify postconditions only.",
         "groundedStages": json(stages), "preCaptureStates": json(preparations),
         "initialState": initial.map(json) ?? NSNull(), "finalState": latest.map(json) ?? NSNull(),
         "finalCapturePreparation": finalPreparation.map(json) ?? NSNull(),
@@ -240,6 +259,54 @@ enum GuidancePublicAppAcceptance {
             && model.guidanceSession.workflow?.phase == .modelReportedComplete)
       }
       ownsModel = true
+      selectedWindowRect = environment.windowRect
+      selectedWindowID = environment.windowID
+      selectedPID = environment.pid
+      try verify(environment, scenario: scenario)
+      let selectionToken = model.capturePublicationRevision
+      let selectionGeneration = model.taskGeneration
+      let screens = Dictionary(
+        uniqueKeysWithValues: NSScreen.screens.compactMap {
+          screen -> (CGDirectDisplayID, CGRect)? in
+          guard
+            let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")]
+              as? NSNumber
+          else { return nil }
+          return (number.uint32Value, screen.frame)
+        })
+      captureAttempted = true
+      let seed = try await model.capture.capture(
+        displayID: environment.displayID, foregroundPID: environment.pid,
+        foregroundName: "Public " + scenario.rawValue,
+        windowID: environment.windowID, screens: screens)
+      try Task.checkCancellation()
+      try verify(environment, scenario: scenario)
+      guard model.taskGeneration == selectionGeneration,
+        model.capturePublicationRevision == selectionToken,
+        matchesSelectedWindow(seed, environment: environment)
+      else {
+        throw Refusal("initial-selected-window-capture-changed")
+      }
+      let confirmedInitial = try await readState(environment, scenario: scenario)
+      try Task.checkCancellation()
+      try verify(environment, scenario: scenario)
+      guard confirmedInitial.publicIdentity, confirmedInitial.factKey == first.factKey,
+        model.taskGeneration == selectionGeneration,
+        model.capturePublicationRevision == selectionToken,
+        model.publishSelectedCapture(seed, token: selectionToken)
+      else {
+        throw Refusal("initial-selected-window-publication-refused")
+      }
+      selectedSeed = ScreenEvidenceIdentity(seed)
+      model.validateGuidanceRefreshScope = { frame in
+        do {
+          try verify(environment, scenario: scenario)
+          guard ownsRuntime(), matchesSelectedWindow(frame, environment: environment),
+            priorRefreshScope?(frame) ?? true
+          else { return false }
+          return true
+        } catch { return false }
+      }
       model.onPrepareScreenGuidance = { generation, expectedPID in
         guard ownsRuntime(), expectedPID == environment.pid, preparations.count < 46 else {
           throw Refusal("capture-source-or-budget-changed")
@@ -261,8 +328,8 @@ enum GuidancePublicAppAcceptance {
         do {
           try verify(environment, scenario: scenario)
           guard ownsRuntime(), stages.count < 64, generation == model.taskGeneration,
-            evidence.foregroundPID == environment.pid, evidence.displayID == environment.displayID,
-            evidence.screenRect == environment.screenRect, evidence.windowID == nil,
+            matchesSelectedWindow(evidence, environment: environment),
+            evidence.frameID != selectedSeed?.frameID,
             ScreenEvidenceIdentity(evidence).matches(model.evidence),
             ScreenGuidancePolicy.targetRect(target, in: evidence.screenRect) != nil
           else {
@@ -294,14 +361,16 @@ enum GuidancePublicAppAcceptance {
         [
           "scenario": scenario.rawValue, "initialState": json(first),
           "publicForegroundPID": environment.pid, "publicWindowID": environment.windowID,
-          "publicBackdropWindowID": environment.backdropWindowID,
+          "captureScope": "exact-selected-public-window", "backdropRequired": false,
+          "selectedWindowRect": json(environment.windowRect),
           "displayID": environment.displayID, "deadlineSeconds": 150,
           "helperPostedInput": false, "helperActivatedApp": false,
         ], to: output.appendingPathComponent("public-app-ready.json"))
       model.providerMode = "ChatGPT via Codex"
       model.configuration.speechEnabled = false
       model.setGuidanceModeArmed(true)
-      model.beginScreenGuidance(scenario.prompt, speakAloud: false)
+      model.input = scenario.prompt
+      model.send()
       ownedRuntimeID = model.guidanceRuntime.id
       ownedWorkflowID = model.guidanceSession.workflow?.id
       guard ownedRuntimeID != nil, ownedWorkflowID != nil else {
@@ -334,8 +403,8 @@ enum GuidancePublicAppAcceptance {
             ], to: output.appendingPathComponent("public-app-progress.json"))
         }
         latest = state
-        if let frame = model.evidence, frame.foregroundPID == environment.pid,
-          frame.displayID == environment.displayID, frame.screenRect == environment.screenRect
+        if let frame = model.evidence, matchesSelectedWindow(frame, environment: environment),
+          frame.frameID != selectedSeed?.frameID
         {
           observedFrames.insert(frame.frameID)
         }
@@ -343,8 +412,8 @@ enum GuidancePublicAppAcceptance {
           preparation.postconditionSatisfied, let frame = model.evidence,
           preparation.generation == model.taskGeneration,
           frame.capturedAt >= preparation.state.observedAt,
-          frame.foregroundPID == environment.pid, frame.displayID == environment.displayID,
-          frame.screenRect == environment.screenRect, frame.windowID == nil,
+          matchesSelectedWindow(frame, environment: environment),
+          frame.frameID != selectedSeed?.frameID,
           stages.count >= 3, observedFrames.count >= 3,
           model.scene == initialScene
         {
@@ -386,32 +455,36 @@ enum GuidancePublicAppAcceptance {
       let display =
         (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?
         .uint32Value,
-      let primaryTop = NSScreen.screens.first?.frame.maxY,
-      let backdrop = NSWorkspace.shared.runningApplications.first(where: {
-        $0.bundleIdentifier == "org.opencompanion.fixture.guidance" && !$0.isTerminated
-      })
-    else { throw Refusal("public-app-or-backdrop-not-front") }
+      let primaryTop = NSScreen.screens.first?.frame.maxY
+    else {
+      throw Refusal("public-app-not-front")
+    }
     let windows = try windowStack(screen: screen.frame, primaryTop: primaryTop)
-    guard
-      let backIndex = windows.firstIndex(where: {
-        $0.pid == backdrop.processIdentifier && $0.alpha == 1 && $0.rect.contains(screen.frame)
-      }),
-      backIndex == 1, let front = windows.first, front.pid == app.processIdentifier,
-      front.alpha == 1
-    else { throw Refusal("public-backdrop-coverage-unverified") }
+    guard let front = windows.first, front.pid == app.processIdentifier, front.alpha == 1,
+      screen.frame.contains(front.rect)
+    else {
+      throw Refusal("focused-public-window-unverified")
+    }
     return .init(
       pid: app.processIdentifier, windowID: front.id, windowRect: front.rect,
-      displayID: display, screenRect: screen.frame, primaryTop: primaryTop,
-      backdropPID: backdrop.processIdentifier, backdropWindowID: windows[backIndex].id)
+      displayID: display, screenRect: screen.frame, primaryTop: primaryTop)
   }
 
   @MainActor private static func verify(_ expected: Environment, scenario: Scenario) throws {
     let current = try environment(scenario: scenario)
     guard current.pid == expected.pid, current.windowID == expected.windowID,
       current.windowRect == expected.windowRect, current.displayID == expected.displayID,
-      current.screenRect == expected.screenRect, current.backdropPID == expected.backdropPID,
-      current.backdropWindowID == expected.backdropWindowID
+      current.screenRect == expected.screenRect
     else { throw Refusal("public-window-scope-changed") }
+  }
+
+  private static func matchesSelectedWindow(_ frame: ScreenEvidence, environment: Environment)
+    -> Bool
+  {
+    frame.foregroundPID == environment.pid && frame.displayID == environment.displayID
+      && frame.windowID == environment.windowID && frame.screenRect == environment.windowRect
+      && frame.capturedWindowBounds == environment.windowRect
+      && frame.groundingCandidates.allSatisfy { $0.source != .accessibility }
   }
 
   private struct PublicWindow {

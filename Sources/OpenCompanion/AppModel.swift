@@ -170,6 +170,7 @@ struct ResponseInputPlan: Sendable {
   }
   var hasGuidanceInteractionHandoff: (() -> Bool)?
   var onGuidanceVisualsRevoked: ((UInt64) -> Void)?
+  var onGuidanceVisibilitySuspended: ((Bool) -> Void)?
   private var guidanceSpeechTask: Task<Void, Never>?
   private var currentGuidanceSpeech: GuidanceSpeechBeatContext?
   private var pendingGuidanceLayout: GuidanceAnnotationLayout?
@@ -1566,6 +1567,7 @@ struct ResponseInputPlan: Sendable {
       record("guidance.live.visualPending")
       if displayedGuidanceMark != nil {
         overlay.setGuidanceVisibilitySuspended(true)
+        onGuidanceVisibilitySuspended?(true)
         schedulePresentedTargetVisualProof(sessionID: id)
         return
       }
@@ -1701,6 +1703,7 @@ struct ResponseInputPlan: Sendable {
           return
         }
         self.overlay.setGuidanceVisibilitySuspended(false)
+        self.onGuidanceVisibilitySuspended?(false)
         self.guidanceRuntime.wait()
         self.record("guidance.live.visualTarget.corroborated")
       } catch {

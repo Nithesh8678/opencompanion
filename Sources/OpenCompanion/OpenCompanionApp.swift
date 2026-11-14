@@ -46,12 +46,14 @@ import SwiftUI
       || CommandLine.arguments.contains("--guidance-manual-live-acceptance")
       || CommandLine.arguments.contains("--guidance-manual-task-acceptance")
       || CommandLine.arguments.contains("--guidance-active-workflow-acceptance")
+      || CommandLine.arguments.contains("--guidance-public-app-acceptance")
     let acceptanceMode = [
       "--keychain-acceptance", "--smoke-test-codex", "--render-acceptance", "--capture-acceptance",
       "--interaction-acceptance", "--cursor-acceptance", "--cursor-live-acceptance",
       "--guidance-live-acceptance", "--guidance-routing-acceptance",
       "--guidance-latency-acceptance", "--guidance-observation-acceptance",
       "--guidance-active-workflow-acceptance",
+      "--guidance-public-app-acceptance",
       "--guidance-manual-live-acceptance",
       "--guidance-manual-task-acceptance",
       "--spatial-scene-live-acceptance", "--explanation-overlay-acceptance",
@@ -290,6 +292,9 @@ import SwiftUI
       model.onGuidanceVisualsRevoked = { [weak self] generation in
         self?.cursor?.cancel(generation: generation)
       }
+      model.onGuidanceVisibilitySuspended = { [weak self] value in
+        self?.cursor?.setGuidanceVisibilitySuspended(value)
+      }
       model.onGuidanceCaptionStarted = { [weak self] text, context, nativeSpeech in
         self?.cursor?.beginGuidanceNarration(
           text: text, context: context, nativeSpeech: nativeSpeech) ?? false
@@ -337,6 +342,26 @@ import SwiftUI
           target: target, evidence: evidence,
           generation: generation, request: request)
       }
+    }
+    if let index = CommandLine.arguments.firstIndex(of: "--guidance-public-app-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 2 < CommandLine.arguments.count, let cursor else {
+            throw ProviderError.message(
+              "Provide a local output directory and a public-app scenario.")
+          }
+          try await GuidancePublicAppAcceptance.run(
+            model: model, cursor: cursor,
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
+            scenario: CommandLine.arguments[index + 2])
+          print("GUIDANCE_PUBLIC_APP_ACCEPTANCE_PASSED")
+        } catch {
+          print("GUIDANCE_PUBLIC_APP_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
     }
     if let index = CommandLine.arguments.firstIndex(of: "--guidance-active-workflow-acceptance") {
       Task { @MainActor in

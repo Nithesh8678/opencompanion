@@ -6,7 +6,9 @@ import Foundation
 enum GuidanceLatencyAcceptance {
   private static let fixtureIDs = [
     "01-icon-only-compose", "02-collapsed-sidebar", "03-fresh-revealed-sidebar",
-    "05-pixel-only-sidebar", "06-heldout-profile",
+    "04-generic-new-note", "05-pixel-only-sidebar", "06-heldout-profile",
+    "07-heldout-appearance", "08-heldout-export", "09-heldout-next-page",
+    "10-heldout-custom-canvas", "11-heldout-screen-question",
   ]
 
   @MainActor static func run(output: URL, executable: String, model: String) async throws {

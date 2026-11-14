@@ -230,17 +230,30 @@ enum GuidanceObservationAcceptance {
       x: screen.frame.minX,
       y: primary.frame.maxY - screen.frame.maxY,
       width: screen.frame.size.width, height: screen.frame.size.height)
-    let covered = windows.contains { window in
-      guard (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == expected.pid,
-        (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0,
-        (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue == 1,
+    // WindowServer order is front-to-back. Existence of a covering fixture
+    // underneath another application's window is not a public-pixel guarantee.
+    // This process is excluded from the stream, so its own windows are skipped.
+    let ownPID = ProcessInfo.processInfo.processIdentifier
+    for window in windows {
+      guard let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue else {
+        throw Refusal("public-fixture-window-metadata-unavailable")
+      }
+      guard layer == 0 else { continue }
+      guard let pid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+        pid > 0,
+        let alpha = (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue,
+        alpha.isFinite, (0...1).contains(alpha),
         let dictionary = window[kCGWindowBounds as String] as? [String: Any],
         let rect = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
         GuidanceObservationScope.valid(rect)
-      else { return false }
-      return rect.contains(quartzDisplay)
+      else { throw Refusal("public-fixture-window-metadata-unavailable") }
+      guard pid != ownPID, alpha > 0, rect.intersects(quartzDisplay) else { continue }
+      guard pid == expected.pid, alpha == 1, rect.contains(quartzDisplay) else {
+        throw Refusal("public-fixture-front-window-does-not-cover-display")
+      }
+      return
     }
-    guard covered else { throw Refusal("public-fixture-does-not-cover-display") }
+    throw Refusal("public-fixture-does-not-cover-display")
   }
 
   private struct Frame: Codable {

@@ -358,6 +358,39 @@ import ImageIO
       try GuidanceFixtureStateAcceptance.verifyEnvironment(
         expectedFixturePID: fixture.processIdentifier, displayID: displayID,
         screenRect: screen.frame)
+      guard let primary = NSScreen.screens.first,
+        let list = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID),
+        CFArrayGetCount(list) <= 4_096, let windows = list as? [[String: Any]]
+      else { throw refuse("public-fixture-window-order-unavailable") }
+      let display = CGRect(
+        x: screen.frame.minX, y: primary.frame.maxY - screen.frame.maxY,
+        width: screen.frame.size.width, height: screen.frame.size.height)
+      guard GuidanceObservationScope.valid(display) else {
+        throw refuse("public-fixture-display-geometry-unavailable")
+      }
+      // Captures exclude this process. The first other visible layer-0 window
+      // touching the display must itself be the opaque full public fixture.
+      let ownPID = ProcessInfo.processInfo.processIdentifier
+      for window in windows {
+        guard let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue else {
+          throw refuse("public-fixture-window-order-unavailable")
+        }
+        guard layer == 0 else { continue }
+        guard let pid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+          pid > 0,
+          let alpha = (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue,
+          alpha.isFinite, (0...1).contains(alpha),
+          let dictionary = window[kCGWindowBounds as String] as? [String: Any],
+          let rect = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
+          GuidanceObservationScope.valid(rect)
+        else { throw refuse("public-fixture-window-order-unavailable") }
+        guard pid != ownPID, alpha > 0, rect.intersects(display) else { continue }
+        guard pid == fixture.processIdentifier, alpha == 1, rect.contains(display) else {
+          throw refuse("public-fixture-front-window-does-not-cover-display")
+        }
+        return
+      }
+      throw refuse("public-fixture-does-not-cover-display")
     }
 
     private func checkDeadline(_ deadline: TimeInterval) throws {

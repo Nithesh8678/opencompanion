@@ -74,6 +74,7 @@ struct CursorCompanionSnapshot: Codable {
   private var watermark: UInt64 = 0
   private var stage: Stage?
   private var isGuidance = false
+  private var guidanceVisibilitySuspended = false
   private var showingGuidanceExplanation = false
   private var guidanceCaptionActive = false
   private var guidanceExplanationEvidence: ScreenEvidenceIdentity?
@@ -258,6 +259,17 @@ struct CursorCompanionSnapshot: Codable {
     clearPresentation(reason: .generationCancelled)
     renderNow()
     wake()
+  }
+
+  /// Keep the owned flight/caption clocks, but never paint old screen-bound
+  /// geometry while its target is undergoing native visual corroboration.
+  func setGuidanceVisibilitySuspended(_ value: Bool) {
+    guidanceVisibilitySuspended = value && isGuidance
+    panel.alphaValue = guidanceVisibilitySuspended ? 0 : 1
+    if !guidanceVisibilitySuspended {
+      renderNow()
+      wake()
+    }
   }
 
   @discardableResult func accept(_ preview: ProviderTextPreview, generation: UInt64) -> Bool {
@@ -744,6 +756,7 @@ struct CursorCompanionSnapshot: Codable {
     generation = nil
     stage = nil
     isGuidance = false
+    guidanceVisibilitySuspended = false
     showingGuidanceExplanation = false
     guidanceCaptionActive = false
     guidanceExplanationEvidence = nil
@@ -937,6 +950,7 @@ struct CursorCompanionSnapshot: Codable {
     if lastBodyCenter.x != center.x { lastBodyVelocity.x = 0 }
     if lastBodyCenter.y != center.y { lastBodyVelocity.y = 0 }
     hasRenderedBody = true
+    panel.alphaValue = guidanceVisibilitySuspended && isGuidance ? 0 : 1
     if !panel.isVisible { panel.orderFrontRegardless() }
     if guidance == nil, !firstGlyphRecorded, !visibleText.isEmpty {
       firstGlyphRecorded = true

@@ -184,6 +184,7 @@ enum ScreenGuidancePolicy {
   private let foregroundPID: @MainActor () -> pid_t?
   private let settle: @MainActor () async throws -> Void
   private let windowVisibility: @MainActor (ScreenEvidence, CGRect) -> Bool
+  private let validationPending: @MainActor () -> Bool
   private let onContinue: ContinuationHandler?
   private var preferences: CursorCompanionPreferences
   private var mark: Mark?
@@ -193,6 +194,7 @@ enum ScreenGuidancePolicy {
     let timestamp: TimeInterval
   }
   private var displayDown: DisplayDown?
+  private var suppressedUpLease: UUID?
   private var consumingClickLease: UUID?
   private var globalMouse: Any?
   private var localMouse: Any?
@@ -217,6 +219,7 @@ enum ScreenGuidancePolicy {
     windowVisibility: @escaping @MainActor (ScreenEvidence, CGRect) -> Bool = { evidence, rect in
       GuidanceSelectedWindowCheck.permits(evidence: evidence, targetRect: rect)
     },
+    validationPending: (@MainActor () -> Bool)? = nil,
     onContinue: ContinuationHandler? = nil
   ) {
     self.model = model
@@ -225,6 +228,10 @@ enum ScreenGuidancePolicy {
     self.foregroundPID = foregroundPID
     self.settle = settle
     self.windowVisibility = windowVisibility
+    self.validationPending =
+      validationPending ?? { [weak model] in
+        model?.guidanceRuntime.isActive == true && model?.guidanceRuntime.isDirty == true
+      }
     self.onContinue = onContinue
     // Isolated acceptance fixtures do not consult saved preferences or observe
     // external application input/lifecycle events.
@@ -316,7 +323,8 @@ enum ScreenGuidancePolicy {
   /// Consumes only the currently presented lease. Repeated button callbacks,
   /// stale IDs and unrelated pointer events cannot queue another continuation.
   func continueManualStep(id: UUID) {
-    guard !notifyingManualContinue, continuationTask == nil, let step = manualStep, step.id == id,
+    guard !validationPending(), !notifyingManualContinue, continuationTask == nil,
+      let step = manualStep, step.id == id,
       let owner = mark,
       owner.lease == id, owner.observation == .explicitContinue
     else { return }
@@ -328,7 +336,7 @@ enum ScreenGuidancePolicy {
     onManualContinueWillBegin?(step)
     notifyingManualContinue = false
     guard continuationTask == nil, manualStep?.id == id, mark?.lease == owner.lease,
-      owns(owner)
+      !validationPending(), owns(owner)
     else { return }
     model?.record("guidance.manualContinue.requested")
     queueContinuation(owner)
@@ -337,7 +345,7 @@ enum ScreenGuidancePolicy {
   /// Called before starting voice input cancels the current response generation.
   /// The caller must bind the returned lease to its new voice-input generation.
   func takeManualStepForVoice() -> ManualGuidanceStep? {
-    guard continuationTask == nil, let step = manualStep, let owner = mark,
+    guard !validationPending(), continuationTask == nil, let step = manualStep, let owner = mark,
       step.id == owner.lease, owner.observation == .explicitContinue
     else { return nil }
     guard owns(owner) else {
@@ -366,6 +374,7 @@ enum ScreenGuidancePolicy {
     mark = nil
     selectedWindowClick.clear()
     displayDown = nil
+    suppressedUpLease = nil
     consumingClickLease = nil
     manualStep = nil
     removeClickMonitors()
@@ -401,7 +410,15 @@ enum ScreenGuidancePolicy {
   /// background screen/AX capture. Selected window metadata is checked while
   /// waiting, except inside the authenticated click/settle handoff.
   func validateCurrentMark() {
-    if let owner = mark, !owns(owner) { cancel() }
+    guard let owner = mark else { return }
+    guard ownsBase(owner) else {
+      cancel()
+      return
+    }
+    // Local proof may temporarily hide the original mark. It grants no new
+    // input authority, but is not itself evidence that its lease was replaced.
+    if validationPending(), !handingOff(owner) { return }
+    if !owns(owner) { cancel() }
   }
 
   private func receiveMouseEvent(_ event: NSEvent, lease: UUID) {
@@ -434,15 +451,27 @@ enum ScreenGuidancePolicy {
     guard continuationTask == nil, let owner = mark, owner.lease == lease,
       owner.observation == .click
     else { return }
+    guard ownsBase(owner) else {
+      cancel()
+      return
+    }
+    if validationPending() {
+      selectedWindowClick.clear()
+      displayDown = nil
+      // A later proof cannot retroactively authenticate this physical pair.
+      suppressedUpLease = owner.lease
+      return
+    }
     guard owns(owner) else {
       selectedWindowClick.clear()
       cancel()
       return
     }
     if let authority = selectedWindowAuthority(owner) {
-      selectedWindowClick.receiveDown(
+      let accepted = selectedWindowClick.receiveDown(
         authority: authority, point: point, timestamp: timestamp,
         eventTargetPID: eventTargetPID, handlingWindowID: handlingWindowID)
+      if accepted { suppressedUpLease = nil }
     } else {
       displayDown = nil
       let deadline = min(
@@ -452,6 +481,7 @@ enum ScreenGuidancePolicy {
         timestamp.isFinite, timestamp >= owner.admittedAt, timestamp < deadline,
         eventTargetPID == owner.evidence.foregroundPID
       else { return }
+      suppressedUpLease = nil
       displayDown = DisplayDown(lease: lease, timestamp: timestamp)
     }
   }
@@ -463,6 +493,18 @@ enum ScreenGuidancePolicy {
     guard continuationTask == nil, let owner = mark, owner.lease == lease,
       owner.observation == .click
     else { return }
+    if suppressedUpLease == lease {
+      // Stay suppressed until a fresh authenticated down, including duplicate
+      // or late ups delivered after the local proof completed.
+      return
+    }
+    guard ownsBase(owner) else {
+      cancel()
+      return
+    }
+    // Only an already authenticated down may cross the pending-proof boundary.
+    // Display guidance's legacy up-only path cannot begin a new hidden action.
+    if validationPending(), !handingOff(owner) { return }
     model?.record("guidance.mouseUp.received")
     guard owns(owner) else {
       model?.record("guidance.clickObservation.ownershipLost")

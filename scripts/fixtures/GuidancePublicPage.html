@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenCompanion Public Guide</title>
+  <style>
+    :root { color-scheme: dark; font: 17px/1.55 system-ui, sans-serif; }
+    body { margin: 0; background: #111417; color: #f1f3f5; }
+    main { max-width: 640px; margin: 64px auto; padding: 32px; }
+    .eyebrow { color: #b1c8bb; font-size: 13px; letter-spacing: .08em; }
+    h1 { margin: 10px 0; font-size: 36px; letter-spacing: -.04em; }
+    p { color: #b7bec4; }
+    form { margin-top: 32px; padding: 28px; background: #1b2025; border-radius: 20px; }
+    label { display: block; font-weight: 600; }
+    input[type=text] { box-sizing: border-box; width: 100%; margin: 10px 0 26px; padding: 14px; border: 1px solid #58616b; border-radius: 9px; background: #111417; color: white; font: inherit; }
+    .check { display: flex; align-items: center; gap: 10px; }
+    input[type=checkbox] { width: 21px; height: 21px; accent-color: #a3dfb7; }
+    button { margin-top: 30px; padding: 13px 22px; border: 0; border-radius: 9px; background: #b5e7c4; color: #14201a; font: inherit; font-weight: 650; cursor: pointer; }
+    :focus-visible { outline: 3px solid #9dc9ff; outline-offset: 3px; }
+    #saved { color: #b5e7c4; font-weight: 650; }
+    small { display: block; color: #8c969f; margin-top: 28px; }
+  </style>
+  <main>
+    <div class="eyebrow">PUBLIC GUIDANCE PRACTICE</div>
+    <h1>Set up a project</h1>
+    <p>This disposable form stays in memory. No account, files, or network submission is involved.</p>
+    <form id="project" autocomplete="off">
+      <label for="name">Project name</label>
+      <input id="name" type="text" name="projectName">
+      <label class="check"><input id="protect" type="checkbox" checked>Protect data</label>
+      <button type="submit">Save project</button>
+      <p id="saved" role="status" aria-live="polite"></p>
+    </form>
+    <small>OpenCompanion public acceptance fixture · reload to reset</small>
+  </main>
+  <script>
+    document.querySelector('#project').addEventListener('submit', event => {
+      event.preventDefault();
+      document.querySelector('#saved').textContent = 'Saved public project';
+    });
+  </script>
+</html>

@@ -135,6 +135,7 @@ enum GuidancePublicAppAcceptance {
     model: AppModel, cursor: CursorCompanionCoordinator, output: URL, scenario name: String
   ) async throws {
     let began = ProcessInfo.processInfo.systemUptime
+    var taskBegan: TimeInterval?
     var failure = "incomplete"
     var passed = false
     var postconditionVerified = false
@@ -201,6 +202,10 @@ enum GuidancePublicAppAcceptance {
           (Bundle.main.object(forInfoDictionaryKey: "OpenCompanionSourceRevision") as? String
             ?? "unknown").prefix(128)),
         "elapsedMS": (ProcessInfo.processInfo.systemUptime - began) * 1_000,
+        "foregroundWaitMS": ((taskBegan ?? ProcessInfo.processInfo.systemUptime) - began) * 1_000,
+        "taskElapsedMS": taskBegan.map {
+          (ProcessInfo.processInfo.systemUptime - $0) * 1_000
+        } as Any? ?? NSNull(),
         "actualArmedAppModelPath": nativePathStarted,
         "captureAttempted": captureAttempted,
         "captureScope": "exact-selected-public-window",
@@ -269,7 +274,9 @@ enum GuidancePublicAppAcceptance {
       guard CGPreflightScreenCaptureAccess(), AXIsProcessTrusted() else {
         throw Refusal("existing-permission-unavailable")
       }
-      let foregroundDeadline = min(began + 150, ProcessInfo.processInfo.systemUptime + 45)
+      // Human app activation is a bounded setup wait, outside the task clock.
+      // No capture, native observation or provider turn starts in this loop.
+      let foregroundDeadline = began + 180
       try write(
         [
           "phase": "waiting-for-public-app", "scenario": scenario.rawValue,
@@ -283,6 +290,7 @@ enum GuidancePublicAppAcceptance {
         }
         try await Task.sleep(for: .milliseconds(100))
       }
+      taskBegan = ProcessInfo.processInfo.systemUptime
       let environment = try environment(scenario: scenario)
       selectedWindowRect = environment.windowRect
       selectedWindowID = environment.windowID
@@ -535,7 +543,7 @@ enum GuidancePublicAppAcceptance {
       }
       nativePathStarted = true
       try marker("GUIDANCE_PUBLIC_APP_READY")
-      let deadline = began + 150
+      let deadline = (taskBegan ?? began) + 150
       while ProcessInfo.processInfo.systemUptime < deadline {
         try Task.checkCancellation()
         if let targetRefusal { throw Refusal(targetRefusal) }

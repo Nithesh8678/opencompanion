@@ -39,6 +39,10 @@ enum GuidanceObservationAcceptance {
         fixturePreflightPassed: owner != nil, streamStarted: started,
         scopeGeneration: owner?.generation, scopeDisplayID: owner?.displayID,
         scopeRect: owner?.sourceRect, frames: collector.frames, events: collector.events,
+        windowGeometry: collector.windowGeometry,
+        lastPreflightRefusalGeometry: collector.lastPreflightRefusalGeometry,
+        preflightAttempts: collector.preflightAttempts,
+        preflightRefusalCodes: collector.preflightRefusals,
         eventBudgetExceeded: collector.overflow,
         diagnosticsBeforeStop: finalRunning, diagnosticsStopped: stopped,
         diagnosticsAfterStopWait: postStop, stopQuiescentFor500MS: stoppedCleanly,
@@ -76,7 +80,8 @@ enum GuidanceObservationAcceptance {
         try await Task.sleep(for: .milliseconds(100))
       }
       try Task.checkCancellation()
-      let fixture = try fixtureEnvironment()
+      phase = "settling-public-fixture"
+      let fixture = try await fixtureEnvironment(collector: collector)
       let scope = try GuidanceObservationScope(
         generation: 1,
         foregroundPID: fixture.pid, displayID: fixture.displayID, sourceRect: fixture.screenRect)
@@ -97,7 +102,7 @@ enum GuidanceObservationAcceptance {
       phase = "starting-native-stream"
       let startDeadline = ProcessInfo.processInfo.systemUptime + 5
       while startup.result == nil && ProcessInfo.processInfo.systemUptime < startDeadline {
-        try verifyEnvironment(fixture)
+        try verifyEnvironment(fixture) { collector.windowGeometry = $0 }
         try Task.checkCancellation()
         try await Task.sleep(for: .milliseconds(20))
       }
@@ -125,7 +130,7 @@ enum GuidanceObservationAcceptance {
       let deadline = ProcessInfo.processInfo.systemUptime + 20
       while ProcessInfo.processInfo.systemUptime < deadline {
         try Task.checkCancellation()
-        try verifyEnvironment(fixture)
+        try verifyEnvironment(fixture) { collector.windowGeometry = $0 }
         let diagnostics = active.diagnostics
         finalRunning = diagnostics
         collector.maximumAXNotifications = max(
@@ -210,7 +215,9 @@ enum GuidanceObservationAcceptance {
     let screenRect: CGRect
   }
 
-  @MainActor private static func fixtureEnvironment() throws -> Environment {
+  @MainActor private static func fixtureEnvironment(collector: Collector) async throws
+    -> Environment
+  {
     guard let app = NSWorkspace.shared.frontmostApplication,
       app.bundleIdentifier == "org.opencompanion.fixture.guidance", !app.isTerminated,
       let date = app.launchDate
@@ -222,11 +229,36 @@ enum GuidanceObservationAcceptance {
     let environment = Environment(
       pid: app.processIdentifier, launchDate: date,
       displayID: number.uint32Value, screenRect: screen.frame)
-    try verifyEnvironment(environment)
-    return environment
+    let deadline = ProcessInfo.processInfo.systemUptime + 2
+    while true {
+      try Task.checkCancellation()
+      collector.preflightAttempts += 1
+      do {
+        try verifyEnvironment(environment) { collector.windowGeometry = $0 }
+        return environment
+      } catch let error as Refusal {
+        collector.lastPreflightRefusalGeometry = collector.windowGeometry
+        if collector.preflightRefusals.count < 24 { collector.preflightRefusals.append(error.code) }
+        guard
+          [
+            "public-fixture-front-window-does-not-cover-display",
+            "public-fixture-does-not-cover-display",
+            "public-fixture-window-metadata-unavailable",
+          ].contains(error.code),
+          ProcessInfo.processInfo.systemUptime < deadline
+        else { throw error }
+        let remaining = deadline - ProcessInfo.processInfo.systemUptime
+        guard remaining > 0 else { throw error }
+        try await Task.sleep(for: .seconds(min(0.1, remaining)))
+        try Task.checkCancellation()
+        guard ProcessInfo.processInfo.systemUptime < deadline else { throw error }
+      }
+    }
   }
 
-  @MainActor private static func verifyEnvironment(_ expected: Environment) throws {
+  @MainActor private static func verifyEnvironment(
+    _ expected: Environment, onGeometry: (GuidanceFixtureWindowDiagnostic) -> Void
+  ) throws {
     guard let app = NSWorkspace.shared.frontmostApplication,
       app.bundleIdentifier == "org.opencompanion.fixture.guidance",
       app.processIdentifier == expected.pid, app.launchDate == expected.launchDate,
@@ -242,6 +274,10 @@ enum GuidanceObservationAcceptance {
     guard let list = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID),
       CFArrayGetCount(list) <= 4_096, let windows = list as? [[String: Any]]
     else { throw Refusal("public-fixture-window-metadata-unavailable") }
+    onGeometry(
+      .capture(
+        expectedPID: expected.pid, displayID: expected.displayID,
+        screenRect: expected.screenRect, guardWindows: windows))
     let quartzDisplay = CGRect(
       x: screen.frame.minX,
       y: primary.frame.maxY - screen.frame.maxY,
@@ -290,6 +326,10 @@ enum GuidanceObservationAcceptance {
     var events: [Event] = []
     var overflow = false
     var maximumAXNotifications = 0
+    var windowGeometry: GuidanceFixtureWindowDiagnostic?
+    var lastPreflightRefusalGeometry: GuidanceFixtureWindowDiagnostic?
+    var preflightAttempts = 0
+    var preflightRefusals: [String] = []
     private var lastContentTime: Double?
 
     func receive(_ event: GuidanceObservationEvent) {
@@ -352,6 +392,10 @@ enum GuidanceObservationAcceptance {
     let scopeRect: CGRect?
     let frames: [Frame]
     let events: [Event]
+    let windowGeometry: GuidanceFixtureWindowDiagnostic?
+    let lastPreflightRefusalGeometry: GuidanceFixtureWindowDiagnostic?
+    let preflightAttempts: Int
+    let preflightRefusalCodes: [String]
     let eventBudgetExceeded: Bool
     let diagnosticsBeforeStop: GuidanceObservationDiagnostics?
     let diagnosticsStopped: GuidanceObservationDiagnostics?
@@ -383,5 +427,159 @@ enum GuidanceObservationAcceptance {
     let file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
     defer { try? file.close() }
     try file.write(contentsOf: data)
+  }
+}
+
+/// Acceptance-only geometry metadata. It never reads names, titles, AX values,
+/// screenshots, or another application's PID into the saved diagnostic.
+struct GuidanceFixtureWindowDiagnostic: Codable, Sendable {
+  struct Window: Codable, Sendable {
+    let orderIndex: Int
+    let fixtureWindowID: UInt32?
+    let ownerIsFixture: Bool
+    let ownerIsCurrentProcess: Bool
+    let alpha: Double?
+    let bounds: [Double]?
+    let intersectsExpectedDisplay: Bool?
+    let coversExpectedDisplay: Bool?
+  }
+
+  let sampledAtUptime: Double?
+  let sameGuardWindowList: Bool
+  let expectedDisplayID: UInt32
+  let expectedScreenRect: [Double]?
+  let actualScreenRect: [Double]?
+  let expectedQuartzDisplayRect: [Double]?
+  let primaryScreenTop: Double?
+  let pointerInsideExpectedDisplay: Bool
+  let foregroundIsExpectedFixture: Bool
+  let listedWindowCount: Int?
+  let windowListOverBudget: Bool
+  let malformedLayerZeroCount: Int
+  let fixtureLayerZeroWindowCount: Int
+  let opaqueCoveringFixtureWindowCount: Int
+  let fixtureWindows: [Window]
+  let firstIntersectingNonOwnLayerZero: Window?
+
+  @MainActor static func capture(
+    expectedPID: pid_t, displayID: CGDirectDisplayID, screenRect: CGRect,
+    guardWindows: [[String: Any]]? = nil
+  ) -> Self {
+    let primaryTop = NSScreen.screens.first?.frame.maxY
+    let quartz = primaryTop.map {
+      CGRect(
+        x: screenRect.minX, y: $0 - screenRect.maxY,
+        width: screenRect.size.width, height: screenRect.size.height)
+    }
+    let actual = NSScreen.screens.first {
+      ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+        == displayID
+    }?.frame
+    let windows: [[String: Any]]?
+    let count: Int?
+    let overBudget: Bool
+    if let guardWindows {
+      count = min(guardWindows.count, 4_097)
+      overBudget = guardWindows.count > 4_096
+      windows = overBudget ? nil : guardWindows
+    } else if let raw = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) {
+      let rawCount = CFArrayGetCount(raw)
+      count = min(rawCount, 4_097)
+      overBudget = rawCount > 4_096
+      windows = overBudget ? nil : raw as? [[String: Any]]
+    } else {
+      count = nil
+      overBudget = false
+      windows = nil
+    }
+    let ownPID = ProcessInfo.processInfo.processIdentifier
+    var fixtureWindows: [Window] = []
+    var fixtureCount = 0
+    var coveringCount = 0
+    var malformed = 0
+    var first: Window?
+    for (index, raw) in (windows ?? []).enumerated() {
+      guard (raw[kCGWindowLayer as String] as? NSNumber)?.intValue == 0 else { continue }
+      let pid = (raw[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+      let rawAlpha = (raw[kCGWindowAlpha as String] as? NSNumber)?.doubleValue
+      let alpha = rawAlpha.flatMap { $0.isFinite && (0...1).contains($0) ? $0 : nil }
+      let rect = (raw[kCGWindowBounds as String] as? [String: Any]).flatMap {
+        CGRect(dictionaryRepresentation: $0 as CFDictionary)
+      }
+      let bounds = rect.flatMap(validRect)
+      if (pid ?? 0) <= 0 || alpha == nil || bounds == nil { malformed += 1 }
+      let intersection = rect.flatMap { rect -> Bool? in
+        guard bounds != nil, let quartz, validRect(quartz) != nil else { return nil }
+        return rect.intersects(quartz)
+      }
+      let covers = rect.flatMap { rect -> Bool? in
+        guard bounds != nil, let quartz, validRect(quartz) != nil else { return nil }
+        return rect.contains(quartz)
+      }
+      let item = Window(
+        orderIndex: index,
+        fixtureWindowID: pid == expectedPID
+          ? (raw[kCGWindowNumber as String] as? NSNumber)?.uint32Value : nil,
+        ownerIsFixture: pid == expectedPID, ownerIsCurrentProcess: pid == ownPID,
+        alpha: alpha, bounds: bounds, intersectsExpectedDisplay: intersection,
+        coversExpectedDisplay: covers)
+      if pid == expectedPID {
+        fixtureCount += 1
+        if alpha == 1 && covers == true { coveringCount += 1 }
+        if fixtureWindows.count < 8 { fixtureWindows.append(item) }
+      }
+      if first == nil, let pid, pid > 0, pid != ownPID,
+        let alpha, alpha > 0, intersection == true
+      {
+        first = item
+      }
+    }
+    let uptime = ProcessInfo.processInfo.systemUptime
+    return .init(
+      sampledAtUptime: uptime.isFinite && uptime >= 0 ? uptime : nil,
+      sameGuardWindowList: guardWindows != nil, expectedDisplayID: displayID,
+      expectedScreenRect: validRect(screenRect), actualScreenRect: actual.flatMap(validRect),
+      expectedQuartzDisplayRect: quartz.flatMap(validRect),
+      primaryScreenTop: primaryTop.flatMap { $0.isFinite ? Double($0) : nil },
+      pointerInsideExpectedDisplay: screenRect.contains(NSEvent.mouseLocation),
+      foregroundIsExpectedFixture:
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == expectedPID,
+      listedWindowCount: count, windowListOverBudget: overBudget,
+      malformedLayerZeroCount: malformed, fixtureLayerZeroWindowCount: fixtureCount,
+      opaqueCoveringFixtureWindowCount: coveringCount, fixtureWindows: fixtureWindows,
+      firstIntersectingNonOwnLayerZero: first)
+  }
+
+  private static func validRect(_ rect: CGRect) -> [Double]? {
+    guard GuidanceObservationScope.valid(rect) else { return nil }
+    return [
+      Double(rect.origin.x), Double(rect.origin.y),
+      Double(rect.size.width), Double(rect.size.height),
+    ]
+  }
+
+  static func failureCode(_ error: GuidanceFixtureStateAcceptance.Failure) -> String {
+    switch error {
+    case .accessibilityDenied: "accessibilityDenied"
+    case .fixtureAbsent: "fixtureAbsent"
+    case .fixtureDisappeared: "fixtureDisappeared"
+    case .staleIdentity: "staleIdentity"
+    case .displayNotCovered: "displayNotCovered"
+    case .focusedWindowAbsent: "focusedWindowAbsent"
+    case .attributeUnavailable: "attributeUnavailable"
+    case .traversalLimitExceeded: "traversalLimitExceeded"
+    case .deadlineExceeded: "deadlineExceeded"
+    case .missingControl(let control): "missingControl.\(control.rawValue)"
+    case .duplicateControl(let control): "duplicateControl.\(control.rawValue)"
+    case .invalidRole(let control): "invalidRole.\(control.rawValue)"
+    case .hiddenControl(let control): "hiddenControl.\(control.rawValue)"
+    case .invalidValue(let control): "invalidValue.\(control.rawValue)"
+    case .axRequestFailed(let attribute, let code): "axRequestFailed.\(attribute.rawValue).\(code)"
+    case .axCountFailed(let attribute, let code): "axCountFailed.\(attribute.rawValue).\(code)"
+    case .axCopyFailed(let attribute, let code): "axCopyFailed.\(attribute.rawValue).\(code)"
+    case .attributeMissing(let attribute): "attributeMissing.\(attribute.rawValue)"
+    case .attributeTypeInvalid(let attribute): "attributeTypeInvalid.\(attribute.rawValue)"
+    case .attributeSizeInvalid(let attribute): "attributeSizeInvalid.\(attribute.rawValue)"
+    }
   }
 }

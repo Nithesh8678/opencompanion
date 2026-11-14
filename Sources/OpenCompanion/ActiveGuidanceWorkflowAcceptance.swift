@@ -41,6 +41,11 @@ import Vision
     private var finalAfter: GuidanceFixtureStateAcceptance.Snapshot?
     private var finalImageProof: [String: Any]?
     private var callbackFailure: String?
+    private var windowGeometry: GuidanceFixtureWindowDiagnostic?
+    private var lastPreflightRefusalGeometry: GuidanceFixtureWindowDiagnostic?
+    private var preflightAttempts = 0
+    private var preflightRefusalCodes: [String] = []
+    private var fixtureStateFailureCode: String?
 
     init(model: AppModel, cursor: CursorCompanionCoordinator, output: URL) {
       self.model = model
@@ -101,7 +106,9 @@ import Vision
       launchedAt = fixture.launchDate
       self.screen = screen
       displayID = number.uint32Value
-      try verifyFixture()
+      phase = "settlingPublicFixture"
+      try progress()
+      try await settleFixturePreflight()
       model.providerMode = "ChatGPT via Codex"
       model.guidanceModelPreference = .terra
       model.configuration.speechEnabled = false
@@ -199,9 +206,14 @@ import Vision
           guard imageVerified else { throw refuse("final-capture-visible-input-not-verified") }
           phase = "verifyingFinalNativeState"
           try progress()
-          let after = try await GuidanceFixtureStateAcceptance.snapshot(
-            expectedFixturePID: fixture.processIdentifier, displayID: displayID,
-            screenRect: screen.frame)
+          let after: GuidanceFixtureStateAcceptance.Snapshot
+          do {
+            after = try await GuidanceFixtureStateAcceptance.snapshot(
+              expectedFixturePID: fixture.processIdentifier, displayID: displayID,
+              screenRect: screen.frame)
+          } catch let error as GuidanceFixtureStateAcceptance.Failure {
+            throw fixtureStateRefusal(error)
+          }
           try verifyFixture()
           guard after.capturedAtUptime >= frame.capturedAt,
             after.tableNameMatchesReleaseQA, !after.protectDataChecked,
@@ -291,14 +303,12 @@ import Vision
         // The known initial page deliberately has no exposed settings controls.
         // Denied, malformed or stale AX can never establish an initial state.
         guard preparations.isEmpty else {
-          failure = "fixture-state-\(String(describing: error))"
-          throw error
+          throw fixtureStateRefusal(error)
         }
         switch error {
         case .missingControl, .hiddenControl: break
         default:
-          failure = "fixture-state-\(String(describing: error))"
-          throw error
+          throw fixtureStateRefusal(error)
         }
       }
       try verifyFixture()
@@ -433,13 +443,20 @@ import Vision
       guard let fixture, let screen, !fixture.isTerminated, fixture.launchDate == launchedAt else {
         throw refuse("public-fixture-identity-lost")
       }
-      try GuidanceFixtureStateAcceptance.verifyEnvironment(
-        expectedFixturePID: fixture.processIdentifier, displayID: displayID,
-        screenRect: screen.frame)
+      do {
+        try GuidanceFixtureStateAcceptance.verifyEnvironment(
+          expectedFixturePID: fixture.processIdentifier, displayID: displayID,
+          screenRect: screen.frame)
+      } catch let error as GuidanceFixtureStateAcceptance.Failure {
+        throw fixtureStateRefusal(error)
+      }
       guard let primary = NSScreen.screens.first,
         let list = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID),
         CFArrayGetCount(list) <= 4_096, let windows = list as? [[String: Any]]
       else { throw refuse("public-fixture-window-order-unavailable") }
+      windowGeometry = .capture(
+        expectedPID: fixture.processIdentifier,
+        displayID: displayID, screenRect: screen.frame, guardWindows: windows)
       let display = CGRect(
         x: screen.frame.minX, y: primary.frame.maxY - screen.frame.maxY,
         width: screen.frame.size.width, height: screen.frame.size.height)
@@ -469,6 +486,51 @@ import Vision
         return
       }
       throw refuse("public-fixture-does-not-cover-display")
+    }
+
+    /// Only initial metadata coverage/order may settle. No observation, capture,
+    /// AX-control read or provider work has started; identity/display stay pinned.
+    private func settleFixturePreflight() async throws {
+      let deadline = ProcessInfo.processInfo.systemUptime + 2
+      while true {
+        preflightAttempts += 1
+        do {
+          try verifyFixture()
+          failure = "incomplete"
+          return
+        } catch {
+          lastPreflightRefusalGeometry = windowGeometry
+          if preflightRefusalCodes.count < 24 { preflightRefusalCodes.append(failure) }
+          guard
+            [
+              "fixture-state-displayNotCovered",
+              "public-fixture-front-window-does-not-cover-display",
+              "public-fixture-does-not-cover-display",
+              "public-fixture-window-order-unavailable",
+            ].contains(failure),
+            ProcessInfo.processInfo.systemUptime < deadline
+          else { throw error }
+          let remaining = deadline - ProcessInfo.processInfo.systemUptime
+          guard remaining > 0 else { throw error }
+          try await Task.sleep(for: .seconds(min(0.1, remaining)))
+          try Task.checkCancellation()
+          guard ProcessInfo.processInfo.systemUptime < deadline else { throw error }
+        }
+      }
+    }
+
+    private func fixtureStateRefusal(
+      _ error: GuidanceFixtureStateAcceptance.Failure
+    ) -> ProviderError {
+      fixtureStateFailureCode = GuidanceFixtureWindowDiagnostic.failureCode(error)
+      if let fixture, let screen {
+        // The shared helper owns its guard snapshot. This follow-up is labeled
+        // separately; it is not misrepresented as that same WindowServer read.
+        windowGeometry = .capture(
+          expectedPID: fixture.processIdentifier,
+          displayID: displayID, screenRect: screen.frame)
+      }
+      return refuse("fixture-state-" + (fixtureStateFailureCode ?? "unknown"))
     }
 
     private func checkDeadline(_ deadline: TimeInterval) throws {
@@ -514,6 +576,11 @@ import Vision
         "productionError": String((model.error ?? "").prefix(1_000)),
         "accessibilityTrusted": AXIsProcessTrusted(),
         "screenRecordingGranted": CGPreflightScreenCaptureAccess(),
+        "windowGeometry": encoded(windowGeometry),
+        "lastPreflightRefusalGeometry": encoded(lastPreflightRefusalGeometry),
+        "preflightAttempts": preflightAttempts,
+        "preflightRefusalCodes": preflightRefusalCodes,
+        "lastFixtureStateFailureCode": fixtureStateFailureCode as Any? ?? NSNull(),
         "lastPhase": lastPhase, "elapsedMS": elapsedMS, "publicFixtureOnly": true,
         "declaredInputDriver": "external-AX-driver", "physicalInputVerified": false,
         "automaticDesktopActions": false, "audioUsed": false, "microphoneUsed": false,

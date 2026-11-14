@@ -366,7 +366,9 @@ import SwiftUI
             model: model, cursor: cursor,
             output: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
             scenario: CommandLine.arguments[index + 2])
-          print("GUIDANCE_PUBLIC_APP_ACCEPTANCE_PASSED")
+          // The helper's receipt distinguishes full target proof from a
+          // postcondition-only native-app check.
+          print("GUIDANCE_PUBLIC_APP_ACCEPTANCE_COMPLETED")
         } catch {
           print("GUIDANCE_PUBLIC_APP_ACCEPTANCE_FAILED: \(error.localizedDescription)")
           exit(1)

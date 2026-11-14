@@ -36,6 +36,10 @@ enum GuidancePublicAppAcceptance {
     let primaryTop: CGFloat
   }
 
+  private enum BrowserControl: String, Codable, Sendable {
+    case projectName, protection, save
+  }
+
   private struct State: Codable, Sendable, Equatable {
     let observedAt: TimeInterval
     var publicIdentity = false
@@ -43,6 +47,23 @@ enum GuidancePublicAppAcceptance {
     var nameMatches = false
     var protectionOn: Bool?
     var savedMessage = false
+    var projectNameRect: CGRect?
+    var protectionRect: CGRect?
+    var saveRect: CGRect?
+    var nextBrowserControl: BrowserControl? {
+      guard publicIdentity else { return nil }
+      if !nameMatches { return .projectName }
+      if protectionOn == true { return .protection }
+      if protectionOn == false && !savedMessage { return .save }
+      return nil
+    }
+    func rect(for control: BrowserControl) -> CGRect? {
+      switch control {
+      case .projectName: projectNameRect
+      case .protection: protectionRect
+      case .save: saveRect
+      }
+    }
     var publicPhrase = false
     var selectedPhrase = false
     var bold: Bool?
@@ -66,7 +87,19 @@ enum GuidancePublicAppAcceptance {
     let width: Double
     let height: Double
     let advanceOn: String?
+    let awaitUser: Bool?
     let shape: String?
+    let primary: Bool
+    let actionID: UUID?
+    let checkID: UUID?
+    let targetRect: CGRect
+    let expectedControl: BrowserControl?
+    var targetAccuracy: String
+    var nativeControlRect: CGRect?
+    var verifiedAt: TimeInterval?
+    let publicFactKeyBefore: String?
+    var independentEffect: String?
+    var effectObservedAt: TimeInterval?
     let publicInstruction: String
     let publicLabel: String?
   }
@@ -77,9 +110,25 @@ enum GuidancePublicAppAcceptance {
     let postconditionSatisfied: Bool
   }
 
+  private struct WindowGeometryDiagnostic: Codable, Sendable {
+    let expectedWindowID: CGWindowID
+    let expectedRect: CGRect
+    let actualAXRect: CGRect?
+    let actualAXRectValid: Bool
+    let publicTitleMatches: Bool
+    let deltaX: Double?
+    let deltaY: Double?
+    let deltaWidth: Double?
+    let deltaHeight: Double?
+  }
+
   private struct Refusal: Error {
     let code: String
-    init(_ code: String) { self.code = code }
+    let windowGeometry: WindowGeometryDiagnostic?
+    init(_ code: String, windowGeometry: WindowGeometryDiagnostic? = nil) {
+      self.code = code
+      self.windowGeometry = windowGeometry
+    }
   }
 
   @MainActor static func run(
@@ -88,6 +137,10 @@ enum GuidancePublicAppAcceptance {
     let began = ProcessInfo.processInfo.systemUptime
     var failure = "incomplete"
     var passed = false
+    var postconditionVerified = false
+    var modelCompletionVerified = false
+    var resultClassification: String?
+    var windowGeometryFailure: WindowGeometryDiagnostic?
     var nativePathStarted = false
     var stages: [Stage] = []
     var preparations: [Preparation] = []
@@ -137,7 +190,9 @@ enum GuidancePublicAppAcceptance {
       let counts = Dictionary(grouping: events.compactMap { $0["event"] }, by: { $0 })
         .mapValues(\.count)
       let data: [String: Any] = [
-        "result": passed ? "passed" : "failed", "failureCode": passed ? "" : failure,
+        "result": resultClassification ?? (passed ? "passed" : "failed"),
+        "fullPass": passed, "failureCode": postconditionVerified ? "" : failure,
+        "publicWindowGeometryFailure": windowGeometryFailure.map(json) ?? NSNull(),
         "productionError": String((model.error ?? "").prefix(1_000)),
         "accessibilityTrusted": AXIsProcessTrusted(),
         "screenRecordingGranted": CGPreflightScreenCaptureAccess(),
@@ -161,10 +216,21 @@ enum GuidancePublicAppAcceptance {
         "initialState": initial.map(json) ?? NSNull(), "finalState": latest.map(json) ?? NSNull(),
         "finalCapturePreparation": finalPreparation.map(json) ?? NSNull(),
         "distinctObservedCaptureFrameCount": observedFrames.count,
+        "primaryTargetCount": stages.filter(\.primary).count,
+        "independentlyGeometryVerifiedPrimaryCount":
+          stages.filter { $0.primary && $0.targetAccuracy == "verified-native-control" }.count,
+        "independentlyEffectObservedPrimaryCount":
+          stages.filter { $0.primary && $0.effectObservedAt != nil }.count,
+        "stepEvidence":
+          "Distinct primary action/check/generation/frame identities joined to later independently read public state effects. A physical mouse-up is not required or authenticated.",
         "productionEventCounts": counts, "productionEventCountsAreBoundedRecentTrace": true,
         "workflowCheckCount": model.guidanceSession.workflow?.checks.count ?? 0,
         "providerIdleBeforeCleanup": providerIdleBeforeCleanup,
-        "independentPostconditionVerified": passed,
+        "independentPostconditionVerified": postconditionVerified,
+        "modelReportedCompletionVerified": modelCompletionVerified,
+        "targetAccuracyVerified": passed,
+        "targetAccuracyBoundary":
+          "Browser primaries require independent exact public AX control geometry. Native-app primaries require separate external target review.",
         "calculatorObserved16Then4Then0": sawSixteen && sawFourAfterSixteen && sawZeroAfterFour,
         "notebookUnchanged": model.scene == initialScene,
         "helperPostedInput": false, "helperActivatedApp": false,
@@ -176,7 +242,11 @@ enum GuidancePublicAppAcceptance {
           "Actual public-window capture, armed host reasoning, native grounded-target submission and independent public AX state. No latency distribution, arbitrary-app reliability or reference parity claim.",
       ]
       if mayWrite { try? write(data, to: terminalURL) }
-      try? marker("GUIDANCE_PUBLIC_APP_TERMINAL_\(passed ? "PASSED" : "FAILED")")
+      let terminal =
+        passed
+        ? "PASSED"
+        : (postconditionVerified ? "POSTCONDITION_PASSED_TARGET_ACCURACY_UNVERIFIED" : "FAILED")
+      try? marker("GUIDANCE_PUBLIC_APP_TERMINAL_\(terminal)")
     }
     do {
       try Task.checkCancellation()
@@ -212,6 +282,9 @@ enum GuidancePublicAppAcceptance {
         try await Task.sleep(for: .milliseconds(100))
       }
       let environment = try environment(scenario: scenario)
+      selectedWindowRect = environment.windowRect
+      selectedWindowID = environment.windowID
+      selectedPID = environment.pid
       let first = try await readState(environment, scenario: scenario)
       try Task.checkCancellation()
       try verify(environment, scenario: scenario)
@@ -235,6 +308,40 @@ enum GuidancePublicAppAcceptance {
       initial = first
       latest = first
       @MainActor func consume(_ state: State) {
+        // Metadata/visual refresh may advance without a global mouse-up. Join
+        // the retained primary to its independently observed public effect;
+        // this never authenticates physical input or equates a click to success.
+        for index in stages.indices
+        where stages[index].primary
+          && stages[index].effectObservedAt == nil
+        {
+          let stage = stages[index]
+          guard let verifiedAt = stage.verifiedAt, state.observedAt > verifiedAt,
+            stage.targetAccuracy == "verified-native-control"
+              || stage.targetAccuracy == "unverified-native-scenario"
+          else { continue }
+          let effect: String?
+          if scenario == .browser {
+            switch stage.expectedControl {
+            case .projectName: effect = state.nameMatches ? "name-matches" : nil
+            case .protection:
+              effect = state.nameMatches && state.protectionOn == false ? "protection-off" : nil
+            case .save:
+              effect =
+                state.nameMatches && state.protectionOn == false && state.savedMessage
+                ? "saved-public-project" : nil
+            case nil: effect = nil
+            }
+          } else {
+            effect =
+              stage.publicFactKeyBefore.map { $0 != state.factKey } == true
+              ? "public-state-changed" : nil
+          }
+          if let effect {
+            stages[index].independentEffect = effect
+            stages[index].effectObservedAt = state.observedAt
+          }
+        }
         if scenario == .calculator {
           if state.display == "sixteen" { sawSixteen = true }
           if sawSixteen && state.display == "four" { sawFourAfterSixteen = true }
@@ -251,6 +358,36 @@ enum GuidancePublicAppAcceptance {
         case .calculator:
           return sawSixteen && sawFourAfterSixteen && sawZeroAfterFour && state.display == "zero"
         }
+      }
+      @MainActor func distinctObservedPrimaries() -> [Stage] {
+        guard let workflow = model.guidanceSession.workflow else { return [] }
+        var actions = Set<UUID>()
+        var generations = Set<UInt64>()
+        var frames = Set<UUID>()
+        var checks = Set<UUID>()
+        var joined: [Stage] = []
+        for stage in stages where stage.primary {
+          guard let actionID = stage.actionID, let checkID = stage.checkID,
+            let action = workflow.actions.first(where: { $0.id == actionID }),
+            action.checkID == checkID,
+            action.observation == nil || action.observation?.actionID == actionID,
+            stage.independentEffect != nil, stage.effectObservedAt != nil,
+            actions.insert(actionID).inserted, checks.insert(checkID).inserted,
+            generations.insert(stage.generation).inserted, frames.insert(stage.frameID).inserted,
+            stage.targetAccuracy == "verified-native-control"
+              || stage.targetAccuracy == "unverified-native-scenario"
+          else { continue }
+          joined.append(stage)
+        }
+        return joined
+      }
+      @MainActor func finalModelCompleted(generation: UInt64) -> Bool {
+        !model.busy && model.taskGeneration == generation
+          && model.guidanceSession.workflow?.phase == .modelReportedComplete
+          && model.guidanceSession.workflow?.checks.last?.outcome == .goalComplete
+          && model.diagnosticEvents.dropFirst(traceStart).contains {
+            $0["event"] == "generation.completed" && $0["generation"] == String(generation)
+          }
       }
       @MainActor func ownsRuntime() -> Bool {
         guard let ownedRuntimeID, let ownedWorkflowID,
@@ -333,7 +470,7 @@ enum GuidancePublicAppAcceptance {
             matchesSelectedWindow(evidence, environment: environment),
             evidence.frameID != selectedSeed?.frameID,
             ScreenEvidenceIdentity(evidence).matches(model.evidence),
-            ScreenGuidancePolicy.targetRect(target, in: evidence.screenRect) != nil
+            let targetRect = ScreenGuidancePolicy.targetRect(target, in: evidence.screenRect)
           else {
             throw Refusal("target-source-or-geometry-invalid")
           }
@@ -341,21 +478,35 @@ enum GuidancePublicAppAcceptance {
           guard evidence.imageWidth == Int(size.width), evidence.imageHeight == Int(size.height)
           else { throw Refusal("capture-header-invalid") }
           observedFrames.insert(evidence.frameID)
+          let primary =
+            target.advanceOn == "click"
+            || (target.advanceOn == "manual" && target.awaitUser == true)
+          let action = primary ? model.guidanceSession.workflow?.currentAction : nil
+          guard
+            !primary
+              || (action != nil
+                && action?.checkID == model.guidanceSession.currentToken?.checkID)
+          else { throw Refusal("primary-action-ownership-unverified") }
+          let preparation = preparations.last(where: { $0.generation == generation })
           let stage = Stage(
             ordinal: stages.count, generation: generation, requestStep: request.step,
             frameID: evidence.frameID, evidenceRevision: evidence.revision,
             capturedAt: evidence.capturedAt, observedAt: ProcessInfo.processInfo.systemUptime,
             x: target.x, y: target.y, width: target.width, height: target.height,
-            advanceOn: target.advanceOn, shape: target.shape,
+            advanceOn: target.advanceOn, awaitUser: target.awaitUser, shape: target.shape,
+            primary: primary, actionID: action?.id, checkID: action?.checkID,
+            targetRect: targetRect,
+            expectedControl: scenario == .browser ? preparation?.state.nextBrowserControl : nil,
+            targetAccuracy: primary ? "pending-independent-read" : "secondary-not-an-action",
+            nativeControlRect: nil, verifiedAt: nil,
+            publicFactKeyBefore: preparation?.state.factKey,
+            independentEffect: nil, effectObservedAt: nil,
             publicInstruction: String(target.instruction.prefix(480)),
             publicLabel: target.label.map { String($0.prefix(80)) })
           stages.append(stage)
           priorTarget?(target, evidence, generation, request)
-          try write(
-            [
-              "scenario": scenario.rawValue, "stage": json(stage), "helperPostedInput": false,
-            ], to: output.appendingPathComponent("target-ready.json"))
-          try marker("GUIDANCE_PUBLIC_TARGET_\(stage.ordinal)_READY")
+          // Only a primary joined to a fresh independent AX read is published
+          // as driver-ready. Secondary annotations cannot inflate step counts.
         } catch {
           targetRefusal = (error as? Refusal)?.code ?? "target-validation-failed"
           model.stop()
@@ -395,6 +546,43 @@ enum GuidancePublicAppAcceptance {
         guard ownsRuntime(), state.publicIdentity else {
           throw Refusal("public-app-identity-changed")
         }
+        // This read occurs after native target submission, before target-ready.
+        // A source change cannot be papered over with an old native rectangle.
+        for index in stages.indices
+        where stages[index].primary
+          && stages[index].targetAccuracy == "pending-independent-read"
+        {
+          let stage = stages[index]
+          guard stage.generation == model.taskGeneration,
+            let frame = model.evidence, frame.frameID == stage.frameID,
+            frame.revision == stage.evidenceRevision,
+            matchesSelectedWindow(frame, environment: environment),
+            let preparation = preparations.last(where: { $0.generation == stage.generation }),
+            frame.capturedAt >= preparation.state.observedAt,
+            model.guidanceSession.workflow?.currentAction?.id == stage.actionID
+          else { throw Refusal("primary-verification-source-changed") }
+          if scenario == .browser {
+            stages[index].nativeControlRect = stage.expectedControl.flatMap { state.rect(for: $0) }
+            guard let control = stage.expectedControl,
+              preparation.state.nextBrowserControl == control, state.nextBrowserControl == control,
+              let rect = stages[index].nativeControlRect,
+              controlGeometryMatches(target: stage.targetRect, control: rect)
+            else {
+              stages[index].targetAccuracy = "native-control-mismatch"
+              throw Refusal("browser-primary-control-geometry-unverified")
+            }
+            stages[index].targetAccuracy = "verified-native-control"
+          } else {
+            stages[index].targetAccuracy = "unverified-native-scenario"
+          }
+          stages[index].verifiedAt = state.observedAt
+          try write(
+            [
+              "scenario": scenario.rawValue, "stage": json(stages[index]),
+              "helperPostedInput": false,
+            ], to: output.appendingPathComponent("target-ready.json"))
+          try marker("GUIDANCE_PUBLIC_TARGET_\(stage.ordinal)_READY")
+        }
         consume(state)
         if latest?.factKey != state.factKey {
           stateChanges += 1
@@ -418,9 +606,22 @@ enum GuidancePublicAppAcceptance {
           frame.capturedAt >= preparation.state.observedAt,
           matchesSelectedWindow(frame, environment: environment),
           frame.frameID != selectedSeed?.frameID,
-          stages.count >= 3, observedFrames.count >= 3,
+          distinctObservedPrimaries().count >= 3,
+          finalModelCompleted(generation: preparation.generation),
           model.scene == initialScene
         {
+          let primaries = distinctObservedPrimaries()
+          if scenario == .browser {
+            var next = 0
+            let required: [BrowserControl] = [.projectName, .protection, .save]
+            for stage in primaries where next < required.count {
+              if stage.expectedControl == required[next] { next += 1 }
+            }
+            guard next == required.count,
+              stages.filter(\.primary).allSatisfy({ $0.targetAccuracy == "verified-native-control" }
+              )
+            else { throw Refusal("browser-ordered-primary-controls-unverified") }
+          }
           finalPreparation = preparation
           // A second independent read brackets the same already-accepted final
           // evidence. Model-complete prose alone can never satisfy this gate.
@@ -429,12 +630,17 @@ enum GuidancePublicAppAcceptance {
           try verify(environment, scenario: scenario)
           guard ownsRuntime(), model.taskGeneration == preparation.generation,
             ScreenEvidenceIdentity(frame).matches(model.evidence), model.scene == initialScene,
-            complete(confirmation), model.error == nil
+            complete(confirmation), model.error == nil,
+            finalModelCompleted(generation: preparation.generation)
           else {
             throw Refusal("postcondition-did-not-persist")
           }
           latest = confirmation
-          passed = true
+          postconditionVerified = true
+          modelCompletionVerified = true
+          passed = scenario == .browser
+          resultClassification =
+            passed ? "passed" : "postcondition-passed-target-accuracy-unverified"
           failure = ""
           return
         }
@@ -445,6 +651,7 @@ enum GuidancePublicAppAcceptance {
       }
       throw Refusal("public-task-deadline-exceeded")
     } catch {
+      windowGeometryFailure = (error as? Refusal)?.windowGeometry
       failure =
         (error as? Refusal)?.code
         ?? (error is CancellationError ? "cancelled" : "public-check-failed")
@@ -581,14 +788,27 @@ enum GuidancePublicAppAcceptance {
       let actualRect = CGRect(
         x: point.x, y: environment.primaryTop - point.y - size.height,
         width: size.width, height: size.height)
+      let title = string(window, kAXTitleAttribute as CFString)
+      func finite(_ value: CGFloat) -> Double? { value.isFinite ? Double(value) : nil }
       guard GuidanceObservationScope.valid(actualRect),
         abs(actualRect.minX - environment.windowRect.minX) <= 1,
         abs(actualRect.minY - environment.windowRect.minY) <= 1,
         abs(actualRect.size.width - environment.windowRect.size.width) <= 1,
         abs(actualRect.size.height - environment.windowRect.size.height) <= 1
-      else { throw Refusal("public-ax-window-identity-mismatch") }
+      else {
+        throw Refusal(
+          "public-ax-window-identity-mismatch",
+          windowGeometry: .init(
+            expectedWindowID: environment.windowID, expectedRect: environment.windowRect,
+            actualAXRect: GuidanceObservationScope.valid(actualRect) ? actualRect : nil,
+            actualAXRectValid: GuidanceObservationScope.valid(actualRect),
+            publicTitleMatches: title == "OpenCompanion Public Guide",
+            deltaX: finite(actualRect.minX - environment.windowRect.minX),
+            deltaY: finite(actualRect.minY - environment.windowRect.minY),
+            deltaWidth: finite(actualRect.size.width - environment.windowRect.size.width),
+            deltaHeight: finite(actualRect.size.height - environment.windowRect.size.height)))
+      }
       var state = State(observedAt: ProcessInfo.processInfo.systemUptime)
-      let title = string(window, kAXTitleAttribute as CFString)
       if scenario == .browser, title != "OpenCompanion Public Guide" {
         throw Refusal("browser-public-title-mismatch")
       }
@@ -603,6 +823,30 @@ enum GuidancePublicAppAcceptance {
       var webAreas = 0
       var names = 0
       var protections = 0
+      var saves = 0
+      func controlRect(_ element: AXUIElement) -> CGRect? {
+        guard (value(element, kAXEnabledAttribute as CFString) as? NSNumber)?.boolValue == true,
+          let rawPoint = value(element, kAXPositionAttribute as CFString),
+          let rawExtent = value(element, kAXSizeAttribute as CFString),
+          CFGetTypeID(rawPoint) == AXValueGetTypeID(),
+          CFGetTypeID(rawExtent) == AXValueGetTypeID()
+        else { return nil }
+        let pointValue = rawPoint as! AXValue
+        let extentValue = rawExtent as! AXValue
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetType(pointValue) == .cgPoint, AXValueGetType(extentValue) == .cgSize,
+          AXValueGetValue(pointValue, .cgPoint, &point),
+          AXValueGetValue(extentValue, .cgSize, &size)
+        else { return nil }
+        let rect = CGRect(
+          x: point.x, y: environment.primaryTop - point.y - size.height,
+          width: size.width, height: size.height)
+        guard GuidanceObservationScope.valid(rect), environment.windowRect.contains(rect) else {
+          return nil
+        }
+        return rect
+      }
       var documents = 0
       var calculatorDisplays: [String] = []
       var calculatorInputContainers = 0
@@ -647,14 +891,20 @@ enum GuidancePublicAppAcceptance {
             let text = string(element, kAXValueAttribute as CFString)
             state.nameEmpty = text == ""
             state.nameMatches = text == "Release QA"
+            state.projectNameRect = controlRect(element)
           }
           if role == "AXCheckBox", label == "Protect data" {
             protections += 1
+            state.protectionRect = controlRect(element)
             if let number = value(element, kAXValueAttribute as CFString) as? NSNumber,
               [0, 1].contains(number.intValue)
             {
               state.protectionOn = number.intValue == 1
             }
+          }
+          if role == "AXButton", label == "Save project" {
+            saves += 1
+            state.saveRect = controlRect(element)
           }
           if role == "AXStaticText",
             label == "Saved public project"
@@ -778,7 +1028,10 @@ enum GuidancePublicAppAcceptance {
       }
       guard index == queue.count else { throw Refusal("public-ax-read-deadline") }
       switch scenario {
-      case .browser: state.publicIdentity = webAreas == 1 && names == 1 && protections == 1
+      case .browser:
+        state.publicIdentity =
+          webAreas == 1 && names == 1 && protections == 1 && saves == 1
+          && state.projectNameRect != nil && state.protectionRect != nil && state.saveRect != nil
       case .textedit:
         state.publicIdentity = documents == 1
         if state.bold == nil { state.bold = boldControl }
@@ -808,6 +1061,20 @@ enum GuidancePublicAppAcceptance {
       default: return "other"
       }
     }
+  }
+
+  /// Sampled model geometry is checked against the exact current public AX
+  /// control; this is neither a general semantic classifier nor click success.
+  private static func controlGeometryMatches(target: CGRect, control: CGRect) -> Bool {
+    guard GuidanceObservationScope.valid(target), GuidanceObservationScope.valid(control),
+      target.contains(CGPoint(x: control.midX, y: control.midY))
+    else { return false }
+    let overlap = target.intersection(control)
+    let controlArea = control.width * control.height
+    return !overlap.isNull && overlap.width * overlap.height >= controlArea * 0.5
+      && target.width <= max(control.width * 2, control.width + 48)
+      && target.height <= max(control.height * 2, control.height + 48)
+      && target.width * target.height <= controlArea * 4
   }
 
   private static func json<T: Encodable>(_ value: T) -> Any {

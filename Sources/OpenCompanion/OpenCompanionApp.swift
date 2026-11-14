@@ -137,9 +137,21 @@ import SwiftUI
           guard index + 1 < CommandLine.arguments.count else {
             throw ProviderError.message("Provide a local directory for guidance latency results.")
           }
+          var modelOverride: String?
+          if let modelIndex = CommandLine.arguments.firstIndex(of: "--guidance-latency-model") {
+            guard modelIndex + 1 < CommandLine.arguments.count,
+              CommandLine.arguments.filter({ $0 == "--guidance-latency-model" }).count == 1,
+              CommandLine.arguments[modelIndex + 1].hasPrefix("gpt-"),
+              CommandLine.arguments[modelIndex + 1].utf8.count <= 200
+            else {
+              throw ProviderError.message(
+                "Provide one supported model name for the diagnostic profile.")
+            }
+            modelOverride = CommandLine.arguments[modelIndex + 1]
+          }
           try await GuidanceLatencyAcceptance.run(
             output: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
-            executable: model.codexPath, model: model.codexModel)
+            executable: model.codexPath, model: model.codexModel, modelOverride: modelOverride)
           print("GUIDANCE_LATENCY_ACCEPTANCE_PASSED")
         } catch {
           print("GUIDANCE_LATENCY_ACCEPTANCE_FAILED: \(error.localizedDescription)")
@@ -720,11 +732,27 @@ import SwiftUI
       withTitle: "Check public screen guidance…", action: #selector(checkPublicGuidance),
       keyEquivalent: ""
     ).target = self
+    for (title, action) in [
+      ("Check screen observation…", #selector(checkGuidanceObservation)),
+      ("Check public browser guidance…", #selector(checkPublicBrowserGuidance)),
+      ("Check public TextEdit guidance…", #selector(checkPublicTextEditGuidance)),
+      ("Check public Calculator guidance…", #selector(checkPublicCalculatorGuidance)),
+    ] {
+      submenu.addItem(withTitle: title, action: action, keyEquivalent: "").target = self
+    }
     item.submenu = submenu
     menu.addItem(item)
   }
 
   @objc private func checkPublicGuidance() {
+    launchGuidanceCheck(mode: .activeWorkflow)
+  }
+  @objc private func checkGuidanceObservation() { launchGuidanceCheck(mode: .observation) }
+  @objc private func checkPublicBrowserGuidance() { launchGuidanceCheck(mode: .browser) }
+  @objc private func checkPublicTextEditGuidance() { launchGuidanceCheck(mode: .textedit) }
+  @objc private func checkPublicCalculatorGuidance() { launchGuidanceCheck(mode: .calculator) }
+
+  private func launchGuidanceCheck(mode: GuidanceAcceptanceLauncher.Mode) {
     guard guidanceCheckProcess == nil else { return }
     do {
       guidanceCheckProcess = try GuidanceAcceptanceLauncher.launch(
@@ -735,7 +763,8 @@ import SwiftUI
           pendingSpeech: model.voice.hasPendingSpeech,
           explanationVisible: model.presentingExplanation || explanationPanel?.isVisible == true
             || model.scene.map { explanationOverlay?.isVisible(documentID: $0.id) == true } == true,
-          hasDraft: !model.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+          hasDraft: !model.input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty),
+        mode: mode)
       NSApp.terminate(nil)
     } catch {
       model.notice = error.localizedDescription

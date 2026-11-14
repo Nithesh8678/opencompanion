@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CompanionCore
 import ImageIO
 
@@ -431,6 +432,11 @@ import ImageIO
       ]
       return [
         "result": passed ? "passed" : "failed", "failureCode": passed ? "" : failure,
+        "sourceRevision": Bundle.main.object(forInfoDictionaryKey: "OpenCompanionSourceRevision")
+          as? String ?? "unknown",
+        "productionError": String((model.error ?? "").prefix(1_000)),
+        "accessibilityTrusted": AXIsProcessTrusted(),
+        "screenRecordingGranted": CGPreflightScreenCaptureAccess(),
         "lastPhase": lastPhase, "elapsedMS": elapsedMS, "publicFixtureOnly": true,
         "declaredInputDriver": "external-AX-driver", "physicalInputVerified": false,
         "automaticDesktopActions": false, "audioUsed": false, "microphoneUsed": false,

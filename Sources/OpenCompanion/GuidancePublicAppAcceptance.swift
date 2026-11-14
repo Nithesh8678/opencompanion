@@ -127,6 +127,9 @@ enum GuidancePublicAppAcceptance {
         .mapValues(\.count)
       let data: [String: Any] = [
         "result": passed ? "passed" : "failed", "failureCode": passed ? "" : failure,
+        "productionError": String((model.error ?? "").prefix(1_000)),
+        "accessibilityTrusted": AXIsProcessTrusted(),
+        "screenRecordingGranted": CGPreflightScreenCaptureAccess(),
         "scenario": String(name.prefix(32)),
         "sourceRevision": String(
           (Bundle.main.object(forInfoDictionaryKey: "OpenCompanionSourceRevision") as? String
@@ -172,6 +175,20 @@ enum GuidancePublicAppAcceptance {
       else { throw Refusal("model-not-fresh") }
       guard CGPreflightScreenCaptureAccess(), AXIsProcessTrusted() else {
         throw Refusal("existing-permission-unavailable")
+      }
+      let foregroundDeadline = min(began + 150, ProcessInfo.processInfo.systemUptime + 45)
+      try write(
+        [
+          "phase": "waiting-for-public-app", "scenario": scenario.rawValue,
+          "captureAttempted": false, "providerUsed": false,
+        ],
+        to: output.appendingPathComponent("public-app-progress.json"))
+      while NSWorkspace.shared.frontmostApplication?.bundleIdentifier != scenario.bundleID {
+        try Task.checkCancellation()
+        guard ProcessInfo.processInfo.systemUptime < foregroundDeadline else {
+          throw Refusal("public-app-foreground-timeout")
+        }
+        try await Task.sleep(for: .milliseconds(100))
       }
       let environment = try environment(scenario: scenario)
       let first = try await readState(environment, scenario: scenario)

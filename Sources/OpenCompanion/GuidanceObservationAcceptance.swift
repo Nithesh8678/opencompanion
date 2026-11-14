@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Darwin
 import Foundation
 
@@ -42,6 +43,7 @@ enum GuidanceObservationAcceptance {
         diagnosticsBeforeStop: finalRunning, diagnosticsStopped: stopped,
         diagnosticsAfterStopWait: postStop, stopQuiescentFor500MS: stoppedCleanly,
         axStatus: axStatus, axMetadataEventCount: axEvents,
+        accessibilityTrusted: AXIsProcessTrusted(),
         actualNativeObservation: started, localSampledScreenPixels: started,
         modelEvidenceCapture: false, screenshotsSaved: false,
         automaticDesktopInput: false, appActivationRequested: false,
@@ -343,6 +345,7 @@ enum GuidanceObservationAcceptance {
     let stopQuiescentFor500MS: Bool
     let axStatus: String
     let axMetadataEventCount: Int
+    let accessibilityTrusted: Bool
     let actualNativeObservation: Bool
     let localSampledScreenPixels: Bool
     let modelEvidenceCapture: Bool

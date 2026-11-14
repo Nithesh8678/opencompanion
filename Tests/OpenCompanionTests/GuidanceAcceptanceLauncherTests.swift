@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import OpenCompanion
@@ -29,6 +30,28 @@ struct GuidanceAcceptanceLauncherTests {
     ]
     for state in states {
       #expect(throws: Subject.Refusal.activeWork) { try validate(work: state) }
+    }
+  }
+
+  @Test func everyWhitelistedModeHasOneFixedHelperAndLiteralOutputArgument() {
+    let output = URL(fileURLWithPath: "/tmp/public check; literal output", isDirectory: true)
+    let expected: [(Subject.Mode, [String])] = [
+      (.activeWorkflow, ["--guidance-active-workflow-acceptance", output.path]),
+      (.observation, ["--guidance-observation-acceptance", output.path]),
+      (.browser, ["--guidance-public-app-acceptance", output.path, "browser"]),
+      (.textedit, ["--guidance-public-app-acceptance", output.path, "textedit"]),
+      (.calculator, ["--guidance-public-app-acceptance", output.path, "calculator"]),
+    ]
+    #expect(expected.count == Subject.Mode.allCases.count)
+    for (mode, arguments) in expected {
+      #expect(mode.arguments(output: output) == arguments)
+      #expect(mode.arguments(output: output).filter { $0 == output.path }.count == 1)
+    }
+  }
+
+  @Test func unknownAndLegacyModeNamesCannotSelectAnotherExecutableOrHelper() {
+    for raw in ["", "manual", "guidance-manual-task-acceptance", "/bin/sh", "browser --other"] {
+      #expect(Subject.Mode(rawValue: raw) == nil)
     }
   }
 

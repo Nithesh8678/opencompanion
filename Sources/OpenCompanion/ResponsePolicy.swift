@@ -22,16 +22,20 @@ struct ResponsePolicy: Sendable, Equatable {
   /// Trusted per-turn instructions. Keep this separate from selected evidence,
   /// which is always untrusted data. The host independently enforces the route.
   var instructions: String {
-    switch route {
-    case .conversation:
-      "Respond conversationally using text units. Do not output scene units or open a notebook. Do not invent on-screen targets or request a screen capture."
-    case .screenGuidance:
-      "Analyze the supplied current screenshot for the user's task or screen question. For navigation, identify the next visible control, including a control that reveals the requested destination, and emit a grounded click target with a brief instruction. For a question about visible content or state, answer in the instruction of a grounded manual target marking the relevant element. Prefer an exact current actionable accessibility candidateID for a click; native code supplies its bounds. Otherwise emit pixelBounds for the control's full top-left bounds in the exact encoded image; native code normalizes them. Do not mix coordinate representations. Do not require its label to literally repeat the user's wording: infer its role from the page and visual context. Match the functional goal in the actual foreground app, using actual labels. For compact controls use ellipse; fields or large regions may use roundedRectangle. Inspect a fresh frame after user action before choosing a child. Never invent hidden controls, coordinates, or app switches. A specific clarification is appropriate only when a safe visible next target genuinely cannot be identified or the task is complete. Do not replace a visible grounded target with generic steps or a guessed shortcut. Do not output scene units or open a Notebook. You cannot perform desktop actions."
-    case .notebook:
-      includesExistingNotebook
-        ? "The user requested an edit to the current notebook. Use its supplied stable IDs and preserve unrelated content. Use text and scene units only as needed; a scene is permitted, never mandatory. Do not output screen targets."
-        : "Use text to answer. A small notebook scene is permitted only if it materially helps the requested visual or mechanism explanation; it is not mandatory. No retained notebook is authorized for editing. Do not output screen targets."
-    }
+    let turn =
+      switch route {
+      case .conversation:
+        "Respond conversationally using text units. Do not output scene units or open a notebook. Do not invent on-screen targets or request a screen capture."
+      case .screenGuidance:
+        "Analyze the supplied current screenshot for the user's task or screen question. For navigation, identify the next visible control, including a control that reveals the requested destination, and emit a grounded click target with a brief instruction. For a question about visible content or state, answer in the instruction of a grounded manual target marking the relevant element. Prefer an exact current actionable accessibility candidateID for a click; native code supplies its bounds. Otherwise emit pixelBounds for the control's full top-left bounds in the exact encoded image; native code normalizes them. Do not mix coordinate representations. Do not require its label to literally repeat the user's wording: infer its role from the page and visual context. Match the functional goal in the actual foreground app, using actual labels. For compact controls use ellipse; fields or large regions may use roundedRectangle. Inspect a fresh frame after user action before choosing a child. Never invent hidden controls, coordinates, or app switches. A specific clarification is appropriate only when a safe visible next target genuinely cannot be identified or the task is complete. Do not replace a visible grounded target with generic steps or a guessed shortcut. Do not output scene units or open a Notebook. You cannot perform desktop actions."
+      case .notebook:
+        includesExistingNotebook
+          ? "The user requested an edit to the current notebook. Use its supplied stable IDs and preserve unrelated content. Use text and scene units only as needed; a scene is permitted, never mandatory. Do not output screen targets."
+          : "Use text to answer. A small notebook scene is permitted only if it materially helps the requested visual or mechanism explanation; it is not mandatory. No retained notebook is authorized for editing. Do not output screen targets."
+      }
+    return
+      "Product capability: the native host can display typed 2D and 3D scenes when the current output policy permits them. A text-only or guidance turn is a per-turn restriction, not a missing viewer. Do not claim the application cannot render a model because a previous turn used text.\n"
+      + turn
   }
 
   static func resolve(
@@ -84,6 +88,20 @@ struct ResponsePolicy: Sendable, Equatable {
         permitsScreenEvidence: permitsScreenEvidence)
     }
     return conversation
+  }
+
+  static func isExplicitTextOnly(_ text: String) -> Bool {
+    guard text.utf8.count <= maximumTextBytes else { return true }
+    let words = unquoted(text).lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+    return Tokens(words).textOnly
+  }
+
+  static func requestsExplicit3D(_ text: String) -> Bool {
+    guard text.utf8.count <= maximumTextBytes else { return false }
+    let words = unquoted(text).lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+    let tokens = Tokens(words)
+    return words.contains("3d") && tokens.requestsVisual && !tokens.textOnly
+      && !tokens.forbidsNotebook && !tokens.isDefinition
   }
 
   private static func positiveRequest(afterPrivacyPreface request: String) -> String {
@@ -271,7 +289,8 @@ struct ResponsePolicy: Sendable, Equatable {
     var requestLead: Bool {
       let imperative: Set<String> = [
         "draw", "diagram", "sketch", "plot", "graph", "visualize", "visualise", "illustrate",
-        "animate", "create", "make", "build", "show", "design", "add", "explain", "teach",
+        "animate", "create", "make", "build", "show", "design", "generate", "render", "add",
+        "explain", "teach",
         "change", "edit", "update", "recolor", "recolour", "color", "colour", "rename", "resize",
         "move", "rotate", "remove", "delete", "replace", "reverse", "flip", "adjust",
       ]
@@ -315,10 +334,7 @@ struct ResponsePolicy: Sendable, Equatable {
         return true
       }
       if contains(["3d", "2d"]),
-        contains([
-          "model", "models", "scene", "scenes", "cutaway", "cutaways", "lesson", "explanation",
-        ]),
-        contains(["create", "make", "build", "show", "design"])
+        contains(["create", "make", "build", "show", "design", "generate", "render", "explain"])
       {
         return true
       }

@@ -34,23 +34,38 @@ import Foundation
   func prepare(
     _ payload: ProviderTarget,
     refresh: @MainActor () async throws -> ScreenEvidence,
-    stillOwned: @MainActor () -> Bool
+    stillOwned: @MainActor () -> Bool,
+    visualChangeRequiresRefresh: Bool = false,
+    supportsSecondary: Bool = true
   ) async throws -> ProviderTarget {
     try checkOwnership(stillOwned)
     let resolved = try source.resolvingTarget(payload)
     try validate(resolved)
+    if hasPresentedPrimary, !Self.isPrimary(resolved), !supportsSecondary {
+      throw Decline.secondaryWouldRefreshPresentedPrimary
+    }
     let currentTime = now()
     let age = currentTime - current.capturedAt
     guard currentTime.isFinite, currentTime >= 0, current.capturedAt.isFinite,
       current.capturedAt >= 0, age.isFinite, age >= 0
     else { throw failure() }
 
-    if age < ScreenGuidancePolicy.admissionEvidenceAge {
+    if age < ScreenGuidancePolicy.admissionEvidenceAge, !visualChangeRequiresRefresh {
       guard didRefresh else { return resolved }
-      let verified = try await ScreenTargetFreshness.verified(
-        target: resolved, original: source, refreshed: current)
-      try checkOwnership(stillOwned)
-      return verified
+      do {
+        let verified = try await ScreenTargetFreshness.verified(
+          target: resolved, original: source, refreshed: current)
+        try checkOwnership(stillOwned)
+        return verified
+      } catch {
+        try checkOwnership(stillOwned)
+        if hasPresentedPrimary, !Self.isPrimary(resolved) {
+          // A supporting target cannot revoke an already corroborated primary
+          // merely because unrelated pixels differed in that same refresh.
+          throw Decline.secondaryWouldRefreshPresentedPrimary
+        }
+        throw error
+      }
     }
 
     if hasPresentedPrimary, !Self.isPrimary(resolved) {
@@ -68,8 +83,19 @@ import Foundation
     didRefresh = true
     let fresh = try await refresh()
     try checkOwnership(stillOwned)
-    let verified = try await ScreenTargetFreshness.verified(
-      target: resolved, original: source, refreshed: fresh)
+    let verified: ProviderTarget
+    do {
+      verified = try await ScreenTargetFreshness.verified(
+        target: resolved, original: source, refreshed: fresh)
+    } catch {
+      try checkOwnership(stillOwned)
+      guard visualChangeRequiresRefresh else { throw error }
+      // Unrelated animation may defeat full-scene equality. Only a unique
+      // fresh native control plus unchanged expanded target pixels can then
+      // corroborate the target; image-only/OCR targets keep the old contract.
+      verified = try await ScreenTargetFreshness.verifiedStableAccessibilityTarget(
+        target: payload, original: source, refreshed: fresh)
+    }
     try checkOwnership(stillOwned)
     // stillOwned observes the previously published current frame. Publishing
     // into this binding happens only after that last check and without a yield.

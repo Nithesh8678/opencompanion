@@ -143,6 +143,54 @@ struct ResponseInputPlan: Sendable {
   let voice: VoiceService
   let overlay = OverlayHost()
   let guidanceSession = GuidanceSessionController()
+  @Published private(set) var guidanceModeArmed = false
+  @Published private(set) var guidanceRuntime = ActiveGuidanceRuntime()
+  private let warmGuidanceProvider = CodexProvider()
+  private var guidanceWarmTask: Task<Void, Never>?
+  private var preparedGuidanceID: UUID?
+  private var guidanceRefreshTask: Task<Void, Never>?
+  private var liveObservationTask: Task<Void, Error>?
+  private var liveObservationScope: GuidanceObservationScope?
+  var activeGuidanceObservationScope: GuidanceObservationScope? { liveObservationScope }
+  private var liveObservationSequence: UInt64 = 0
+  private var liveEventSequence: UInt64 = 0
+  private var liveRuntimeSerial: UInt64 = 0
+  private var liveVisualRechecks = 0
+  private var liveVisualProofTask: Task<Void, Never>?
+  private var displayedGuidanceMark:
+    (
+      target: ProviderTarget, evidence: ScreenEvidence,
+      generation: UInt64, request: ScreenGuidanceRequest?
+    )?
+  private var livePreferenceSubscription: AnyCancellable?
+  private lazy var liveObserver = ActiveGuidanceScreenObserver(
+    observeSystemEvents: observesGuidanceSceneChanges
+  ) { [weak self] scope, event in
+    self?.receiveGuidanceObservation(scope: scope, event: event)
+  }
+  var hasGuidanceInteractionHandoff: (() -> Bool)?
+  var onGuidanceVisualsRevoked: ((UInt64) -> Void)?
+  private var guidanceSpeechTask: Task<Void, Never>?
+  private var currentGuidanceSpeech: GuidanceSpeechBeatContext?
+  private var pendingGuidanceLayout: GuidanceAnnotationLayout?
+  private var pendingGuidanceMark:
+    (
+      context: GuidanceSpeechBeatContext, target: ProviderTarget,
+      evidence: ScreenEvidence, request: ScreenGuidanceRequest?
+    )?
+  private lazy var guidanceSpeech = GuidanceSpeechBeatCoordinator { [weak self] context in
+    guard let self else { return false }
+    return context.generation == self.generation && !self.guidanceRuntime.hasHardChange
+      && context.evidence.matches(self.evidence) && self.currentGuidanceSpeech == context
+  }
+  private var requiresVisualResult = false
+  private var admitted3DForTurn = false
+  @Published private(set) var presentingGuidance = false
+  private var guidanceCaptionAvailable = false
+  var onGuidanceCaptionStarted: ((String, VoiceNarrationContext, Bool) -> Bool)?
+  var onCursorTargetPlanned:
+    ((UInt64, ProviderTarget, ScreenEvidence, GuidanceAnnotationLayout) -> TimeInterval)?
+
   private var guidanceSessionSubscription: AnyCancellable?
   private var guidanceTurnToken: GuidanceTurnToken?
   private var guidanceLoadingTask: Task<Void, Never>?
@@ -189,6 +237,9 @@ struct ResponseInputPlan: Sendable {
   var onCursorTargetAccepted: ((UInt64, ProviderTarget, ScreenEvidence) -> TimeInterval)?
   var onScreenGuidanceTargetAccepted:
     ((ProviderTarget, ScreenEvidence, UInt64, ScreenGuidanceRequest) -> Void)?
+  /// Read-only opt-in acceptance guard. It neither grants capture authority
+  /// nor replaces the exact source/foreground/generation checks below.
+  var validateGuidanceRefreshScope: ((ScreenEvidence) -> Bool)?
   var onCursorCancelled: ((UInt64) -> Void)?
   var onNarrationCaptionStarted: ((String, VoiceNarrationContext, Bool) -> Bool)?
   var onNarrationCaptionUpdate: ((VoiceUtteranceUpdate) -> Void)?
@@ -288,6 +339,16 @@ struct ResponseInputPlan: Sendable {
         .flatMap { String(data: $0, encoding: .utf8) } ?? ""
     }
     if let store = self.store { guidanceSession.setStore(store) }
+    livePreferenceSubscription = NotificationCenter.default.publisher(
+      for: .cursorCompanionPreferencesDidChange
+    ).sink { [weak self] _ in
+      MainActor.assumeIsolated {
+        guard let self else { return }
+        if !self.screenGuidanceEnabled() { self.setGuidanceModeArmed(false) }
+      }
+    }
+    configureGuidanceSpeech()
+
     guidanceSession.onPersisted = { [weak self] in Task { await self?.reload() } }
     guidanceSessionSubscription = guidanceSession.objectWillChange.sink { [weak self] in
       self?.objectWillChange.send()
@@ -296,7 +357,8 @@ struct ResponseInputPlan: Sendable {
       guard let self else { return }
       if !self.listening {
         self.state =
-          state == "Ready" && (self.busy || self.presentingExplanation) ? "Thinking" : state
+          state == "Ready" && (self.busy || self.presentingExplanation || self.presentingGuidance)
+          ? "Thinking" : state
         self.updateBadge()
       }
     }
@@ -319,6 +381,8 @@ struct ResponseInputPlan: Sendable {
       self.listening = false
       self.pushToTalkActive = false
       self.microphoneLevel = 0
+      self.endActiveGuidanceRuntime()
+      self.guidanceSession.pause()
       self.showError(error)
       self.state = "Ready"
       self.updateBadge()
@@ -477,10 +541,26 @@ struct ResponseInputPlan: Sendable {
       if voiceOnly { voiceNotice = notice }
       return
     }
-    let policy = ResponsePolicy.resolve(
+    let ordinaryPolicy = ResponsePolicy.resolve(
       text: text, screenGuidanceEnabled: guidanceEnabled,
       explicitGuidance: guidanceRequest != nil, inNotebook: notebookContextIsVisible,
       hasNotebook: scene != nil)
+    let policy: ResponsePolicy
+    if guidanceRequest == nil, guidanceModeArmed, guidanceEnabled,
+      ordinaryPolicy.route != .notebook, ordinaryPolicy.permitsScreenEvidence,
+      !ResponsePolicy.isExplicitTextOnly(text)
+    {
+      policy = ResponsePolicy.resolve(
+        text: text, screenGuidanceEnabled: true, explicitGuidance: true)
+    } else {
+      policy = ordinaryPolicy
+    }
+    let liveFollowup =
+      guidanceRuntime.isActive && guidanceRequest == nil
+      && policy.route == .screenGuidance
+      && GuidanceFollowupContext.isShortContinuation(text)
+    let continuingWorkflow = continuingWorkflow || liveFollowup
+
     let inputPlan = ResponseInputPlan.resolve(
       policy: policy, voiceOnly: voiceOnly, selectedContext: selectedContext, evidence: evidence,
       explicitManualEvidence: explicitManualEvidence,
@@ -507,7 +587,10 @@ struct ResponseInputPlan: Sendable {
         } else {
           let scope = inputPlan.evidenceIdentity == nil ? nil : try currentSelectedGuidanceScope()
           declaredGuidance = ScreenGuidanceRequest(
-            prompt: text, speakAloud: speakAloud, selectedScope: scope)
+            prompt: liveFollowup ? guidanceRuntime.goal : text,
+            step: liveFollowup ? (guidanceSession.workflow?.checks.count ?? 0) : 0,
+            speakAloud: speakAloud,
+            selectedScope: liveFollowup ? guidanceRuntime.selectedScope : scope)
         }
       } else {
         declaredGuidance = nil
@@ -517,11 +600,28 @@ struct ResponseInputPlan: Sendable {
       return
     }
     let previousGuidanceInstruction =
-      (guidanceRequest?.step ?? 0) > 0
+      (declaredGuidance?.step ?? 0) > 0
       ? messages.last(where: { $0.role == "assistant" }).map { String($0.text.prefix(800)) } : nil
     let sourceGeneration = generation
     if declaredGuidance == nil { guidanceSession.pause() }
-    cancelActiveTurn()
+    let liveTurn = guidanceModeArmed && declaredGuidance != nil
+    if liveTurn, let request = declaredGuidance {
+      if !guidanceRuntime.isActive || !continuingWorkflow {
+        let preparedID = guidanceRuntime.isActive ? nil : preparedGuidanceID
+        endActiveGuidanceRuntime(preservingPrewarm: preparedID != nil)
+        liveRuntimeSerial &+= 1
+        guidanceRuntime.start(
+          id: preparedID ?? UUID(), goal: request.prompt,
+          speakAloud: request.speakAloud, selectedScope: request.selectedScope)
+        liveVisualRechecks = 0
+        preparedGuidanceID = nil
+      }
+      guidanceRefreshTask?.cancel()
+      guidanceRefreshTask = nil
+      guidanceRuntime.check()
+      if continuingWorkflow { guidanceSession.pause() }
+    }
+    cancelActiveTurn(preservingLiveGuidance: liveTurn)
     var workflowToken: GuidanceTurnToken?
     if let request = declaredGuidance {
       do {
@@ -549,6 +649,8 @@ struct ResponseInputPlan: Sendable {
     let current = generation
     activeGuidanceRequest = declaredGuidance
     configureResponseOutput(policy)
+    requiresVisualResult = policy.allowsNotebook && ResponsePolicy.requestsExplicit3D(text)
+    admitted3DForTurn = false
     record("response.route.\(policy.route.rawValue)")
     acceptedGuidanceTarget = false
     guidanceNarration = nil
@@ -570,7 +672,15 @@ struct ResponseInputPlan: Sendable {
     if policy.route == .screenGuidance {
       history =
         (previousGuidanceInstruction.map { [ChatLine(role: "assistant", text: $0)] } ?? [])
-        + [ChatLine(role: "user", text: text)]
+        + [
+          ChatLine(
+            role: "user",
+            text: liveFollowup
+              ? "Original user goal: " + (declaredGuidance?.prompt ?? text)
+                + "\nCurrent follow-up: " + text : text)
+        ]
+    } else if policy.allowsNotebook && !policy.includesExistingNotebook {
+      history = GuidanceFollowupContext.visualHistory(Array(messages.dropLast()), current: text)
     } else {
       history = messages
     }
@@ -612,6 +722,12 @@ struct ResponseInputPlan: Sendable {
         }
         try Task.checkCancellation()
         guard current == self.generation else { throw CancellationError() }
+        if liveTurn, let frame = self.evidence {
+          self.startLiveGuidanceObservation(
+            foregroundPID: frame.foregroundPID, sourceRect: frame.screenRect,
+            displayID: frame.displayID)
+          try await self.awaitLiveGuidanceObservation(generation: current)
+        }
         let guidanceBinding: ScreenGuidanceTurnBinding?
         if policy.route == .screenGuidance, let frame = self.evidence,
           turnEvidence?.matches(frame) == true
@@ -637,16 +753,22 @@ struct ResponseInputPlan: Sendable {
         if let responseStream = self.responseStream {
           try await responseStream(reasoningInput, handler, preview)
         } else if turnProviderMode == "ChatGPT via Codex" {
-          let adapter = CodexProvider()
+          let adapter = liveTurn ? self.warmGuidanceProvider : CodexProvider()
           self.codex = adapter
+          if liveTurn { await self.guidanceWarmTask?.value }
+          try Task.checkCancellation()
           try await adapter.stream(
             executable: turnCodexPath, model: turnCodexModel, messages: reasoningInput.messages,
             context: reasoningInput.context,
             image: reasoningInput.image, scene: reasoningInput.scene, guidanceModel: guidanceModel,
             onRouting: { [weak self] selection in
               await self?.acceptModelRouting(selection, generation: current, policy: policy)
+            },
+            onTiming: { [weak self] event in
+              await self?.acceptGuidanceTiming(event, generation: current)
             }, onUnit: handler, onText: preview,
-            responsePolicy: reasoningInput.responsePolicy)
+            responsePolicy: reasoningInput.responsePolicy,
+            guidanceSessionID: liveTurn ? self.guidanceRuntime.id : nil)
         } else {
           try await self.provider.stream(
             configuration: config, key: key, messages: reasoningInput.messages,
@@ -657,6 +779,24 @@ struct ResponseInputPlan: Sendable {
         }
         guard current == self.generation else { return }
         self.record("generation.completed")
+        if liveTurn, self.guidanceRuntime.isDirty, !self.acceptedGuidanceTarget {
+          self.busy = false
+          self.guidanceRuntime.wait()
+          if let id = self.guidanceRuntime.id { self.scheduleLiveGuidanceRefresh(sessionID: id) }
+          return
+        }
+        if self.requiresVisualResult, !self.admitted3DForTurn {
+          throw ProviderError.message(
+            "The model returned text without the requested 3D scene. The native 3D renderer is available; ask again to retry generation."
+          )
+        }
+        if liveTurn {
+          if self.guidanceSession.workflow?.phase == .modelReportedComplete {
+            self.endActiveGuidanceRuntime()
+          } else {
+            self.guidanceRuntime.wait()
+          }
+        }
         if policy.route == .screenGuidance, !self.acceptedGuidanceTarget,
           let explanation = self.guidanceNarration
         {
@@ -665,6 +805,7 @@ struct ResponseInputPlan: Sendable {
           self.onCursorResponseStarted?(current, false)
           _ = self.onCursorTextPreview?(
             current, ProviderTextPreview(unitID: 0, text: explanation, isComplete: true))
+          self.speakNarration(explanation)
         }
         if let workflowToken, self.guidanceSession.owns(workflowToken) {
           try self.guidanceSession.finishTurn(
@@ -676,7 +817,7 @@ struct ResponseInputPlan: Sendable {
         if policy.route == .screenGuidance, !self.acceptedGuidanceTarget,
           self.guidanceSession.workflow?.phase != .loading
         {
-          self.endGuidanceSceneObservation()
+          if !liveTurn { self.endGuidanceSceneObservation() }
         }
         self.busy = false
         if self.state != "Speaking" {
@@ -703,12 +844,28 @@ struct ResponseInputPlan: Sendable {
     }
   }
 
+  private func acceptGuidanceTiming(_ event: CodexTimingEvent, generation: UInt64) {
+    guard generation == self.generation, responsePolicy.route == .screenGuidance else { return }
+    record("guidance.provider." + event.stage.rawValue)
+  }
+
   /// Slow model output may only advance after one real, same-scope capture
   /// corroborates the old target. Never extend the original frame's timestamp.
   func acceptProviderUnit(
     _ unit: ProviderUnit, generation: UInt64, expectedEvidence: ScreenEvidenceIdentity?,
     guidanceBinding: ScreenGuidanceTurnBinding?, captureToken: UInt64
   ) async throws {
+    try Task.checkCancellation()
+    guard generation == self.generation else { throw CancellationError() }
+    let visualRefresh =
+      guidanceRuntime.isActive && guidanceRuntime.isDirty
+      && !guidanceRuntime.hasHardChange
+    if visualRefresh, unit.type != "target" {
+      // The model has not seen the newer scene. In particular, never attach
+      // its progress/completion assessment to a locally corroborated target.
+      record("guidance.live.visualPending.unitDeferred")
+      return
+    }
     if unit.type == "guidanceStatus", responsePolicy.route == .screenGuidance,
       let binding = guidanceBinding, binding.hasPresentedPrimary,
       let frame = evidence, ScreenEvidenceIdentity(binding.current).matches(frame),
@@ -739,11 +896,17 @@ struct ResponseInputPlan: Sendable {
     setGuidanceStage(.target, generation: generation)
     let previous = ScreenEvidenceIdentity(binding.current)
     let request = activeGuidanceRequest
+    let runtimeID = guidanceRuntime.id
+    let hardEpoch = guidanceRuntime.hardEpoch
+    var corroboratedEpoch = guidanceRuntime.checkedEpoch
     let stillOwned: @MainActor @Sendable () -> Bool = { [weak self] in
       guard let self else { return false }
       return generation == self.generation
         && self.captureGate.permits(captureToken, cancelled: Task.isCancelled)
         && previous.matches(self.evidence) && self.activeGuidanceRequest == request
+        && self.guidanceRuntime.id == runtimeID
+        && self.guidanceRuntime.hardEpoch == hardEpoch
+        && !self.guidanceRuntime.hasHardChange
         && CursorCompanionPreferences.load().screenGuidanceEnabled
         && (request.map { ProcessInfo.processInfo.systemUptime < $0.expires } ?? true)
     }
@@ -756,8 +919,11 @@ struct ResponseInputPlan: Sendable {
         refresh: {
           guard stillOwned() else { throw CancellationError() }
           self.record("guidance.lateTarget.refresh.started")
-          return try await self.refreshGuidanceEvidence(binding.source)
-        }, stillOwned: stillOwned)
+          corroboratedEpoch = self.guidanceRuntime.sceneEpoch
+          let fresh = try await self.refreshGuidanceEvidence(binding.source)
+          return fresh
+        }, stillOwned: stillOwned, visualChangeRequiresRefresh: visualRefresh,
+        supportsSecondary: !guidanceRuntime.isActive)
     } catch ScreenGuidanceTurnBinding.Decline.secondaryWouldRefreshPresentedPrimary {
       guard stillOwned() else { throw CancellationError() }
       try requireGuidanceForeground(binding.source.foregroundPID)
@@ -767,6 +933,12 @@ struct ResponseInputPlan: Sendable {
     }
     guard stillOwned() else { throw CancellationError() }
     try requireGuidanceForeground(binding.source.foregroundPID)
+    if visualRefresh {
+      guard guidanceRuntime.acknowledgeVisual(through: corroboratedEpoch, hardEpoch: hardEpoch),
+        !guidanceRuntime.isDirty
+      else { throw CancellationError() }
+      liveVisualRechecks = 0
+    }
     if previous != ScreenEvidenceIdentity(binding.current) {
       evidence = binding.current
       if explicitManualEvidence == previous {
@@ -785,6 +957,14 @@ struct ResponseInputPlan: Sendable {
   private func refreshGuidanceEvidence(_ source: ScreenEvidence) async throws -> ScreenEvidence {
     try Task.checkCancellation()
     try requireGuidanceForeground(source.foregroundPID)
+    guard validateGuidanceRefreshScope?(source) ?? true else { throw CancellationError() }
+    if let scopedGuidanceRefresh {
+      let fresh = try await scopedGuidanceRefresh(source)
+      try Task.checkCancellation()
+      try requireGuidanceForeground(source.foregroundPID)
+      guard validateGuidanceRefreshScope?(fresh) ?? true else { throw CancellationError() }
+      return fresh
+    }
     let screens = Dictionary(
       uniqueKeysWithValues: NSScreen.screens.compactMap { screen -> (CGDirectDisplayID, CGRect)? in
         guard
@@ -800,10 +980,12 @@ struct ResponseInputPlan: Sendable {
     // A region limits the recapture and omits application-wide AX enrichment.
     let fresh = try await capture.capture(
       displayID: source.displayID, foregroundPID: source.foregroundPID,
-      foregroundName: source.foregroundName, region: source.screenRect,
-      windowID: source.windowID, screens: screens)
+      foregroundName: source.foregroundName,
+      region: source.windowID == nil && source.screenRect == display ? nil : source.screenRect,
+      windowID: source.windowID, screens: screens, fastGuidance: guidanceRuntime.isActive)
     try Task.checkCancellation()
     try requireGuidanceForeground(source.foregroundPID)
+    guard validateGuidanceRefreshScope?(fresh) ?? true else { throw CancellationError() }
     return fresh
   }
 
@@ -835,6 +1017,19 @@ struct ResponseInputPlan: Sendable {
   /// speech, notebook content, or a retry. Stale work cannot alter a newer turn.
   func finishTurnFailure(error: Error, generation: UInt64, policy: ResponsePolicy) {
     guard generation == self.generation else { return }
+    if error is CancellationError, guidanceRuntime.isActive, guidanceRuntime.isDirty {
+      busy = false
+      record("guidance.live.obsoleteTurn")
+      return
+    }
+    endActiveGuidanceRuntime()
+    guidanceSpeechTask?.cancel()
+    guidanceSpeechTask = nil
+    currentGuidanceSpeech = nil
+    pendingGuidanceMark = nil
+    pendingGuidanceLayout = nil
+    presentingGuidance = false
+    guidanceSpeech.cancel(generation: generation)
     endGuidanceSceneObservation()
     cancelExplanationPlayback(stopSpeech: true)
     overlay.clear()
@@ -1016,6 +1211,11 @@ struct ResponseInputPlan: Sendable {
     explicitManualEvidence = nil
     selectedCaptureSelectionID = nil
     evidence = frame
+    if guidanceRuntime.isActive {
+      try monitorGuidanceScene(
+        generation: generation, foregroundPID: frame.foregroundPID,
+        sourceRect: frame.screenRect, displayID: frame.displayID)
+    }
     if selectedContext.isEmpty { contextTitle = "Screen: \(frame.foregroundName)" }
     record("guidance.capture.accepted")
     return frame
@@ -1055,7 +1255,8 @@ struct ResponseInputPlan: Sendable {
       let sourceRect = screens[displayID]
     else { throw ProviderError.message("No active display is available for screen guidance.") }
     try monitorGuidanceScene(
-      generation: generation, foregroundPID: intendedPID, sourceRect: sourceRect)
+      generation: generation, foregroundPID: intendedPID, sourceRect: sourceRect,
+      displayID: displayID)
     if let prepare = onPrepareScreenGuidance, intendedPID > 0, intendedPID != ownPID {
       try await prepare(generation, intendedPID)
       try Task.checkCancellation()
@@ -1080,7 +1281,7 @@ struct ResponseInputPlan: Sendable {
     let frame = try await capture.capture(
       displayID: displayID, foregroundPID: foregroundPID,
       foregroundName: foregroundPID == 0 ? "Desktop" : (app?.localizedName ?? "Application"),
-      screens: screens)
+      screens: screens, fastGuidance: guidanceRuntime.isActive)
     try Task.checkCancellation()
     guard generation == self.generation, activeGuidanceRequest == request,
       ProcessInfo.processInfo.systemUptime < request.expires,
@@ -1106,21 +1307,30 @@ struct ResponseInputPlan: Sendable {
   /// Active request metadata only. This never captures pixels or expands a
   /// selected region/window. Arm before the first preparation/capture await.
   func monitorGuidanceScene(
-    generation: UInt64, foregroundPID: pid_t, sourceRect: CGRect
+    generation: UInt64, foregroundPID: pid_t, sourceRect: CGRect,
+    displayID: CGDirectDisplayID? = nil
   ) throws {
     guard generation == self.generation, responsePolicy.route == .screenGuidance,
       busy, foregroundPID != ProcessInfo.processInfo.processIdentifier
     else { throw CancellationError() }
     endGuidanceSceneObservation()
-    guard
-      let scope = guidanceSceneObserver.arm(
+    let proposedScope =
+      guidanceRuntime.isActive
+      ? GuidanceSceneScope(
+        leaseID: UUID(), generation: generation,
+        foregroundPID: foregroundPID, sourceRect: sourceRect)
+      : guidanceSceneObserver.arm(
         generation: generation, foregroundPID: foregroundPID, sourceRect: sourceRect)
-    else {
+    guard let scope = proposedScope else {
       throw ProviderError.message(
         "Screen-change observation is unavailable for this guidance request. Recheck the selected app and screen."
       )
     }
     guidanceSceneScope = scope
+    if guidanceRuntime.isActive {
+      startLiveGuidanceObservation(
+        foregroundPID: foregroundPID, sourceRect: sourceRect, displayID: displayID)
+    }
     let deadline =
       activeGuidanceRequest?.expires
       ?? ProcessInfo.processInfo.systemUptime + ScreenGuidancePolicy.maximumRequestLifetime
@@ -1142,6 +1352,10 @@ struct ResponseInputPlan: Sendable {
     guard scope == guidanceSceneScope, scope.generation == generation,
       responsePolicy.route == .screenGuidance
     else { return }
+    if guidanceRuntime.isActive {
+      receiveLiveGuidanceDirty(reason: reason.rawValue)
+      return
+    }
     let selectedCaptureChanged = explicitManualEvidence != nil
     stop()
     invalidatedManualGuidanceScope = selectedCaptureChanged
@@ -1173,6 +1387,329 @@ struct ResponseInputPlan: Sendable {
     guidanceSceneExpiryTask = nil
     guidanceSceneScope = nil
     guidanceSceneObserver.disarm()
+  }
+
+  /// An explicit UI interaction arms this run. The persisted feature flag is
+  /// availability, not permission to capture after launch or restore.
+  func setGuidanceModeArmed(_ armed: Bool) {
+    guidanceModeArmed = armed
+    if !armed { stop() }
+    notice =
+      armed
+      ? "Screen guidance armed. Hold Control + Option to start; Escape stops the active guide."
+      : "Active screen guidance stopped."
+  }
+
+  var activeGuidanceStatus: String? {
+    guard guidanceModeArmed else { return nil }
+    switch guidanceRuntime.phase {
+    case .inactive: return "Guidance armed"
+    case .listening: return "Listening"
+    case .checking: return "Checking the screen"
+    case .settling: return "Screen changed — checking"
+    case .awaitingUser: return "Guiding · watching for your next step"
+    }
+  }
+
+  /// Suspension revokes all guide work, including an already-submitted turn.
+  /// A stored workflow remains resumable but has no live observation authority.
+  func suspendGuidance() {
+    stop()
+    guidanceModeArmed = false
+    record("guidance.live.suspended")
+  }
+
+  private func prepareLiveGuidanceProvider() {
+    guard providerMode == "ChatGPT via Codex", guidanceWarmTask == nil else { return }
+    let id = guidanceRuntime.id ?? preparedGuidanceID ?? UUID()
+    preparedGuidanceID = id
+    let executable = codexPath
+    let model = codexModel
+    let preference = guidanceModelPreference
+    guidanceWarmTask = Task { [weak self] in
+      guard let self else { return }
+      do {
+        try await self.warmGuidanceProvider.prepareGuidanceSession(
+          executable: executable, model: model, guidanceModel: preference, sessionID: id)
+        self.record("guidance.provider.prepared")
+      } catch { self.record("guidance.provider.preparationUnavailable") }
+    }
+  }
+
+  private func endActiveGuidanceRuntime(preservingPrewarm: Bool = false) {
+    let oldID = guidanceRuntime.id ?? (preservingPrewarm ? nil : preparedGuidanceID)
+    // Revoke synchronously before any actor/process cleanup can suspend.
+    guidanceRuntime.stop()
+    liveVisualProofTask?.cancel()
+    liveVisualProofTask = nil
+    displayedGuidanceMark = nil
+    guidanceRefreshTask?.cancel()
+    guidanceRefreshTask = nil
+    liveObservationScope = nil
+    liveObservationTask?.cancel()
+    liveObservationTask = nil
+    liveObserver.stop()
+    liveObservationSequence = 0
+    if !preservingPrewarm {
+      guidanceWarmTask?.cancel()
+      guidanceWarmTask = nil
+      preparedGuidanceID = nil
+    }
+    if let oldID {
+      let adapter = warmGuidanceProvider
+      Task { await adapter.endGuidanceSession(id: oldID) }
+    }
+  }
+
+  private func startLiveGuidanceObservation(
+    foregroundPID: pid_t, sourceRect: CGRect, displayID requestedDisplayID: CGDirectDisplayID? = nil
+  ) {
+    guard let sessionID = guidanceRuntime.id else { return }
+    let screenID =
+      NSScreen.screens.first(where: { $0.frame.intersects(sourceRect) })?
+      .deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+    let displayID =
+      requestedDisplayID ?? activeGuidanceRequest?.selectedScope?.displayID
+      ?? selectedDisplay ?? screenID ?? CGMainDisplayID()
+    let windowID = activeGuidanceRequest?.selectedScope?.windowID
+    if let current = liveObservationScope, current.foregroundPID == foregroundPID,
+      current.displayID == displayID, current.sourceRect == sourceRect,
+      current.windowID == windowID
+    {
+      return
+    }
+    liveObservationTask?.cancel()
+    liveObserver.stop()
+    liveObservationSequence = 0
+    do {
+      let scope = try GuidanceObservationScope(
+        leaseID: UUID(), generation: liveRuntimeSerial, foregroundPID: foregroundPID,
+        displayID: displayID, sourceRect: sourceRect, windowID: windowID)
+      liveObservationScope = scope
+      liveObservationTask = Task { @MainActor [weak self] in
+        guard let self, !Task.isCancelled, self.guidanceRuntime.id == sessionID,
+          self.liveObservationScope == scope
+        else { throw CancellationError() }
+        try await self.liveObserver.start(scope: scope)
+        guard self.guidanceRuntime.id == sessionID, self.liveObservationScope == scope,
+          !Task.isCancelled
+        else { throw CancellationError() }
+        self.record("guidance.live.observationReady")
+      }
+    } catch {
+      liveObservationScope = nil
+      liveObservationTask = Task { throw error }
+    }
+  }
+
+  private func awaitLiveGuidanceObservation(generation: UInt64) async throws {
+    guard let id = guidanceRuntime.id, let task = liveObservationTask else {
+      throw ProviderError.message("Active screen observation could not start. Recheck guidance.")
+    }
+    try await task.value
+    try Task.checkCancellation()
+    guard self.generation == generation, guidanceRuntime.id == id,
+      !guidanceRuntime.isDirty
+    else { throw CancellationError() }
+  }
+
+  func receiveGuidanceObservation(
+    scope: GuidanceObservationScope, event: GuidanceObservationEvent
+  ) {
+    guard liveObservationScope == scope, guidanceRuntime.isActive,
+      event.sequence > liveObservationSequence
+    else { return }
+    liveObservationSequence = event.sequence
+    if event.reason == .foregroundChanged
+      || (scope.windowID != nil && [.windowChanged, .geometryChanged].contains(event.reason))
+    {
+      liveObservationScope = nil
+      liveObservationTask?.cancel()
+      liveObservationTask = nil
+    }
+    switch event.reason {
+    case .suspended, .unavailable:
+      suspendGuidance()
+      notice = "Screen observation stopped. Re-enable guidance when the screen is available."
+      return
+    default: break
+    }
+    // Explicitly selected bounds never widen or follow another app/window.
+    if guidanceRuntime.selectedScope != nil,
+      [.foregroundChanged, .windowChanged, .geometryChanged].contains(event.reason),
+      hasGuidanceInteractionHandoff?() != true
+    {
+      stop()
+      invalidatedManualGuidanceScope = true
+      notice = "The selected window or area changed. Choose its scope again to resume guidance."
+      return
+    }
+    receiveLiveGuidanceDirty(reason: event.reason.rawValue)
+  }
+
+  func guidanceMarkExpired(generation: UInt64) {
+    guard generation == self.generation, guidanceRuntime.isActive else { return }
+    receiveLiveGuidanceDirty(reason: "targetExpired")
+  }
+
+  private func receiveLiveGuidanceDirty(reason: String) {
+    guard let id = guidanceRuntime.id else { return }
+    liveEventSequence &+= 1
+    guard
+      guidanceRuntime.change(
+        sessionID: id, sequence: liveEventSequence, at: ProcessInfo.processInfo.systemUptime,
+        visualOnly: reason == GuidanceObservationEvent.Reason.visualChange.rawValue)
+    else { return }
+    if reason == GuidanceObservationEvent.Reason.visualChange.rawValue,
+      !guidanceRuntime.hasHardChange
+    {
+      record("guidance.live.visualPending")
+      if displayedGuidanceMark != nil {
+        overlay.setGuidanceVisibilitySuspended(true)
+        schedulePresentedTargetVisualProof(sessionID: id)
+        return
+      }
+      if busy {
+        // Keep exactly one inference alive; its target must cross a fresh
+        // same-scope native proof before it can be painted.
+        scheduleLiveGuidanceRefresh(sessionID: id)
+        return
+      }
+    } else {
+      liveVisualRechecks = 0
+    }
+    liveVisualProofTask?.cancel()
+    liveVisualProofTask = nil
+    displayedGuidanceMark = nil
+    overlay.clear()
+    guidanceSpeechTask?.cancel()
+    guidanceSpeechTask = nil
+    pendingGuidanceMark = nil
+    if let currentGuidanceSpeech { guidanceSpeech.cancel(context: currentGuidanceSpeech) }
+    currentGuidanceSpeech = nil
+    record("guidance.live.changed.\(reason)")
+    if listening { return }
+    // A genuine mouse-down can open a same-app menu before mouse-up. Keep its
+    // authenticated observation lease, while hiding obsolete visual geometry.
+    if hasGuidanceInteractionHandoff?() == true {
+      voice.stop()
+      turn?.cancel()
+      onGuidanceVisualsRevoked?(generation)
+    } else {
+      cancelActiveTurn(preservingLiveGuidance: true)
+    }
+    scheduleLiveGuidanceRefresh(sessionID: id)
+  }
+
+  private func scheduleLiveGuidanceRefresh(sessionID: UUID) {
+    guidanceRefreshTask?.cancel()
+    guidanceRefreshTask = Task { @MainActor [weak self] in
+      guard let self else { return }
+      while self.guidanceRuntime.id == sessionID, !Task.isCancelled {
+        if self.listening { return }
+        let delay = self.guidanceRuntime.settleDelay(now: ProcessInfo.processInfo.systemUptime)
+        guard let delay else { return }
+        if delay > 0 {
+          do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+          continue
+        }
+        if self.hasGuidanceInteractionHandoff?() == true {
+          do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+          continue
+        }
+        if self.busy {
+          do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+          continue
+        }
+        let runtime = self.guidanceRuntime
+        guard runtime.id == sessionID, self.guidanceModeArmed, self.screenGuidanceEnabled(),
+          let workflow = self.guidanceSession.workflow
+        else { return }
+        if !runtime.hasHardChange {
+          guard self.liveVisualRechecks == 0 else {
+            self.endActiveGuidanceRuntime()
+            self.guidanceSession.pause()
+            self.notice =
+              "The screen is still changing and the target could not be verified. Ask again when the control is visible."
+            self.state = "Ready"
+            return
+          }
+          self.liveVisualRechecks += 1
+        }
+        if self.guidanceForegroundPID() == ProcessInfo.processInfo.processIdentifier {
+          self.stop()
+          self.notice = "Return to the app you want help with, then resume guidance."
+          return
+        }
+        self.guidanceSession.pause()
+        guard self.guidanceSession.workflow?.canBeginCheck == true else {
+          self.stop()
+          self.notice = "This guide reached its bounded check limit. Start a new guide to continue."
+          return
+        }
+        self.record("guidance.live.freshCheck")
+        self.guidanceRefreshTask = nil
+        let request = ScreenGuidanceRequest(
+          prompt: runtime.goal, step: workflow.checks.count, speakAloud: runtime.speakAloud,
+          selectedScope: runtime.selectedScope)
+        self.send(
+          textOverride:
+            "The active screen changed. Verify the actual current state before offering the next step. Do not assume a click, typing, or previous instruction succeeded. Continue this original goal: "
+            + runtime.goal,
+          voiceOnly: true, speakAloud: runtime.speakAloud, guidanceRequest: request,
+          transcriptText: "Check changed screen", continuingWorkflow: true)
+        return
+      }
+    }
+  }
+
+  /// Visual-only activity does not spend a semantic model check while an
+  /// already admitted control remains independently corroborated. This keeps
+  /// the original click lease, frame identity and 45-second deadline intact.
+  private func schedulePresentedTargetVisualProof(sessionID: UUID) {
+    guard liveVisualProofTask == nil, let mark = displayedGuidanceMark else { return }
+    liveVisualProofTask = Task { @MainActor [weak self] in
+      guard let self else { return }
+      let hard = self.guidanceRuntime.hardEpoch
+      let stillOwned: @MainActor () -> Bool = {
+        self.guidanceRuntime.id == sessionID && self.generation == mark.generation
+          && self.guidanceRuntime.hardEpoch == hard && !self.guidanceRuntime.hasHardChange
+          && ScreenEvidenceIdentity(mark.evidence).matches(self.evidence)
+          && self.displayedGuidanceMark?.generation == mark.generation
+          && self.activeGuidanceRequest == mark.request
+          && (mark.request.map { ProcessInfo.processInfo.systemUptime < $0.expires } ?? true)
+      }
+      do {
+        guard stillOwned() else { throw CancellationError() }
+        let coveredEpoch = self.guidanceRuntime.sceneEpoch
+        let fresh = try await self.refreshGuidanceEvidence(mark.evidence)
+        do {
+          _ = try await ScreenTargetFreshness.verified(
+            target: mark.target, original: mark.evidence, refreshed: fresh)
+        } catch {
+          try Task.checkCancellation()
+          _ = try await ScreenTargetFreshness.verifiedStableAccessibilityTarget(
+            target: mark.target, original: mark.evidence, refreshed: fresh)
+        }
+        guard stillOwned(),
+          self.guidanceRuntime.acknowledgeVisual(
+            through: coveredEpoch, hardEpoch: hard)
+        else { throw CancellationError() }
+        self.liveVisualProofTask = nil
+        guard !self.guidanceRuntime.isDirty else {
+          self.schedulePresentedTargetVisualProof(sessionID: sessionID)
+          return
+        }
+        self.overlay.setGuidanceVisibilitySuspended(false)
+        self.guidanceRuntime.wait()
+        self.record("guidance.live.visualTarget.corroborated")
+      } catch {
+        guard stillOwned(), !Task.isCancelled else { return }
+        self.liveVisualProofTask = nil
+        self.displayedGuidanceMark = nil
+        self.receiveLiveGuidanceDirty(reason: "visualTargetChanged")
+      }
+    }
   }
 
   var guidanceProgressTitle: String? {
@@ -1401,7 +1938,7 @@ struct ResponseInputPlan: Sendable {
     }
     // A standalone explanation owns its complete semantic captions. Previewing
     // future narration here would reveal it before its visual/speech beat.
-    guard !explanationPlaybackEnabled else { return }
+    guard !explanationPlaybackEnabled, responsePolicy.route != .screenGuidance else { return }
     // Inert presentation only. Chat, speech, scenes and actions still wait for
     // a complete validated ProviderUnit through accept(_:generation:...).
     if !receivedTextPreview && !preview.text.isEmpty {
@@ -1420,6 +1957,9 @@ struct ResponseInputPlan: Sendable {
     throws
   {
     guard generation == self.generation else { throw CancellationError() }
+    if responsePolicy.route == .screenGuidance, guidanceRuntime.isDirty {
+      throw CancellationError()
+    }
     if let scope = activeGuidanceRequest?.selectedScope, !ownsSelectedGuidanceScope(scope) {
       throw CancellationError()
     }
@@ -1466,7 +2006,7 @@ struct ResponseInputPlan: Sendable {
       record("semantic.text.accepted")
       if explanationPlaybackEnabled {
         try explanationPlayback.enqueue(document: nil, narration: text)
-      } else {
+      } else if responsePolicy.route != .screenGuidance {
         speakNarration(text)
       }
     case "scene":
@@ -1493,6 +2033,18 @@ struct ResponseInputPlan: Sendable {
       if explanationPlaybackEnabled {
         try explanationPlayback.checkCapacity(
           document: document, narration: unit.narration, focusID: unit.focusID)
+      }
+      if let poses = try? document.spatialWorldPoses(at: 0) {
+        admitted3DForTurn =
+          admitted3DForTurn
+          || poses.contains { pose in
+            let node = pose.node
+            let material = node.fill == "transparent" ? node.color : node.fill
+            let clear =
+              material == "transparent" || (material.count == 9 && material.hasSuffix("00"))
+            return node.kind == .mesh && node.spatial3D?.geometry != nil
+              && pose.effectiveOpacity > 0 && !clear
+          }
       }
       snapshotUndo()
       committingExplanationScene = true
@@ -1574,29 +2126,125 @@ struct ResponseInputPlan: Sendable {
         record("guidance.window.admission.accepted")
       }
       try overlay.validate(target: target, evidence: evidence)
-      let introDelay = onCursorTargetAccepted?(generation, target, evidence) ?? 0
-      try overlay.show(
-        target: target, evidence: evidence,
-        showInstruction: true,
-        append: true, introDelay: introDelay, ownerGeneration: generation)
-      acceptedGuidanceTarget = true
-      if let request = activeGuidanceRequest, cursorPreferences.screenGuidanceEnabled,
-        ProcessInfo.processInfo.systemUptime < request.expires
-      {
-        onScreenGuidanceTargetAccepted?(target, evidence, generation, request)
-      }
+      let layout = overlay.makeLayout(target: target, evidence: evidence, showInstruction: true)
+      let introDelay =
+        onCursorTargetPlanned?(generation, target, evidence, layout)
+        ?? onCursorTargetAccepted?(generation, target, evidence) ?? 0
+      let useSpeech =
+        (configuration.speechEnabled || turnSpeaksAloud)
+        && narrationGate.allows(target.instruction)
       if primaryAction, let token = guidanceTurnToken, guidanceSession.owns(token) {
         try guidanceSession.presentAction(
           token: token, instruction: String(target.instruction.prefix(480)),
           label: target.label, kind: target.advanceOn == "click" ? .click : .manual)
       }
+      let context = GuidanceSpeechBeatContext(
+        generation: generation, leaseID: UUID(), evidence: ScreenEvidenceIdentity(evidence))
+      if currentGuidanceSpeech != nil { voice.stop() }
+      guidanceSpeechTask?.cancel()
+      currentGuidanceSpeech = context
+      pendingGuidanceMark = (context, target, evidence, activeGuidanceRequest)
+      pendingGuidanceLayout = layout
+      presentingGuidance = useSpeech
+      acceptedGuidanceTarget = true
       messages.append(ChatLine(role: "assistant", text: target.instruction))
-      speakNarration(target.instruction)
+      if useSpeech {
+        guidanceSpeechTask = Task { @MainActor [weak self] in
+          do { try await Task.sleep(for: .seconds(min(2, max(0, introDelay)))) } catch { return }
+          guard let self, self.currentGuidanceSpeech == context,
+            self.generation == context.generation, !self.guidanceRuntime.isDirty,
+            context.evidence.matches(self.evidence)
+          else { return }
+          guard
+            self.guidanceSpeech.begin(
+              context: context, text: target.instruction, nativeSpeech: true)
+          else { return }
+          self.showGuidanceMark(context: context)
+          guard self.currentGuidanceSpeech == context else { return }
+          if self.voice.speak(target.instruction, context: context.voiceContext) {
+            _ = self.narrationGate.admit(target.instruction)
+            self.record("guidance.narration.enqueued")
+          } else {
+            _ = self.guidanceSpeech.fallBackToText(context: context)
+            if !self.guidanceCaptionAvailable {
+              self.guidanceSpeech.finishTextFallback(context: context)
+            }
+          }
+        }
+      } else {
+        guard guidanceSpeech.begin(context: context, text: target.instruction, nativeSpeech: false)
+        else { throw CancellationError() }
+        if !guidanceCaptionAvailable { guidanceSpeech.finishTextFallback(context: context) }
+      }
       record("guidance.presented.awaitingUser")
       setGuidanceStage(.provider, generation: generation)
     default: throw ProviderError.message("Unsupported model output kind: \(unit.type)")
     }
   }
+  private func configureGuidanceSpeech() {
+    guidanceSpeech.onCaptionStarted = { [weak self] context, text, nativeSpeech in
+      guard let self else { return }
+      self.guidanceCaptionAvailable =
+        self.onGuidanceCaptionStarted?(
+          text, context.voiceContext, nativeSpeech) == true
+    }
+    guidanceSpeech.onMarkStart = { [weak self] context in
+      self?.showGuidanceMark(context: context)
+    }
+    guidanceSpeech.onCaptionUpdate = { [weak self] update in
+      self?.onNarrationCaptionUpdate?(update)
+    }
+    guidanceSpeech.onCaptionFinished = { [weak self] context in
+      self?.onNarrationCaptionFinished?(context.voiceContext)
+    }
+    guidanceSpeech.onFinished = { [weak self] context, reason in
+      guard let self, self.currentGuidanceSpeech == context else { return }
+      self.currentGuidanceSpeech = nil
+      self.pendingGuidanceMark = nil
+      self.pendingGuidanceLayout = nil
+      self.guidanceSpeechTask = nil
+      self.presentingGuidance = false
+      self.record("guidance.narration.\(reason.rawValue)")
+      if !self.busy && !self.voice.hasPendingSpeech { self.state = "Ready" }
+      self.updateBadge()
+    }
+  }
+
+  private func showGuidanceMark(context: GuidanceSpeechBeatContext) {
+    guard let pending = pendingGuidanceMark, pending.context == context,
+      currentGuidanceSpeech == context, generation == context.generation,
+      !guidanceRuntime.isDirty, context.evidence.matches(evidence)
+    else { return }
+    do {
+      if guidanceRuntime.isActive {
+        guard guidanceForegroundPID() == pending.evidence.foregroundPID else {
+          throw ProviderError.message(
+            "The foreground changed before this instruction. Recheck the screen.")
+        }
+      }
+      if pending.evidence.windowID != nil {
+        guard
+          let rect = ScreenGuidancePolicy.targetRect(
+            pending.target, in: pending.evidence.screenRect),
+          selectedWindowVisibility(pending.evidence, rect)
+        else { throw CancellationError() }
+      }
+      try overlay.show(
+        target: pending.target, evidence: pending.evidence, showInstruction: true,
+        append: !guidanceRuntime.isActive, introDelay: 0, ownerGeneration: generation,
+        layout: pendingGuidanceLayout)
+      displayedGuidanceMark = (pending.target, pending.evidence, generation, pending.request)
+      pendingGuidanceMark = nil
+      if let request = pending.request {
+        onScreenGuidanceTargetAccepted?(pending.target, pending.evidence, generation, request)
+      }
+      guidanceRuntime.wait()
+      record("guidance.target.nativeSubmitted")
+    } catch {
+      finishTurnFailure(error: error, generation: context.generation, policy: responsePolicy)
+    }
+  }
+
   private func speakNarration(_ text: String) {
     guard configuration.speechEnabled || turnSpeaksAloud, narrationGate.allows(text) else { return }
     if voice.speak(text) { _ = narrationGate.admit(text) }
@@ -1677,6 +2325,10 @@ struct ResponseInputPlan: Sendable {
   }
 
   private func acceptNarrationUpdate(_ update: VoiceUtteranceUpdate) {
+    if currentGuidanceSpeech?.voiceContext == update.context {
+      guidanceSpeech.receive(update)
+      return
+    }
     guard explanationPlaybackEnabled, update.context.generation == generation,
       let current = currentExplanationNarration, current.context == update.context,
       scene == explanationCanonicalTip
@@ -1702,6 +2354,10 @@ struct ResponseInputPlan: Sendable {
   }
 
   func completeExplanationCaption(context: VoiceNarrationContext) {
+    if currentGuidanceSpeech?.voiceContext == context, let currentGuidanceSpeech {
+      guidanceSpeech.finishTextFallback(context: currentGuidanceSpeech)
+      return
+    }
     guard explanationPlaybackEnabled, context.generation == generation,
       currentExplanationNarration?.context == context, scene == explanationCanonicalTip
     else { return }
@@ -1752,7 +2408,18 @@ struct ResponseInputPlan: Sendable {
     cancelActiveTurn()
   }
 
-  private func cancelActiveTurn() {
+  private func cancelActiveTurn(preservingLiveGuidance: Bool = false) {
+    if !preservingLiveGuidance { endActiveGuidanceRuntime() }
+    liveVisualProofTask?.cancel()
+    liveVisualProofTask = nil
+    displayedGuidanceMark = nil
+    guidanceSpeechTask?.cancel()
+    guidanceSpeechTask = nil
+    pendingGuidanceMark = nil
+    currentGuidanceSpeech = nil
+    pendingGuidanceLayout = nil
+    presentingGuidance = false
+    guidanceSpeech.cancel(generation: generation &+ 1)
     endGuidanceSceneObservation()
     guidanceLoadingTask?.cancel()
     guidanceLoadingTask = nil
@@ -1828,9 +2495,15 @@ struct ResponseInputPlan: Sendable {
       // Only semantic progress is retained. The existing voice handoff still
       // validates the exact original frame, generation, foreground and lease.
       guidanceTurnToken = manualWorkflowToken
+    } else if mode == .pushToTalk, guidanceRuntime.isActive {
+      cancelActiveTurn(preservingLiveGuidance: true)
+      guidanceSession.pause()
+      guidanceRuntime.listen()
     } else {
       stop()
     }
+    if mode == .pushToTalk, guidanceRuntime.isActive { guidanceRuntime.listen() }
+    if mode == .pushToTalk, guidanceModeArmed { prepareLiveGuidanceProvider() }
     if let manualStep {
       voiceGuidanceContinuation = ManualGuidanceVoiceContinuation(
         step: manualStep, inputGeneration: generation)
@@ -1902,6 +2575,12 @@ struct ResponseInputPlan: Sendable {
     voiceInputState = "Ready"
     state = "Ready"
     guard !completion.transcript.isEmpty else {
+      if guidanceRuntime.isActive {
+        guidanceRuntime.wait()
+        receiveLiveGuidanceDirty(reason: "emptyFollowup")
+      } else {
+        endActiveGuidanceRuntime()
+      }
       notice =
         "No speech was captured. Hold Control+Option until Listening appears, then speak and release."
       voiceNotice = notice

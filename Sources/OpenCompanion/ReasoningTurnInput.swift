@@ -14,6 +14,6 @@ struct ReasoningTurnInput: Sendable {
 typealias ReasoningTurnStream =
   @MainActor (
     ReasoningTurnInput,
-    @Sendable (ProviderUnit) async throws -> Void,
-    @Sendable (ProviderTextPreview) async throws -> Void
+    @escaping @Sendable (ProviderUnit) async throws -> Void,
+    @escaping @Sendable (ProviderTextPreview) async throws -> Void
   ) async throws -> Void

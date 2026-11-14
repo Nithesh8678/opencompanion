@@ -271,18 +271,24 @@ import SwiftUI
       .disabled(!cursorPreferences.enabled)
       .accessibilityIdentifier("companion.settings.cursor.showReplies")
       rowDivider
-      Toggle(isOn: $cursorPreferences.screenGuidanceEnabled) {
+      Toggle(isOn: Binding(
+        get: { model.guidanceModeArmed },
+        set: { enabled in
+          if enabled { cursorPreferences.screenGuidanceEnabled = true }
+          model.setGuidanceModeArmed(enabled)
+        }
+      )) {
         VStack(alignment: .leading, spacing: 5) {
           Text("Screen guidance").fontWeight(.medium)
           detail(
-            "When you ask for on-screen help, use one capture of the active screen to guide you. Your screen is not continuously monitored."
+            "Arm guidance for this session. Hold Control + Option to ask; while a guide is active, observe the current screen and refresh after changes. Escape or Stop ends observation."
           )
         }
       }
       .toggleStyle(.switch).controlSize(.small)
       .accessibilityIdentifier("companion.settings.cursor.screenGuidance")
       detail(
-        "Requests are recognized in English and may be missed. You can always add a screen manually in Chat."
+        model.activeGuidanceStatus ?? "Guidance is inactive. Ordinary questions still support one-shot on-screen help."
       )
       detail("Changes apply immediately.")
     }

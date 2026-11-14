@@ -429,12 +429,17 @@ struct CursorFlight: Sendable {
   let end: CGPoint
   let duration: Double
   private let control: CGPoint
+  private let initialVelocity: CGPoint?
 
-  init(start: CGPoint, end: CGPoint) {
+  init(start: CGPoint, end: CGPoint, initialVelocity: CGPoint? = nil) {
     let start = Self.safe(start, fallback: .zero)
     let end = Self.safe(end, fallback: start)
     self.start = start
     self.end = end
+    self.initialVelocity = initialVelocity.flatMap { value in
+      value.x.isFinite && value.y.isFinite && abs(value.x) <= 1_000_000_000
+        && abs(value.y) <= 1_000_000_000 ? value : nil
+    }
     let dx = end.x - start.x
     let dy = end.y - start.y
     let distance = hypot(dx, dy)
@@ -448,6 +453,16 @@ struct CursorFlight: Sendable {
   }
 
   func point(at progress: Double) -> CGPoint {
+    guard progress.isFinite, progress > 0 else { return start }
+    if progress >= 1 { return end }
+    if let initialVelocity {
+      let t = bounded(progress)
+      let blend = t * t * (3 - 2 * t)
+      let carry = t * (1 - t) * (1 - t) * CGFloat(duration)
+      return CGPoint(
+        x: start.x + blend * (end.x - start.x) + carry * initialVelocity.x,
+        y: start.y + blend * (end.y - start.y) + carry * initialVelocity.y)
+    }
     let t = eased(progress)
     let inverse = 1 - t
     return CGPoint(
@@ -458,11 +473,48 @@ struct CursorFlight: Sendable {
   /// Unit direction in the same global coordinate space as the input points.
   /// A flipped native view converts the Y component before atan2 if needed.
   func tangent(at progress: Double) -> CGPoint {
+    if initialVelocity != nil {
+      let value = velocity(at: progress)
+      let length = hypot(value.x, value.y)
+      if length > 1e-9 { return CGPoint(x: value.x / length, y: value.y / length) }
+      let dx = end.x - start.x
+      let dy = end.y - start.y
+      let distance = hypot(dx, dy)
+      return distance > 0 ? CGPoint(x: dx / distance, y: dy / distance) : CGPoint(x: 1, y: 0)
+    }
     let t = eased(progress)
     let dx = 2 * (1 - t) * (control.x - start.x) + 2 * t * (end.x - control.x)
     let dy = 2 * (1 - t) * (control.y - start.y) + 2 * t * (end.y - control.y)
     let length = hypot(dx, dy)
     return length > 0 ? CGPoint(x: dx / length, y: dy / length) : CGPoint(x: 1, y: 0)
+  }
+
+  /// Actual points/second, rather than a normalized tangent. Retargeting can
+  /// preserve both the last painted position and its instantaneous velocity.
+  func velocity(at progress: Double) -> CGPoint {
+    let t = bounded(progress)
+    if let initialVelocity {
+      let blend = 6 * t * (1 - t) / CGFloat(duration)
+      let carry = 3 * t * t - 4 * t + 1
+      return CGPoint(
+        x: blend * (end.x - start.x) + carry * initialVelocity.x,
+        y: blend * (end.y - start.y) + carry * initialVelocity.y)
+    }
+    let eased = t * t * (3 - 2 * t)
+    let rate = 6 * t * (1 - t) / CGFloat(duration)
+    return CGPoint(
+      x: 2 * ((1 - eased) * (control.x - start.x) + eased * (end.x - control.x)) * rate,
+      y: 2 * ((1 - eased) * (control.y - start.y) + eased * (end.y - control.y)) * rate)
+  }
+
+  func retargeted(from presentationPoint: CGPoint, to target: CGPoint, at progress: Double)
+    -> CursorFlight
+  {
+    CursorFlight(start: presentationPoint, end: target, initialVelocity: velocity(at: progress))
+  }
+
+  private func bounded(_ progress: Double) -> CGFloat {
+    CGFloat(progress.isFinite ? min(1, max(0, progress)) : 0)
   }
 
   private func eased(_ progress: Double) -> CGFloat {

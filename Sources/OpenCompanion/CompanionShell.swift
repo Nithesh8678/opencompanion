@@ -661,7 +661,8 @@ private final class ResidentCompanionPanel: NSPanel {
     activity.update(
       generation: model.taskGeneration, inputPhase: model.voiceInputState,
       pushToTalkActive: model.pushToTalkActive, busy: model.busy, state: model.state,
-      hasPendingSpeech: model.voice.hasPendingSpeech, failed: model.error != nil)
+      hasPendingSpeech: model.voice.hasPendingSpeech, failed: model.error != nil,
+      hasPendingPresentation: model.presentingExplanation || model.presentingGuidance)
     if (previousActivity == .idle) != (activity.phase == .idle),
       presentation.state.exposure == .tucked
     {

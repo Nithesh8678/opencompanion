@@ -6,7 +6,10 @@ import Testing
 
 struct CodexSceneStartModeTests {
   @Test func defaultPromptsMatchTheirRecordedContracts() {
-    // Conversation retains the pre-ablation 969c49b bytes. Guidance includes
+    // Every policy now distinguishes the product's native renderer from the
+    // current turn's output restrictions. The common capability preface is
+    // intentional; route-specific contracts remain independently asserted.
+    // Guidance includes
     // bounded workflow assessments and visible checkbox hit-area grounding. Notebook
     // snapshots intentionally include the richer native geometry vocabulary and
     // shared organic-form/process guidance. New NDJSON lessons also use the compact
@@ -14,19 +17,19 @@ struct CodexSceneStartModeTests {
     let cases: [(ResponsePolicy, String)] = [
       (
         .init(route: .conversation, includesExistingNotebook: false),
-        "3315bc481a7c6114c06fe10a3144e2f59b44e5539410315ba4b7c7f390f6c220"
+        "15fb77eaa7beb740d4acd112c1e9dd845e5c8dad645707e350310d7356cf68bf"
       ),
       (
         .init(route: .screenGuidance, includesExistingNotebook: false),
-        "32de5de82cfa30416ebaf73f50ad7d816775513b73f757bddada1d12f53d3f45"
+        "4649669f1bb245433def2dabf215bca90bf49ce253b22c9adfca7e828c46f52a"
       ),
       (
         .init(route: .notebook, includesExistingNotebook: false),
-        "fe2ee5c1f2cc7ac2dde92cafc59157bc6c97f760ea161a8da26eabac044dd4fa"
+        "9acd06bfde14bd50215cede7de4ffb6ee870482446496356041c5e7f519de356"
       ),
       (
         .init(route: .notebook, includesExistingNotebook: true),
-        "c18c9cc9c7c546cd96c08d5be2eee24bb7a8ac2168329409c7f54dbe60045b87"
+        "8459c043ebac3cde81a1ce1ae736f0cc0fc5eec1fad8e593f9eb26eff3b0f4c3"
       ),
     ]
     for (policy, expected) in cases {

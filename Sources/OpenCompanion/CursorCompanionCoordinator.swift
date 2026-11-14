@@ -56,6 +56,7 @@ struct CursorCompanionSnapshot: Codable {
   private weak var model: AppModel?
   private let exclusionFrames: () -> [CGRect]
   let observesPointer: Bool
+  private let guidanceForegroundPID: () -> pid_t?
   private var preferences = CursorCompanionPreferences.load()
   private var subscriptions = Set<AnyCancellable>()
   private var globalMouse: Any?
@@ -74,6 +75,7 @@ struct CursorCompanionSnapshot: Codable {
   private var stage: Stage?
   private var isGuidance = false
   private var showingGuidanceExplanation = false
+  private var guidanceCaptionActive = false
   private var guidanceExplanationEvidence: ScreenEvidenceIdentity?
   private var phase = NotchActivityPhase.idle
   private var reveal = CursorTextReveal()
@@ -100,6 +102,7 @@ struct CursorCompanionSnapshot: Codable {
   private var wordSerial: UInt64 = 0
   private var word: CursorCaptionWord?
   private var lastBodyCenter = CGPoint.zero
+  private var lastBodyVelocity = CGPoint.zero
   private var hasRenderedBody = false
   private var syntheticReduceMotion: Bool?
   private var beganAt = 0.0
@@ -108,10 +111,14 @@ struct CursorCompanionSnapshot: Codable {
   init(
     model: AppModel, observePointer: Bool = true,
     preferences: CursorCompanionPreferences? = nil,
-    exclusionFrames: @escaping () -> [CGRect] = { [] }
+    exclusionFrames: @escaping () -> [CGRect] = { [] },
+    guidanceForegroundPID: @escaping () -> pid_t? = {
+      NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
   ) {
     self.model = model
     observesPointer = observePointer
+    self.guidanceForegroundPID = guidanceForegroundPID
     self.exclusionFrames = exclusionFrames
     if let preferences { self.preferences = preferences }
     panel = CursorCompanionPanel(
@@ -287,9 +294,32 @@ struct CursorCompanionSnapshot: Codable {
   @discardableResult func beginNarration(
     text: String, context: VoiceNarrationContext, nativeSpeech: Bool
   ) -> Bool {
+    beginCaption(text: text, context: context, nativeSpeech: nativeSpeech, guidanceCaption: false)
+  }
+
+  @discardableResult func beginGuidanceNarration(
+    text: String, context: VoiceNarrationContext, nativeSpeech: Bool
+  ) -> Bool {
+    guard let evidence = model?.evidence else { return false }
+    let source = guidance?.evidence ?? ScreenEvidenceIdentity(evidence)
+    guard source.matches(evidence) else { return false }
+    let accepted = beginCaption(
+      text: text, context: context, nativeSpeech: nativeSpeech,
+      guidanceCaption: true)
+    if accepted {
+      guidanceExplanationEvidence = source
+      showingGuidanceExplanation = true
+      guidanceCaptionActive = true
+    }
+    return accepted
+  }
+
+  private func beginCaption(
+    text: String, context: VoiceNarrationContext, nativeSpeech: Bool, guidanceCaption: Bool
+  ) -> Bool {
     guard preferences.enabled, preferences.showReplies, !suspended,
       generation == context.generation, model?.taskGeneration == context.generation,
-      stage == .response, !isGuidance,
+      stage == .response, isGuidance == guidanceCaption,
       let next = CursorNarrationCaption(text: text, context: context, nativeSpeech: nativeSpeech)
     else { return false }
     if let narration, narration.context == context, narration.text == text,
@@ -305,6 +335,8 @@ struct CursorCompanionSnapshot: Codable {
     }
     abandonNarration()
     narration = next
+    guidanceCaptionActive = guidanceCaption
+    if guidanceCaption { showingGuidanceExplanation = true }
     reveal.reset()
     highestAcceptedPreviewID = nil
     word = nil
@@ -543,7 +575,8 @@ struct CursorCompanionSnapshot: Codable {
   /// Called only after OverlayHost accepted the target against the selected
   /// evidence. Guidance has a separate lifetime from pointer-following.
   @discardableResult func guide(
-    target: ProviderTarget, evidence: ScreenEvidence, generation: UInt64
+    target: ProviderTarget, evidence: ScreenEvidence, generation: UInt64,
+    annotationLayout: GuidanceAnnotationLayout? = nil
   ) -> TimeInterval {
     guard preferences.enabled, !suspended, self.generation == generation, stage == .response,
       evidence.screenRect.width > 0, evidence.screenRect.height > 0,
@@ -558,8 +591,10 @@ struct CursorCompanionSnapshot: Codable {
       x: display.minX + target.x * display.width,
       y: display.maxY - (target.y + target.height) * display.height,
       width: target.width * display.width, height: target.height * display.height)
-    let labelFrame = GuidanceAnnotationLayout.labelFrame(
-      target: target, display: display)
+    let labelFrame =
+      annotationLayout.map {
+        GuidanceAnnotationLayout.globalLabelFrame($0, display: display)
+      } ?? GuidanceAnnotationLayout.labelFrame(target: target, display: display)
     let widths = GuidanceAnnotationLayout.labelPrefixWidths(
       text: GuidanceAnnotationLayout.labelText(target: target))
     let ellipse = target.shape == "ellipse" ? targetFrame : nil
@@ -569,7 +604,9 @@ struct CursorCompanionSnapshot: Codable {
         ? CGPoint(x: targetFrame.minX - 14, y: targetFrame.midY)
         : CGPoint(x: labelFrame.minX + 10, y: labelFrame.minY - 5))
     let now = ProcessInfo.processInfo.systemUptime
-    let flight = CursorFlight(start: lastBodyCenter, end: destination)
+    let flight = CursorFlight(
+      start: lastBodyCenter, end: destination,
+      initialVelocity: reduceMotion || lastBodyVelocity == .zero ? nil : lastBodyVelocity)
     let writing =
       ellipse != nil
       ? 0.35
@@ -649,7 +686,8 @@ struct CursorCompanionSnapshot: Codable {
       switch model.voiceInputState {
       case "Preparing microphone": phase = .preparing
       case "Listening": phase = .listening
-      case "Finishing speech", "Release Control+Option to send": phase = .thinking
+      case "Release Control+Option to send": phase = .awaitingRelease
+      case "Finishing speech": phase = .thinking
       default:
         if !model.listening && !model.pushToTalkActive {
           clearPresentation(reason: .inputEnded)
@@ -707,6 +745,7 @@ struct CursorCompanionSnapshot: Codable {
     stage = nil
     isGuidance = false
     showingGuidanceExplanation = false
+    guidanceCaptionActive = false
     guidanceExplanationEvidence = nil
     phase = .idle
     reveal.reset()
@@ -743,8 +782,7 @@ struct CursorCompanionSnapshot: Codable {
     if let guidance {
       let valid =
         guidance.evidence.matches(model?.evidence)
-        && NSWorkspace.shared.frontmostApplication?.processIdentifier
-          == guidance.evidence.foregroundPID
+        && guidanceForegroundPID() == guidance.evidence.foregroundPID
         && now - guidance.capturedAt >= 0 && now - guidance.capturedAt < 15
         && now < guidance.expires
       if !valid {
@@ -767,7 +805,7 @@ struct CursorCompanionSnapshot: Codable {
         y.advance(by: min(elapsed, 0.1))
       }
     }
-    if guidance == nil {
+    if guidance == nil || narration != nil {
       if var owned = narration {
         let previous = owned.visibleText
         if owned.advance(by: min(elapsed, 0.1), reduceMotion: reduceMotion) {
@@ -852,7 +890,7 @@ struct CursorCompanionSnapshot: Codable {
           x: guidance.labelFrame.minX + 10 + min(guidance.labelFrame.width - 20, width),
           y: guidance.labelFrame.minY - 5)
       }
-      text = ""
+      if !guidanceCaptionActive { text = "" }
     }
     // The full reply remains in Chat. A rolling caption bounds layout work and
     // keeps long answers beside the pointer rather than covering the display.
@@ -890,10 +928,14 @@ struct CursorCompanionSnapshot: Codable {
     view.update(
       phase: phase, text: visibleText, level: model?.microphoneLevel ?? 0,
       bodyPoint: placement.bodyPoint, bubbleFrame: placement.bubbleFrame,
-      rotation: rotation, reduceMotion: reduceMotion, word: guidance == nil ? word : nil)
+      rotation: rotation, reduceMotion: reduceMotion,
+      word: guidance == nil || guidanceCaptionActive ? word : nil)
     lastBodyCenter = CGPoint(
       x: placement.frame.minX + placement.bodyPoint.x,
       y: placement.frame.maxY - placement.bodyPoint.y)
+    lastBodyVelocity = motionVelocity(at: now)
+    if lastBodyCenter.x != center.x { lastBodyVelocity.x = 0 }
+    if lastBodyCenter.y != center.y { lastBodyVelocity.y = 0 }
     hasRenderedBody = true
     if !panel.isVisible { panel.orderFrontRegardless() }
     if guidance == nil, !firstGlyphRecorded, !visibleText.isEmpty {
@@ -908,7 +950,7 @@ struct CursorCompanionSnapshot: Codable {
   private func validateGuidanceExplanation() {
     guard let source = guidanceExplanationEvidence else { return }
     guard generation == model?.taskGeneration, source.matches(model?.evidence),
-      NSWorkspace.shared.frontmostApplication?.processIdentifier == source.foregroundPID
+      guidanceForegroundPID() == source.foregroundPID
     else {
       if guidance != nil {
         guidance = nil
@@ -922,6 +964,10 @@ struct CursorCompanionSnapshot: Codable {
   }
 
   private func clearGuidanceExplanation() {
+    if guidanceCaptionActive {
+      guidanceCaptionActive = false
+      abandonNarration()
+    }
     showingGuidanceExplanation = false
     guidanceExplanationEvidence = nil
     reveal.reset()
@@ -930,6 +976,43 @@ struct CursorCompanionSnapshot: Codable {
     word = nil
     cancelDismissal()
     view.reset()
+  }
+
+  /// Velocity of the last submitted local trajectory, in global AppKit
+  /// points/second. Retargeting uses it with lastBodyCenter, never an old origin.
+  private func motionVelocity(at now: TimeInterval) -> CGPoint {
+    guard !reduceMotion else { return .zero }
+    if let visit = sceneVisit, let pose = visit.pose(at: now) { return pose.velocity }
+    guard let guidance else { return CGPoint(x: x.velocity, y: y.velocity) }
+    let progress = (now - guidance.began) / guidance.flight.duration
+    if progress < 1 { return guidance.flight.velocity(at: progress) }
+    if let ellipse = guidance.ellipse {
+      let trace = (now - guidance.began - guidance.flight.duration) / 0.35
+      guard trace > 0, trace < 1 else { return .zero }
+      let angle = CGFloat(trace) * 2 * .pi - .pi * 0.72
+      let rx = max(0.25, ellipse.width / 2 - 2)
+      let ry = max(0.25, ellipse.height / 2 - 2)
+      let amplitude = min(0.7, rx * 0.06, ry * 0.06)
+      let wobble = amplitude * sin(angle * 3 + 0.4)
+      let derivative = 3 * amplitude * cos(angle * 3 + 0.4)
+      let rate = 2 * CGFloat.pi / 0.35
+      return CGPoint(
+        x: (derivative * cos(angle) - (rx + wobble) * sin(angle)) * rate,
+        y: -(derivative * sin(angle) + (ry + wobble) * cos(angle)) * rate)
+    }
+    guard !guidance.labelFrame.isEmpty, !guidance.prefixWidths.isEmpty else { return .zero }
+    let glyphProgress =
+      (now - guidance.began - guidance.flight.duration
+        - GuidanceAnnotationLayout.labelFadeDuration) / GuidanceAnnotationLayout.glyphInterval
+    guard glyphProgress >= 0, glyphProgress < Double(guidance.prefixWidths.count - 1) else {
+      return .zero
+    }
+    let index = Int(glyphProgress)
+    let width = guidance.prefixWidths[index]
+    guard width < guidance.labelFrame.width - 20 else { return .zero }
+    return CGPoint(
+      x: (guidance.prefixWidths[index + 1] - width)
+        / GuidanceAnnotationLayout.glyphInterval, y: 0)
   }
 
   static func captionWindow(_ text: String) -> String {

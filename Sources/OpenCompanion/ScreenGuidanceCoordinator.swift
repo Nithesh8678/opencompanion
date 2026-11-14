@@ -188,6 +188,12 @@ enum ScreenGuidancePolicy {
   private var preferences: CursorCompanionPreferences
   private var mark: Mark?
   private var selectedWindowClick = SelectedWindowClickHandoff()
+  private struct DisplayDown {
+    let lease: UUID
+    let timestamp: TimeInterval
+  }
+  private var displayDown: DisplayDown?
+  private var consumingClickLease: UUID?
   private var globalMouse: Any?
   private var localMouse: Any?
   private var expiryTask: Task<Void, Never>?
@@ -350,13 +356,17 @@ enum ScreenGuidancePolicy {
       do { try await Task.sleep(for: .seconds(max(0, deadline - currentTime))) } catch { return }
       guard let self, self.mark?.lease == owner.lease else { return }
       self.model?.record("guidance.continuation.expired")
+      let model = self.model
       self.cancel()
+      model?.guidanceMarkExpired(generation: owner.generation)
     }
   }
 
   func cancel() {
     mark = nil
     selectedWindowClick.clear()
+    displayDown = nil
+    consumingClickLease = nil
     manualStep = nil
     removeClickMonitors()
     expiryTask?.cancel()
@@ -377,6 +387,21 @@ enum ScreenGuidancePolicy {
   /// getter nor the receive methods install observers or synthesize input.
   var clickObservationLeaseID: UUID? {
     mark?.observation == .click ? mark?.lease : nil
+  }
+
+  /// A same-app menu may open between an authenticated down and its up. The
+  /// host may hide stale pixels immediately while deferring turn revocation
+  /// only for this already-owned, bounded interaction/settle transaction.
+  var hasInteractionHandoff: Bool {
+    guard let owner = mark, ownsBase(owner) else { return false }
+    return handingOff(owner)
+  }
+
+  /// Called by existing host observation/model events; adds no polling or
+  /// background screen/AX capture. Selected window metadata is checked while
+  /// waiting, except inside the authenticated click/settle handoff.
+  func validateCurrentMark() {
+    if let owner = mark, !owns(owner) { cancel() }
   }
 
   private func receiveMouseEvent(_ event: NSEvent, lease: UUID) {
@@ -407,16 +432,28 @@ enum ScreenGuidancePolicy {
     handlingWindowID: CGWindowID?, lease: UUID
   ) {
     guard continuationTask == nil, let owner = mark, owner.lease == lease,
-      owner.observation == .click, owner.request.selectedScope?.windowID != nil
+      owner.observation == .click
     else { return }
-    guard owns(owner), let authority = selectedWindowAuthority(owner) else {
+    guard owns(owner) else {
       selectedWindowClick.clear()
       cancel()
       return
     }
-    selectedWindowClick.receiveDown(
-      authority: authority, point: point, timestamp: timestamp,
-      eventTargetPID: eventTargetPID, handlingWindowID: handlingWindowID)
+    if let authority = selectedWindowAuthority(owner) {
+      selectedWindowClick.receiveDown(
+        authority: authority, point: point, timestamp: timestamp,
+        eventTargetPID: eventTargetPID, handlingWindowID: handlingWindowID)
+    } else {
+      displayDown = nil
+      let deadline = min(
+        owner.request.expires,
+        owner.admittedAt + ScreenGuidancePolicy.markedTargetLifetime)
+      guard let point, point.x.isFinite, point.y.isFinite, owner.rect.contains(point),
+        timestamp.isFinite, timestamp >= owner.admittedAt, timestamp < deadline,
+        eventTargetPID == owner.evidence.foregroundPID
+      else { return }
+      displayDown = DisplayDown(lease: lease, timestamp: timestamp)
+    }
   }
 
   func receiveMouseUp(
@@ -437,8 +474,18 @@ enum ScreenGuidancePolicy {
         selectedWindowClick.receiveUp(
           authority: authority, point: point, timestamp: timestamp, eventTargetPID: eventTargetPID)
       else { return }
+    } else if let down = displayDown, down.lease == lease {
+      displayDown = nil
+      guard timestamp.isFinite, timestamp >= down.timestamp,
+        eventTargetPID == nil || eventTargetPID == 0
+          || eventTargetPID == owner.evidence.foregroundPID
+      else { return }
     }
     guard let point, point.x.isFinite, point.y.isFinite, owner.rect.contains(point) else { return }
+    consumingClickLease = owner.lease
+    defer {
+      if consumingClickLease == owner.lease { consumingClickLease = nil }
+    }
     // The up's handling window is deliberately not required to equal the down
     // destination: a same-app menu may already have opened. No live window hit
     // query is performed here or during the subsequent settle interval.
@@ -467,6 +514,7 @@ enum ScreenGuidancePolicy {
     // lease protects the settle interval against cancellation and replacement.
     manualStep = nil
     selectedWindowClick.clear()
+    displayDown = nil
     removeClickMonitors()
     expiryTask?.cancel()
     expiryTask = nil
@@ -496,6 +544,21 @@ enum ScreenGuidancePolicy {
   }
 
   private func owns(_ owner: Mark) -> Bool {
+    guard ownsBase(owner) else { return false }
+    if owner.request.selectedScope?.windowID != nil, !handingOff(owner) {
+      guard let evidence = model?.evidence, windowVisibility(evidence, owner.rect) else {
+        return false
+      }
+    }
+    return true
+  }
+
+  private func handingOff(_ owner: Mark) -> Bool {
+    selectedWindowClick.hasPendingDown || displayDown?.lease == owner.lease
+      || consumingClickLease == owner.lease || continuationTask != nil
+  }
+
+  private func ownsBase(_ owner: Mark) -> Bool {
     guard !isShutdown, machineAwake, sessionActive, preferences.screenGuidanceEnabled,
       let model, owner.generation == model.taskGeneration,
       owner.evidence.matches(model.evidence),
@@ -521,7 +584,7 @@ enum ScreenGuidancePolicy {
     DispatchQueue.main.async { [weak self] in
       guard let self else { return }
       self.validationScheduled = false
-      if let owner = self.mark, !self.owns(owner) { self.cancel() }
+      self.validateCurrentMark()
     }
   }
 

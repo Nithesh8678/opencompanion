@@ -45,10 +45,13 @@ import SwiftUI
       CommandLine.arguments.contains("--guidance-live-acceptance")
       || CommandLine.arguments.contains("--guidance-manual-live-acceptance")
       || CommandLine.arguments.contains("--guidance-manual-task-acceptance")
+      || CommandLine.arguments.contains("--guidance-active-workflow-acceptance")
     let acceptanceMode = [
       "--keychain-acceptance", "--smoke-test-codex", "--render-acceptance", "--capture-acceptance",
       "--interaction-acceptance", "--cursor-acceptance", "--cursor-live-acceptance",
       "--guidance-live-acceptance", "--guidance-routing-acceptance",
+      "--guidance-latency-acceptance", "--guidance-observation-acceptance",
+      "--guidance-active-workflow-acceptance",
       "--guidance-manual-live-acceptance",
       "--guidance-manual-task-acceptance",
       "--spatial-scene-live-acceptance", "--explanation-overlay-acceptance",
@@ -120,6 +123,41 @@ import SwiftUI
           print("GUIDANCE_ROUTING_ACCEPTANCE_PASSED")
         } catch {
           print("GUIDANCE_ROUTING_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
+    }
+    if let index = CommandLine.arguments.firstIndex(of: "--guidance-latency-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 1 < CommandLine.arguments.count else {
+            throw ProviderError.message("Provide a local directory for guidance latency results.")
+          }
+          try await GuidanceLatencyAcceptance.run(
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]),
+            executable: model.codexPath, model: model.codexModel)
+          print("GUIDANCE_LATENCY_ACCEPTANCE_PASSED")
+        } catch {
+          print("GUIDANCE_LATENCY_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
+    }
+    if let index = CommandLine.arguments.firstIndex(of: "--guidance-observation-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 1 < CommandLine.arguments.count else {
+            throw ProviderError.message("Provide a local directory for screen observation results.")
+          }
+          try await GuidanceObservationAcceptance.run(
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+          print("GUIDANCE_OBSERVATION_ACCEPTANCE_PASSED")
+        } catch {
+          print("GUIDANCE_OBSERVATION_ACCEPTANCE_FAILED: \(error.localizedDescription)")
           exit(1)
         }
         NSApp.terminate(nil)
@@ -244,6 +282,18 @@ import SwiftUI
         self?.cursor?.cancel(generation: generation)
         self?.screenGuidance?.cancel()
       }
+      model.onCursorTargetPlanned = { [weak self] generation, target, evidence, layout in
+        self?.cursor?.guide(
+          target: target, evidence: evidence, generation: generation,
+          annotationLayout: layout) ?? 0
+      }
+      model.onGuidanceVisualsRevoked = { [weak self] generation in
+        self?.cursor?.cancel(generation: generation)
+      }
+      model.onGuidanceCaptionStarted = { [weak self] text, context, nativeSpeech in
+        self?.cursor?.beginGuidanceNarration(
+          text: text, context: context, nativeSpeech: nativeSpeech) ?? false
+      }
       model.onNarrationCaptionStarted = { [weak self] text, context, nativeSpeech in
         self?.cursor?.beginNarration(text: text, context: context, nativeSpeech: nativeSpeech)
           ?? false
@@ -276,6 +326,9 @@ import SwiftUI
       if let screenGuidance {
         manualGuidanceControls = ManualGuidanceControls(coordinator: screenGuidance, model: model)
       }
+      model.hasGuidanceInteractionHandoff = { [weak self] in
+        self?.screenGuidance?.hasInteractionHandoff ?? false
+      }
       model.onManualGuidanceVoiceStart = { [weak self] in
         self?.screenGuidance?.takeManualStepForVoice()
       }
@@ -284,6 +337,24 @@ import SwiftUI
           target: target, evidence: evidence,
           generation: generation, request: request)
       }
+    }
+    if let index = CommandLine.arguments.firstIndex(of: "--guidance-active-workflow-acceptance") {
+      Task { @MainActor in
+        do {
+          guard index + 1 < CommandLine.arguments.count, let cursor else {
+            throw ProviderError.message("Provide a local directory for active guidance results.")
+          }
+          try await ActiveGuidanceWorkflowAcceptance.run(
+            model: model, cursor: cursor,
+            output: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+          print("ACTIVE_GUIDANCE_WORKFLOW_ACCEPTANCE_PASSED")
+        } catch {
+          print("ACTIVE_GUIDANCE_WORKFLOW_ACCEPTANCE_FAILED: \(error.localizedDescription)")
+          exit(1)
+        }
+        NSApp.terminate(nil)
+      }
+      return
     }
     if let index = CommandLine.arguments.firstIndex(of: "--guidance-live-acceptance") {
       Task { @MainActor in
@@ -415,7 +486,7 @@ import SwiftUI
         NSWorkspace.shared.notificationCenter.publisher(for: notification).sink { [weak self] _ in
           MainActor.assumeIsolated {
             self?.voiceShortcut.cancelActive(reason: .sessionInactive)
-            self?.model.cancelPushToTalk()
+            self?.model.suspendGuidance()
           }
         }.store(in: &voiceLifecycleSubscriptions)
       }
@@ -436,13 +507,14 @@ import SwiftUI
       }
       stateSubscription = model.$busy.combineLatest(
         model.$listening, model.$state, model.$presentingExplanation
-      ).sink {
-        [weak self] busy, listening, state, presenting in
+      ).combineLatest(model.$guidanceRuntime, model.$presentingGuidance).sink {
+        [weak self] snapshot, runtime, presentingGuidance in
+        let (busy, listening, state, presenting) = snapshot
         MainActor.assumeIsolated {
           guard let self else { return }
           let active =
             busy || listening || presenting || state == "Speaking" || state == "Observing"
-            || self.model.voice.hasPendingSpeech
+            || self.model.voice.hasPendingSpeech || runtime.isActive || presentingGuidance
           guard active != self.stopKeyRegistered else { return }
           self.stopKeyRegistered = active
           if active {

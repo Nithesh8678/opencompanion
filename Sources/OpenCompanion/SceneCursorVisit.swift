@@ -6,6 +6,7 @@ struct SceneCursorVisit: Sendable {
   struct Pose: Sendable {
     let point: CGPoint
     let tangent: CGPoint
+    let velocity: CGPoint
     let travelling: Bool
   }
 
@@ -38,16 +39,19 @@ struct SceneCursorVisit: Sendable {
   /// A stale scoped update leaves the current owner untouched.
   @discardableResult mutating func update(
     authority: SceneFocusAuthority, point: CGPoint, bounds: CGRect, at uptime: TimeInterval,
-    reduceMotion: Bool = false
+    reduceMotion: Bool = false, presentationPoint: CGPoint? = nil
   ) -> Bool {
     guard self.authority == authority, Self.valid(point: point, in: bounds),
+      presentationPoint.map(Self.finite) ?? true,
       let current = pose(at: uptime, reduceMotion: reduceMotion)
     else { return false }
     guard hypot(point.x - target.x, point.y - target.y) > Self.retargetTolerance else {
       return true
     }
     target = point
-    flight = CursorFlight(start: current.point, end: Self.bodyCenter(for: point))
+    flight = CursorFlight(
+      start: presentationPoint ?? current.point, end: Self.bodyCenter(for: point),
+      initialVelocity: reduceMotion ? .zero : current.velocity)
     began = uptime
     return true
   }
@@ -57,6 +61,7 @@ struct SceneCursorVisit: Sendable {
     let progress = reduceMotion ? 1 : min(1, (uptime - began) / flight.duration)
     return Pose(
       point: flight.point(at: progress), tangent: flight.tangent(at: progress),
+      velocity: reduceMotion ? .zero : flight.velocity(at: progress),
       travelling: progress < 1)
   }
 

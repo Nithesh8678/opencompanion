@@ -183,7 +183,8 @@ actor CaptureService {
   private var revision: UInt64 = 0
   func capture(
     displayID: CGDirectDisplayID?, foregroundPID: pid_t, foregroundName: String,
-    region: CGRect? = nil, windowID: CGWindowID? = nil, screens: [CGDirectDisplayID: CGRect]
+    region: CGRect? = nil, windowID: CGWindowID? = nil, screens: [CGDirectDisplayID: CGRect],
+    fastGuidance: Bool = false
   ) async throws -> ScreenEvidence {
     guard CGPreflightScreenCaptureAccess() else {
       throw ProviderError.message(Self.screenRecordingRepairMessage)
@@ -259,10 +260,10 @@ actor CaptureService {
       pid: foregroundPID, frameID: frameID,
       primaryTop: Double(screens[CGMainDisplayID()]?.maxY ?? rect.maxY),
       sourceRect: captureSourceRect,
-      scope: scope)
+      scope: scope, budget: fastGuidance ? 0.25 : 1.2)
     let ocr = try await Task.detached(priority: .userInitiated) { @Sendable in
       let request = VNRecognizeTextRequest()
-      request.recognitionLevel = .accurate
+      request.recognitionLevel = fastGuidance ? .fast : .accurate
       try VNImageRequestHandler(data: data).perform([request])
       return (request.results ?? []).prefix(250).compactMap { observation in
         let label = ScreenGrounding.firstNonemptyLabel([
@@ -295,7 +296,7 @@ actor CaptureService {
 enum AccessibilityService {
   static func describe(
     pid: pid_t, frameID: UUID, primaryTop: Double, sourceRect: CGRect,
-    scope: CaptureEvidenceScope = .display
+    scope: CaptureEvidenceScope = .display, budget: TimeInterval = 1.2
   ) async -> AccessibilityGroundingSnapshot {
     guard scope.permitsApplicationAccessibility else {
       return .init(
@@ -311,10 +312,11 @@ enum AccessibilityService {
         return .init(candidates: [], status: "No external foreground application was selected.")
       }
       let app = AXUIElementCreateApplication(pid)
-      AXUIElementSetMessagingTimeout(app, 0.25)
+      let boundedBudget = budget.isFinite ? min(1.2, max(0.05, budget)) : 1.2
+      AXUIElementSetMessagingTimeout(app, Float(min(0.25, boundedBudget / 3)))
       var output: [ScreenGroundingCandidate] = []
       var visited = 0
-      let deadline = ProcessInfo.processInfo.systemUptime + 1.2
+      let deadline = ProcessInfo.processInfo.systemUptime + boundedBudget
       func read(_ element: AXUIElement, _ key: CFString) -> CFTypeRef? {
         guard ProcessInfo.processInfo.systemUptime < deadline else { return nil }
         var value: CFTypeRef?

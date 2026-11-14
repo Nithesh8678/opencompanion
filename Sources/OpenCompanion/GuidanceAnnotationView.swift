@@ -3,7 +3,7 @@ import QuartzCore
 
 /// Display-local, top-left coordinates. Layout and outline timing are authored
 /// choices; the label interval approximates the observed reference sequence.
-struct GuidanceAnnotationLayout: Sendable {
+struct GuidanceAnnotationLayout: Sendable, Equatable {
   static let glyphInterval: TimeInterval = 0.06
   static let labelFadeDuration: TimeInterval = 0.16
   let target: CGRect
@@ -43,6 +43,11 @@ struct GuidanceAnnotationLayout: Sendable {
       labelSize: labelSize(text: labelText(target: target, showInstruction: showInstruction)),
       canvas: CGRect(origin: .zero, size: display.size))
     guard !layout.label.isEmpty else { return .zero }
+    return globalLabelFrame(layout, display: display)
+  }
+
+  static func globalLabelFrame(_ layout: Self, display: CGRect) -> CGRect {
+    guard !layout.label.isEmpty else { return .zero }
     return CGRect(
       x: display.minX + layout.label.minX, y: display.maxY - layout.label.maxY,
       width: layout.label.width, height: layout.label.height)
@@ -73,9 +78,15 @@ struct GuidanceAnnotationLayout: Sendable {
     return widths
   }
 
-  static func make(target: CGRect, labelSize: CGSize, canvas: CGRect) -> Self {
+  /// Obstacles and the optional previous label are display-local top-left
+  /// rectangles. Geometry is never moved to make room for its annotation.
+  static func make(
+    target: CGRect, labelSize: CGSize, canvas: CGRect,
+    avoiding obstacles: [CGRect] = [], previousLabel: CGRect? = nil
+  ) -> Self {
     guard canvas.minX.isFinite, canvas.minY.isFinite,
       canvas.width.isFinite, canvas.height.isFinite, canvas.width > 0, canvas.height > 0,
+      canvas.maxX.isFinite, canvas.maxY.isFinite,
       target.minX.isFinite, target.minY.isFinite, target.width.isFinite, target.height.isFinite,
       target.width > 0, target.height > 0
     else { return Self(target: .zero, label: .zero) }
@@ -94,7 +105,69 @@ struct GuidanceAnnotationLayout: Sendable {
     let below = clipped.maxY + 5
     let preferredY = above >= safe.minY ? above : below
     let y = min(max(preferredY, safe.minY), safe.maxY - height)
-    return Self(target: clipped, label: CGRect(x: x, y: y, width: width, height: height))
+    let preferred = CGRect(x: x, y: y, width: width, height: height)
+    let blocked = obstacles.prefix(128).compactMap { rect -> CGRect? in
+      guard finite(rect), rect.width > 0, rect.height > 0 else { return nil }
+      let part = rect.intersection(canvas)
+      return part.isNull || part.isEmpty ? nil : part
+    }
+    var candidates: [CGRect] = []
+    func append(_ origin: CGPoint) {
+      guard origin.x.isFinite, origin.y.isFinite else { return }
+      let rect = CGRect(
+        x: min(max(safe.minX, origin.x), safe.maxX - width),
+        y: min(max(safe.minY, origin.y), safe.maxY - height), width: width, height: height)
+      if !candidates.contains(rect) { candidates.append(rect) }
+    }
+    append(preferred.origin)
+    if let previousLabel, finite(previousLabel),
+      abs(previousLabel.width - width) < 0.5, abs(previousLabel.height - height) < 0.5,
+      safe.contains(previousLabel)
+    {
+      append(previousLabel.origin)
+    }
+    for origin in [
+      CGPoint(x: clipped.minX, y: above), CGPoint(x: clipped.maxX - width, y: above),
+      CGPoint(x: clipped.minX, y: below), CGPoint(x: clipped.maxX - width, y: below),
+      CGPoint(x: clipped.minX - width - 5, y: clipped.minY),
+      CGPoint(x: clipped.maxX + 5, y: clipped.minY),
+      CGPoint(x: clipped.minX - width - 5, y: clipped.midY - height / 2),
+      CGPoint(x: clipped.maxX + 5, y: clipped.midY - height / 2),
+      CGPoint(x: clipped.minX, y: above - height - 5),
+      CGPoint(x: clipped.minX, y: below + height + 5),
+    ] { append(origin) }
+    func overlap(_ a: CGRect, _ b: CGRect) -> CGFloat {
+      let intersection = a.intersection(b)
+      return intersection.isNull || intersection.isEmpty
+        ? 0 : (intersection.width / width) * (intersection.height / height)
+    }
+    func score(_ candidate: CGRect) -> CGFloat {
+      let targetOverlap = overlap(candidate, clipped)
+      let targetPenalty: CGFloat = targetOverlap > 0 ? 1_000_000_000_000 + targetOverlap : 0
+      var obstruction: CGFloat = 0
+      for rect in blocked {
+        let fraction = overlap(candidate, rect)
+        if fraction > 0 { obstruction += 10_000_000 + fraction * 100_000 }
+      }
+      let distance = hypot(candidate.midX - preferred.midX, candidate.midY - preferred.midY) * 0.01
+      let stability: CGFloat = previousLabel.map({ candidate == $0 }) == true ? -20 : 0
+      return targetPenalty + obstruction + distance + stability
+    }
+    var selected = preferred
+    var best = CGFloat.infinity
+    for candidate in candidates {
+      let value = score(candidate)
+      if value < best {
+        selected = candidate
+        best = value
+      }
+    }
+    return Self(target: clipped, label: selected)
+  }
+
+  private static func finite(_ rect: CGRect) -> Bool {
+    rect.minX.isFinite && rect.minY.isFinite && rect.width.isFinite && rect.height.isFinite
+      && rect.maxX.isFinite && rect.maxY.isFinite
   }
 }
 
@@ -111,11 +184,17 @@ struct GuidanceAnnotationLayout: Sendable {
   private let textMask = CALayer()
   private var revealWidths: [CGFloat] = []
   private let reduceMotion: Bool
+  private let proposedLayout: GuidanceAnnotationLayout?
+  private(set) var annotationLayout = GuidanceAnnotationLayout(target: .zero, label: .zero)
 
   override var isFlipped: Bool { true }
 
-  init(frame: CGRect, target: CGRect, shape: Shape, text: String, reduceMotion: Bool) {
+  init(
+    frame: CGRect, target: CGRect, shape: Shape, text: String, reduceMotion: Bool,
+    layout: GuidanceAnnotationLayout? = nil
+  ) {
     self.reduceMotion = reduceMotion
+    proposedLayout = layout
     super.init(frame: frame)
     configure(target: target, shape: shape, text: GuidanceAnnotationLayout.boundedLabel(text))
   }
@@ -189,10 +268,22 @@ struct GuidanceAnnotationLayout: Sendable {
     ]
     let attributed = NSAttributedString(string: text, attributes: attributes)
     let measured = attributed.size()
-    let layout = GuidanceAnnotationLayout.make(
+    let fallback = GuidanceAnnotationLayout.make(
       target: target,
       labelSize: GuidanceAnnotationLayout.labelSize(text: text),
       canvas: bounds)
+    let layout: GuidanceAnnotationLayout
+    if let proposedLayout, proposedLayout.target == fallback.target,
+      proposedLayout.label.minX.isFinite, proposedLayout.label.minY.isFinite,
+      proposedLayout.label.width.isFinite, proposedLayout.label.height.isFinite,
+      proposedLayout.label.width >= 0, proposedLayout.label.height >= 0,
+      proposedLayout.label.isEmpty || bounds.contains(proposedLayout.label)
+    {
+      layout = proposedLayout
+    } else {
+      layout = fallback
+    }
+    annotationLayout = layout
     let path: CGPath
     if shape == .ellipse {
       path = Self.handDrawnEllipse(in: layout.target)

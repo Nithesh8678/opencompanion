@@ -26,8 +26,80 @@ enum ScreenTargetFreshness {
     }
   }
 
-  private static func check(
+  /// A separate narrow path for visual-only animation while one inference is
+  /// already running. An independently collected current AX counterpart AND
+  /// unchanged expanded control pixels are required; global animation alone
+  /// may differ. This never admits OCR/image-only targets or claims persistent
+  /// AX identity. The caller still owns hard scene epochs and native visibility.
+  static func verifiedStableAccessibilityTarget(
     target: ProviderTarget, original: ScreenEvidence, refreshed: ScreenEvidence
+  ) async throws -> ProviderTarget {
+    try Task.checkCancellation()
+    let verification = Task.detached(priority: .userInitiated) {
+      let resolved = try stableAccessibilityTarget(
+        target: target, original: original, refreshed: refreshed)
+      var verified = try check(
+        target: resolved, original: original, refreshed: refreshed,
+        requiresFullScene: false)
+      // This is an actual unique member of the refreshed native table, not an
+      // old ID relabeled as current or a claim of persistent AX object identity.
+      verified.candidateID = resolved.candidateID
+      return verified
+    }
+    return try await withTaskCancellationHandler {
+      let result = try await verification.value
+      try Task.checkCancellation()
+      return result
+    } onCancel: {
+      verification.cancel()
+    }
+  }
+
+  private static func stableAccessibilityTarget(
+    target: ProviderTarget, original: ScreenEvidence, refreshed: ScreenEvidence
+  ) throws -> ProviderTarget {
+    try Task.checkCancellation()
+    guard let id = target.candidateID, target.pixelBounds == nil, original.displayID > 0,
+      original.groundingCandidates.count <= ScreenGrounding.maximumCandidates,
+      refreshed.groundingCandidates.count <= ScreenGrounding.maximumCandidates,
+      refreshed.revision > original.revision, refreshed.capturedAt >= original.capturedAt,
+      original.capturedWindowBounds == refreshed.capturedWindowBounds,
+      original.imageWidth > 0, original.imageHeight > 0,
+      refreshed.imageWidth == original.imageWidth, refreshed.imageHeight == original.imageHeight
+    else { throw failure() }
+    let originalMatches = original.groundingCandidates.filter { $0.id == id }
+    guard originalMatches.count == 1, let source = originalMatches.first,
+      source.source == .accessibility,
+      !source.role.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      !source.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      source.role.utf8.count <= 2_048, source.label.utf8.count <= 2_048
+    else { throw failure() }
+    if let windowID = original.windowID {
+      guard windowID > 0, let bounds = original.capturedWindowBounds,
+        validSourceRect(bounds), bounds.contains(original.screenRect)
+      else { throw failure() }
+    } else if original.capturedWindowBounds != nil {
+      throw failure()
+    }
+    // Resolve each frame's ID through the production authority boundary. This
+    // also rejects duplicate/stale IDs, malformed boxes and disabled clicks.
+    _ = try original.resolvingTarget(target)
+    let matches = refreshed.groundingCandidates.filter { candidate in
+      candidate.source == .accessibility && candidate.role == source.role
+        && candidate.label == source.label && candidate.enabled == source.enabled
+        && candidate.actionable == source.actionable
+        && candidate.x == source.x && candidate.y == source.y
+        && candidate.width == source.width && candidate.height == source.height
+    }
+    guard matches.count == 1, let current = matches.first else { throw failure() }
+    var currentTarget = target
+    currentTarget.candidateID = current.id
+    return try refreshed.resolvingTarget(currentTarget)
+  }
+
+  private static func check(
+    target: ProviderTarget, original: ScreenEvidence, refreshed: ScreenEvidence,
+    requiresFullScene: Bool = true
   ) throws -> ProviderTarget {
     try Task.checkCancellation()
     let now = ProcessInfo.processInfo.systemUptime
@@ -52,9 +124,9 @@ enum ScreenTargetFreshness {
     let after = try decode(refreshed)
     guard before.width == after.width, before.height == after.height else { throw failure() }
     try Task.checkCancellation()
-    guard try similarImages(before, after, width: 256, height: 160, maximumChangedFraction: 0.01)
-    else {
-      throw failure()
+    if requiresFullScene {
+      guard try similarImages(before, after, width: 256, height: 160, maximumChangedFraction: 0.01)
+      else { throw failure() }
     }
 
     // Expand in logical capture points before converting to encoded pixels.

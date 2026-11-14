@@ -1,7 +1,7 @@
 import Foundation
 
 enum NotchActivityPhase: String, Sendable, Equatable {
-  case idle, preparing, listening, thinking, speaking
+  case idle, preparing, listening, awaitingRelease, thinking, speaking
 }
 
 /// Owns only an explicitly begun hotkey voice turn. Model activity by itself
@@ -51,7 +51,8 @@ struct NotchActivityState: Sendable, Equatable {
   /// avoids treating a provider's temporary Ready label as audio completion.
   @discardableResult mutating func update(
     generation: UInt64, inputPhase: String, pushToTalkActive: Bool, busy: Bool, state: String,
-    hasPendingSpeech: Bool = false, failed: Bool = false
+    hasPendingSpeech: Bool = false, failed: Bool = false,
+    hasPendingPresentation: Bool = false
   ) -> NotchActivityPhase {
     observe(generation)
     guard let owner = self.generation else { return .idle }
@@ -70,9 +71,10 @@ struct NotchActivityState: Sendable, Equatable {
       switch inputPhase {
       case "Preparing microphone": phase = .preparing
       case "Listening": phase = .listening
-      case "Finishing speech", "Release Control+Option to send":
-        // Captured speech is being finalized, or is waiting for key release;
-        // neither state claims that the microphone is still listening.
+      case "Release Control+Option to send": phase = .awaitingRelease
+      case "Finishing speech":
+        // Only physical release begins finalization. A final transcript while
+        // the shortcut is held remains a neutral request to release the keys.
         phase = .thinking
       default:
         // A Ready/failed/cancelled input cannot infer provider ownership. Only
@@ -86,7 +88,7 @@ struct NotchActivityState: Sendable, Equatable {
     case .response:
       if state == "Speaking" && hasPendingSpeech {
         phase = .speaking
-      } else if busy || hasPendingSpeech {
+      } else if busy || hasPendingSpeech || hasPendingPresentation {
         phase = .thinking
       } else {
         finish(through: owner)

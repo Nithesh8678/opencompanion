@@ -197,15 +197,23 @@ import Testing
     coordinator.receiveMouseDown(
       at: fixture.point, timestamp: 100.1, eventTargetPID: 424_242,
       handlingWindowID: 42, lease: lease)
+    let readsAfterDown = fixture.visibilityReads
+    // Admission and the current down each require live window geometry. The
+    // authenticated pair then owns the menu/settle handoff without another hit.
+    #expect(readsAfterDown == 2 && coordinator.hasInteractionHandoff)
     fixture.visible = false
+    coordinator.validateCurrentMark()
+    #expect(fixture.visibilityReads == readsAfterDown)
+    #expect(coordinator.clickObservationLeaseID == lease)
     coordinator.receiveMouseUp(
       at: fixture.point, timestamp: 100.2, eventTargetPID: 424_242,
       handlingWindowID: 99, lease: lease)
     coordinator.receiveMouseUp(
       at: fixture.point, timestamp: 100.2, eventTargetPID: 424_242,
       handlingWindowID: 99, lease: lease)
+    #expect(fixture.visibilityReads == readsAfterDown)
     await drain()
-    #expect(fixture.receipts == [.click] && fixture.visibilityReads == 1)
+    #expect(fixture.receipts == [.click] && fixture.visibilityReads == readsAfterDown)
     #expect(coordinator.clickObservationLeaseID == nil)
   }
 
@@ -240,11 +248,14 @@ import Testing
       eventTargetPID: field == "missingPID" ? nil : (field == "foreignPID" ? 555 : 424_242),
       handlingWindowID: field == "missingWindow" ? nil : (field == "foreignWindow" ? 99 : 42),
       lease: lease)
+    #expect(fixture.visibilityReads == 2 && !coordinator.hasInteractionHandoff)
     coordinator.receiveMouseUp(
       at: fixture.point, timestamp: 100.2, eventTargetPID: 424_242,
       handlingWindowID: 42, lease: lease)
     await drain()
-    #expect(fixture.receipts.isEmpty && fixture.visibilityReads == 1)
+    // A malformed down grants no handoff, so an up must perform the ordinary
+    // waiting-window liveness check and still cannot advance without its down.
+    #expect(fixture.receipts.isEmpty && fixture.visibilityReads == 3)
   }
 
   @Test func aKnownForeignUpConsumesTheDownWithoutQueuingContinuation() async throws {
@@ -298,7 +309,7 @@ import Testing
     #expect(fixture.receipts == [.click])
   }
 
-  @Test func visibilityRefusesAdmissionButIsNotAWaitingClickCondition() throws {
+  @Test func visibilityRefusesAdmissionWithoutArmingAClick() throws {
     let fixture = try SelectedWindowMouseFixture()
     let coordinator = fixture.coordinator()
     defer {

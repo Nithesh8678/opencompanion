@@ -50,11 +50,13 @@ import QuartzCore
     let crossfade =
       incomingResponse && self.phase != .idle && self.phase != .preparing
       && self.phase != phase && !reduceMotion
-    let enteringInput = self.phase != phase && (phase == .preparing || phase == .listening)
+    let enteringInput =
+      self.phase != phase
+      && (phase == .preparing || phase == .listening || phase == .awaitingRelease)
     let changedAppearance = self.phase != phase || self.reduceMotion != reduceMotion
     self.phase = phase
     // Idle keeps the last rendered bars while the owner fades this container.
-    if phase == .preparing {
+    if phase == .preparing || phase == .awaitingRelease {
       self.level = 0
     } else if phase != .idle {
       self.level = level.isFinite ? min(1, max(0, level)) : 0
@@ -159,8 +161,8 @@ import QuartzCore
     }
     withoutImplicitAnimations {
       labelLayer.isHidden = false
-      indicatorWing.isHidden = false
-      glowLayer.isHidden = false
+      indicatorWing.isHidden = phase == .awaitingRelease
+      glowLayer.isHidden = phase == .awaitingRelease
       let color =
         phase == .thinking
         ? NSColor(srgbRed: 0.91, green: 0.35, blue: 0.89, alpha: 1)
@@ -178,13 +180,14 @@ import QuartzCore
       for dot in dots {
         dot.backgroundColor = color.cgColor
         dot.opacity = 0.68
-        dot.isHidden = phase == .listening || phase == .idle
+        dot.isHidden = phase != .thinking && phase != .speaking
       }
       let title: String =
         switch phase {
         case .idle: ""
         case .preparing: "Preparing"
         case .listening: "Listening"
+        case .awaitingRelease: "Release to send"
         case .thinking: "Thinking"
         case .speaking: "Speaking"
         }
@@ -237,7 +240,8 @@ import QuartzCore
   }
 
   private func synchronizeAnimations() {
-    guard phase != .idle, phase != .preparing, !reduceMotion, !isHiddenOrHasHiddenAncestor,
+    guard phase != .idle, phase != .preparing, phase != .awaitingRelease,
+      !reduceMotion, !isHiddenOrHasHiddenAncestor,
       let window, window.isVisible, window.occlusionState.contains(.visible)
     else {
       stopAnimations()

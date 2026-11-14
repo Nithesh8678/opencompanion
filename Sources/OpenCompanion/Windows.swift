@@ -107,6 +107,7 @@ struct GuidanceMarkRaster {
     let ownerGeneration: UInt64?
     let hostGeneration: UInt64
     let targetRect: CGRect
+    let labelFrame: CGRect
     let shape: String
     let createdAt: TimeInterval
     let expiresAt: TimeInterval
@@ -115,6 +116,15 @@ struct GuidanceMarkRaster {
   private var expiry: Task<Void, Never>?
   private var evidenceIdentity: ScreenEvidenceIdentity?
   private var generation: UInt64 = 0
+  private var guidanceVisibilitySuspended = false
+
+  /// Hide retained marks while local authority is checked. Restoring changes
+  /// only window opacity; mark identity, animation time and expiry are unchanged.
+  func setGuidanceVisibilitySuspended(_ suspended: Bool) {
+    guard guidanceVisibilitySuspended != suspended else { return }
+    guidanceVisibilitySuspended = suspended
+    for mark in marks { mark.panel.alphaValue = suspended ? 0 : 1 }
+  }
 
   func clear() {
     generation &+= 1
@@ -123,12 +133,13 @@ struct GuidanceMarkRaster {
     marks.forEach { Self.remove($0.panel) }
     marks.removeAll()
     evidenceIdentity = nil
+    guidanceVisibilitySuspended = false
   }
 
   func show(
     target: ProviderTarget, evidence: ScreenEvidence, showInstruction: Bool = true,
     append: Bool = false, lifetime: TimeInterval = 45, introDelay: TimeInterval = 0,
-    ownerGeneration: UInt64? = nil
+    ownerGeneration: UInt64? = nil, layout: GuidanceAnnotationLayout? = nil
   ) throws {
     guard lifetime.isFinite, lifetime > 0, introDelay.isFinite, introDelay >= 0, introDelay <= 2
     else {
@@ -138,7 +149,12 @@ struct GuidanceMarkRaster {
     let now = ProcessInfo.processInfo.systemUptime
     let display = evidence.screenRect
     let identity = ScreenEvidenceIdentity(evidence)
-    if !append || evidenceIdentity != identity { clear() }
+    if !append || evidenceIdentity != identity {
+      let suspended = guidanceVisibilitySuspended
+      clear()
+      // Internal replacement is not authorization to reveal a pending mark.
+      guidanceVisibilitySuspended = suspended
+    }
     evidenceIdentity = identity
     // Sequential targets from the same captured scene can remain together.
     // Each mark retains its own deadline, so appending never extends old marks.
@@ -151,14 +167,18 @@ struct GuidanceMarkRaster {
     let annotation = GuidanceAnnotationView(
       frame: CGRect(origin: .zero, size: display.size), target: rect, shape: shape,
       text: GuidanceAnnotationLayout.labelText(target: target, showInstruction: showInstruction),
-      reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+      reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+      layout: layout
+        ?? makeLayout(target: target, evidence: evidence, showInstruction: showInstruction))
     panel.contentView = annotation
+    panel.alphaValue = guidanceVisibilitySuspended ? 0 : 1
     panel.orderFrontRegardless()
     annotation.animateAppearance(introDelay: introDelay)
     marks.append(
       Mark(
         id: UUID(), panel: panel, evidence: identity, ownerGeneration: ownerGeneration,
-        hostGeneration: generation, targetRect: rect, shape: shape.rawValue,
+        hostGeneration: generation, targetRect: rect, labelFrame: annotation.annotationLayout.label,
+        shape: shape.rawValue,
         createdAt: now, expiresAt: now + min(45, lifetime)))
     guard expiry == nil else { return }
     let token = generation
@@ -250,6 +270,23 @@ struct GuidanceMarkRaster {
 
   func validate(target: ProviderTarget, evidence: ScreenEvidence) throws {
     _ = try validatedShape(target: target, evidence: evidence)
+  }
+
+  /// Reuse this exact local plan for the cursor and native mark. Only already
+  /// retained labels from the same evidence identity influence placement.
+  func makeLayout(
+    target: ProviderTarget, evidence: ScreenEvidence, showInstruction: Bool = true
+  ) -> GuidanceAnnotationLayout {
+    let identity = ScreenEvidenceIdentity(evidence)
+    let display = evidence.screenRect
+    let obstacles = marks.filter { $0.evidence == identity }.map(\.labelFrame)
+    return GuidanceAnnotationLayout.make(
+      target: CGRect(
+        x: target.x * display.width, y: target.y * display.height,
+        width: target.width * display.width, height: target.height * display.height),
+      labelSize: GuidanceAnnotationLayout.labelSize(
+        text: GuidanceAnnotationLayout.labelText(target: target, showInstruction: showInstruction)),
+      canvas: CGRect(origin: .zero, size: display.size), avoiding: obstacles)
   }
 
   private func validatedShape(

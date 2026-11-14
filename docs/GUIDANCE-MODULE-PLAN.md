@@ -1,8 +1,8 @@
 # Active screen guidance implementation plan
 
-14 November 2026. Planning baseline: repository `01e96ff`, with application sources unchanged from the previously tested `b6847a4`. This plan covers one module: fast voice-driven screen guidance, its session lifecycle, live screen context, and the native cursor/mark/speech experience. It also covers the routing handoff that currently breaks explanation-to-3D follow-ups. It does not reopen 3D modeling quality, hosting, autonomous desktop actions, or unrelated app features.
+Updated 14 November 2026. The active guidance module is implemented; this document now tracks its design constraints and remaining acceptance. The original read-only planning baseline was repository `01e96ff`, with application sources then unchanged from `b6847a4`. That historical baseline is not the current source state. Scope remains fast voice-driven screen guidance, live-session context, cursor/mark/speech coordination and explanation-to-3D routing. It does not reopen 3D modeling quality, hosting, autonomous desktop actions or unrelated features.
 
-Status: source audit and implementation plan. No application code, settings, permissions, or installed bundle changed during this planning pass. No fresh performance or live HeyClicky parity measurement is claimed.
+Status: implementation and bounded verification completed; full module acceptance remains open. The latest retained `full-17` log passed **1,095 tests** (990 app, 28 store, 77 core); historical `full-12` passed 1,091. Code `9fbb8b73b17a18ce76c51857fe5c8266cf8958d5` is signed and independently verified installed, and current exact-source CI passed. Real Terra/low transport trials passed **35/35**, but requested-warm first-valid-target P50 **3,749.98 ms** / P95 **5,702.50 ms** exceed the narrower latency proxy; the full release-to-mark target of ≤2 s / ≤4 s is unmet. Diagnostic Luna passed **32/35** and is not promoted. An earlier fixture run reached all three correct targets and advanced through visual events, but failed final fast OCR. The accurate acceptance-only fallback is implemented; subsequent setup refusals are preserved and complete native acceptance remains pending. Current selected-window identity/geometry oracles and production per-target visibility checks remain strict. See [the implementation/evidence report](GUIDANCE-MODULE-REPORT.md) for exact source/hash, timings, refusals and pending cells. No parity or FPS claim follows.
 
 ## Intended experience
 
@@ -20,9 +20,11 @@ The microphone remains push-to-talk. Continuous awareness here means active-sess
 
 The existing preference defaults to enabled, so its stored value must not be interpreted as a newly armed session. Make the current-session guidance selection explicit and visible; a deliberate toggle interaction can arm the next invocation in that run. Keep feature availability, armed mode and actively observing session separate. Upgrade/restart begins with no active capture authority, and the Settings description must explain the new behavior.
 
-## What the source audit established
+## Historical source audit that motivated this implementation
 
-| Gap | Current source | Consequence |
+The following table describes the original planning baseline, not current defects. The implementation and evidence status superseding it are in [GUIDANCE-MODULE-REPORT.md](GUIDANCE-MODULE-REPORT.md). Historical line links can drift as source evolves.
+
+| Original gap | Source at planning baseline | Original consequence |
 |---|---|---|
 | The toggle is a one-shot feature preference | [Settings](../Sources/OpenCompanion/CompanionSettingsView.swift#L274) explicitly says the screen is not continuously monitored. | Enabling it does not establish the requested ongoing session. |
 | Routing ignores the active topic | [ResponsePolicy](../Sources/OpenCompanion/ResponsePolicy.swift#L37) classifies current text; its visual heuristic at line 299 also requires specific nouns. | Short requests such as “show it in 3D” can fall back to conversation. |
@@ -39,7 +41,7 @@ The HeyClicky reports support a separation between semantic reasoning, native mo
 
 ## Architecture and ownership
 
-Keep physical chord state, microphone state, guidance-session state and presentation state separate, coordinated by one active guidance runtime. Extend the existing durable `GuidanceSessionController`; do not replace its semantic history or confuse saved progress with screen authorization.
+The constraints below now describe the implemented design and its acceptance requirements, rather than an unstarted proposal. Physical chord state, microphone state, active guidance and presentation remain separate. `ActiveGuidanceRuntime` coordinates ephemeral authority alongside the existing durable `GuidanceSessionController`; semantic history is not screen authorization.
 
 The runtime owns an ephemeral session lease, original goal/topic, chosen scope policy, scene epoch, current frame, inference generation, expected interaction, and current target lease. Durable workflow history contains semantic progress only.
 
@@ -76,7 +78,7 @@ Apple's [SCStreamConfiguration](https://developer.apple.com/documentation/screen
 ### Latest-only reasoning scheduler
 
 - Maintain one active inference and one coalesced pending scene revision. Repeated scroll/typing/loading changes replace the pending work rather than create a backlog.
-- Revoke stale marks immediately. After bounded local settlement, acquire the newest scoped frame and verify the current goal. Use a maximum settlement wait so animated pages cannot starve the guide forever.
+- Hard source changes revoke stale output immediately. Visual-only activity temporarily hides the retained mark while bounded same-scope AX/ROI corroboration runs; only a positive proof can restore its original, unextended lease/deadline. New clicks, Continue and voice continuation are blocked during proof. One inference can finish instead of being cancelled by every animated frame; unresolved visual activity gets a bounded recheck and then pauses. Local observation/proof does not itself spend a durable model check.
 - Preserve authenticated mouse-down ownership through a legitimate menu-opening transition and its mouse-up. Never restore the older up-time hit-test rule that loses that handoff.
 - Separate quick screen readiness from optional expensive enrichment. Benchmark bounded AX-first, image-first and full AX/OCR paths; use only candidates belonging to the exact submitted frame. OCR is evidence, not action authority.
 - Reuse a hardened initialized provider transport during the session where supported, with isolated turn inputs, current request IDs, cancellation, health checks and disabled desktop/tools/plugins. Cache bounded model/catalog configuration with invalidation; do not reuse old screenshot history or replay an uncertain completed turn.
@@ -103,6 +105,8 @@ No automatic clicking or typing belongs in this module.
 
 ## Implementation order and checkpoints
 
+Checkpoints 1–5 below now have production source and automated coverage. Checkpoint 6 is still open: native component observation passed with visual fallback, but the complete fixture task and three declared real-app outcomes are not accepted. The current implementation includes the latest-only stream, scoped metadata, hard/visual epochs, warm hardened provider reuse, shared speech beats, velocity-preserving retargeting, collision-aware labels and neutral early-final “Release to send” status. Final-source release verification must be recorded separately from earlier test logs.
+
 1. **Reproduction and trace baseline.** Add send-path fixtures for explanation → “show it in 3D,” active guide → “what next?”, and toggle-on voice screen requests. Instrument content-free monotonic milestones. Record the original failure before changing behavior.
 2. **Intent and runtime lifecycle.** Implement bounded topic-aware routing, product-capability context, active-session ownership, Listening/Thinking arbitration, Escape while waiting, new-turn interruption and sleep/lock cancellation. Keep manual microphone review unchanged.
 3. **Continuous scoped perception.** Add the stream/latest-frame slot, scoped AX/visual observers and immediate stale-mark revocation. Test pinned versus current-screen policy and metadata/pixel races.
@@ -114,7 +118,7 @@ Each checkpoint requires behavioral evidence for its own contract. A green build
 
 ## Performance targets
 
-These are proposed acceptance targets for named hardware/provider conditions, not measured current results or HeyClicky claims.
+These remain acceptance targets for named hardware/provider conditions, not HeyClicky claims. The measured transport profile and its narrower scope are in [the report](GUIDANCE-MODULE-REPORT.md). Physical local acknowledgement, presented frame-time, ASR/capture-inclusive latency and acoustic timing distributions are still unmeasured in this slice.
 
 | Measurement | Proposed gate |
 |---|---|
@@ -123,7 +127,7 @@ These are proposed acceptance targets for named hardware/provider conditions, no
 | Material scene change → stale marks revoked | P95 ≤100 ms, with zero stale publications in deterministic race tests. |
 | Local pointer sample → render submission | P95 within one display interval; deliberate smoothing lag measured separately. |
 | Stop/new-turn replacement → old visuals removed | Within two display intervals; zero resurrection from late callbacks. |
-| Warm release → first correctly grounded useful mark | P50 ≤2 s, P95 ≤4 s, including ASR finalization, capture, provider and admission. |
+| Warm release → first correctly grounded useful mark | P50 ≤2 s, P95 ≤4 s, including ASR finalization, capture, provider and admission. **Unmet**: even the narrower Terra transport proxy is 3.75 s / 5.70 s. |
 | Idle outside an active guide | Zero capture/model work attributable to guidance. |
 
 Record microphone readiness, ASR tail, frame content age, capture/enrichment, process/setup, first model delta, first admitted target, native submission, speech callbacks and post-action verification independently. A callback interval is not displayed FPS, and a speech delegate callback is not acoustic onset. Benchmark output must include failures and timeouts, not only successful requests.
@@ -131,6 +135,10 @@ Record microphone readiness, ASR tail, frame content age, capture/enrichment, pr
 If the current subscription/provider cannot meet the warm target, report that limit with its measured breakdown. Do not reduce freshness, guess coordinates, hide thinking time or call an ungrounded answer “fast” to pass the gate.
 
 ## Definition of done for this module
+
+This checklist remains open. Source implementation, 35 authored transport trials, or three target stages in one fixture do not establish these whole-module outcomes. Browser, TextEdit and Calculator helpers exist, but native results are pending; root will append observed outcomes without changing earlier refused receipts. External AX-driver input is not physical-input provenance.
+
+The current real-app setup wait is bounded at 180 seconds, then a separate 150-second task window begins. Report total elapsed, foreground wait and task time independently. Capture provenance uses the exact focused public window's unique AX/CG geometry; it is separate from the unchanged production checks that a proposed control is currently visible/input-owned. A setup refusal or a removed acceptance-only whole-stack chrome precheck is not a successful task or a relaxed target oracle.
 
 - The public rocket explanation → 3D follow-up and guidance → short-follow-up regressions pass through the real host routing and renderer/continuation boundaries.
 - Control + Option works through fast release, repeated holds, interruption, recognition delay and permission errors. Listening is first; the dashboard remains hover-only. Escape/Stop work while waiting, during inference and during speech.
@@ -141,4 +149,4 @@ If the current subscription/provider cannot meet the warm target, report that li
 - Physical acceptance includes real hold/release speech, clicks/menu handoff, cursor motion, audio/mark alignment, Reduce Motion and available mixed-scale display configurations. Consolidate manual checks into a short final pass rather than repeatedly asking the user to babysit each build.
 - Relevant unit/integration/native checks, full Swift suite, strict build, exact-source CI and single-canonical-app verification pass. Update feature status only for observed outcomes. Remaining unavailable hardware/provider conditions stay explicitly unverified.
 
-Planning is complete when this scope and sequence are reviewable. Implementation, fresh benchmarks and installed acceptance are separate subsequent work.
+Source implementation and bounded transport/component evidence are complete. Finish the strict final-image-plus-AX fixture check, the three real-app workflows, physical voice/presentation/lifecycle checks and final exact-source release verification before declaring the module accepted. Preserve every failure and leave all 21 whole-product gates open until their own evidence is satisfied.

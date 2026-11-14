@@ -14,20 +14,106 @@ struct CodexAccountStatus: Sendable {
 /// This adapter never reads auth.json, copies tokens, or turns a subscription into an API key.
 actor CodexProvider {
   private var activeSession: CodexRPCSession?
+  private var activeRequestID: UUID?
+  private var activeGuidanceSessionID: UUID?
+  private let sessionPolicy = CodexGuidanceSessionPolicy()
+  private let now: @Sendable () -> TimeInterval
+  private var idleTask: Task<Void, Never>?
+  private struct GuidanceConnection: Sendable {
+    let id: UUID
+    let executable: CodexGuidanceExecutableIdentity
+    let session: CodexRPCSession
+    let createdAt: TimeInterval
+    var lastUsedAt: TimeInterval
+    var initialized = false
+    var cachedAt: TimeInterval?
+    var metadataEpoch: UInt64?
+    var models: [CodexRoutingModel] = []
+    var hardenedConfig: JSONValue?
+    var nextRPCBase = 0
+    var turnCount = 0
+    var threadIDs = Set<String>()
+  }
+  private var guidanceConnection: GuidanceConnection?
 
-  func stop() { activeSession?.close() }
+  init(now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+    self.now = now
+  }
+
+  /// Full explicit teardown. Turn replacement should cancel its Task instead;
+  /// its cancellation handler is scoped to that request's immutable UUID.
+  func stop() {
+    idleTask?.cancel()
+    idleTask = nil
+    activeSession?.close()
+    guidanceConnection?.session.close()
+    guidanceConnection = nil
+    activeSession = nil
+    activeRequestID = nil
+    activeGuidanceSessionID = nil
+  }
+
+  func endGuidanceSession(id: UUID) {
+    if guidanceConnection?.id == id {
+      idleTask?.cancel()
+      idleTask = nil
+      guidanceConnection?.session.close()
+      guidanceConnection = nil
+    }
+    if activeGuidanceSessionID == id {
+      activeSession?.close()
+      activeSession = nil
+      activeRequestID = nil
+      activeGuidanceSessionID = nil
+    }
+  }
+
+  /// Handshake/account/catalog only. No thread, turn or model request is sent.
+  func prepareGuidanceSession(
+    executable: String, model: String, guidanceModel: GuidanceModelPreference = .terra,
+    sessionID: UUID, onTiming: (@Sendable (CodexTimingEvent) async -> Void)? = nil
+  ) async throws {
+    let requestID = UUID()
+    let acquired = try acquire(
+      executable: executable, guidanceSessionID: sessionID,
+      requestID: requestID)
+    let session = acquired.session
+    let timing = CodexTimingReporter(onEvent: onTiming)
+    var succeeded = false
+    defer { release(session: session, requestID: requestID, keepWarm: succeeded) }
+    try await withTaskCancellationHandler {
+      await timing.mark(.requestStarted)
+      await timing.mark(acquired.reused ? .sessionReused : .sessionStarted)
+      var iterator = session.messages.makeAsyncIterator()
+      let bootstrapped = try await Self.bootstrap(
+        session: session, requestID: requestID, snapshot: bootstrapSnapshot(session: session),
+        rpcBase: acquired.rpcBase, needsCatalog: true, timing: timing, iterator: &iterator)
+      try commitBootstrap(bootstrapped, session: session, requestID: requestID)
+      let catalog = bootstrapped.models
+      _ = try CodexModelRouting.select(
+        configuredModel: model,
+        policy: .init(route: .screenGuidance, includesExistingNotebook: false),
+        preference: guidanceModel, catalog: catalog)
+      try requireActive(session: session, requestID: requestID)
+      succeeded = true
+    } onCancel: {
+      session.close(requestID: requestID)
+    }
+  }
 
   func inspect(executable: String) async throws -> CodexAccountStatus {
     let session = try CodexRPCSession(executable: executable)
+    let requestID = UUID()
+    try session.beginRequest(id: requestID)
     defer { session.close() }
     return try await withTaskCancellationHandler {
       var iterator = session.messages.makeAsyncIterator()
       try session.send(method: "initialize", id: 1, params: Self.clientInfo)
-      _ = try await Self.response(id: 1, iterator: &iterator)
+      _ = try await Self.response(id: 1, iterator: &iterator, session: session)
       try session.send(method: "initialized", params: .object([:]))
       try session.send(
         method: "account/read", id: 2, params: .object(["refreshToken": .bool(false)]))
-      let account = try await Self.response(id: 2, iterator: &iterator)
+      let account = try await Self.response(id: 2, iterator: &iterator, session: session)
       let authType = account["account"]?["type"]?.string ?? "signedOut"
       let catalog = try await Self.modelCatalog(
         session: session, firstRequestID: 3, iterator: &iterator)
@@ -84,7 +170,8 @@ actor CodexProvider {
     sceneStart: CodexSceneStartMode = .introductionFirst,
     measureSceneLatency: Bool = false,
     onRejectedLine: (@Sendable (Data) async -> Void)? = nil,
-    onNDJSONAudit: (@Sendable (CodexNDJSONAudit) async -> Void)? = nil
+    onNDJSONAudit: (@Sendable (CodexNDJSONAudit) async -> Void)? = nil,
+    guidanceSessionID: UUID? = nil
   ) async throws {
     let requestPolicy =
       responsePolicy
@@ -97,41 +184,31 @@ actor CodexProvider {
     try sceneStart.validate(
       policy: requestPolicy, hasImage: permittedImage != nil, hasScene: scene != nil,
       outputMode: outputMode)
-    guard activeSession == nil else {
-      throw ProviderError.message(
-        "A Codex request is already active. Stop it before starting another.")
-    }
+    let warmID =
+      requestPolicy.route == .screenGuidance && outputMode == .ndjson
+      ? guidanceSessionID : nil
+    let requestID = UUID()
     let timing = CodexTimingReporter(onEvent: onTiming)
-    let session = try CodexRPCSession(executable: executable)
-    activeSession = session
-    defer {
-      session.close()
-      activeSession = nil
-    }
+    let acquired = try acquire(
+      executable: executable, guidanceSessionID: warmID,
+      requestID: requestID)
+    let session = acquired.session
+    let rpcBase = acquired.rpcBase
+    let turnRequestID = rpcBase + 5
+    var succeeded = false
+    defer { release(session: session, requestID: requestID, keepWarm: succeeded && warmID != nil) }
     try await withTaskCancellationHandler {
       await timing.mark(.requestStarted)
-      await timing.mark(.sessionStarted)
+      await timing.mark(acquired.reused ? .sessionReused : .sessionStarted)
       var iterator = session.messages.makeAsyncIterator()
-      try session.send(method: "initialize", id: 1, params: Self.clientInfo)
-      _ = try await Self.response(id: 1, iterator: &iterator)
-      try session.send(method: "initialized", params: .object([:]))
-      await timing.mark(.initialized)
-      try session.send(
-        method: "account/read", id: 2, params: .object(["refreshToken": .bool(false)]))
-      let account = try await Self.response(id: 2, iterator: &iterator)
-      guard account["account"]?["type"]?.string == "chatgpt" else {
-        throw ProviderError.message(
-          "Sign in to the Codex CLI with ChatGPT before using subscription mode.")
-      }
-      await timing.mark(.accountVerified)
-      var catalogModels: [CodexRoutingModel] = []
-      if model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        || requestPolicy.route == .screenGuidance || requestPolicy.route == .notebook
-      {
-        let catalog = try await Self.modelCatalog(
-          session: session, firstRequestID: 10, iterator: &iterator)
-        catalogModels = Self.routingModels(catalog)
-      }
+      let bootstrapped = try await Self.bootstrap(
+        session: session, requestID: requestID, snapshot: bootstrapSnapshot(session: session),
+        rpcBase: rpcBase,
+        needsCatalog: model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          || requestPolicy.route == .screenGuidance || requestPolicy.route == .notebook,
+        timing: timing, iterator: &iterator)
+      try commitBootstrap(bootstrapped, session: session, requestID: requestID)
+      let catalogModels = bootstrapped.models
       let routing = try CodexModelRouting.select(
         configuredModel: model, policy: requestPolicy, preference: guidanceModel,
         catalog: catalogModels)
@@ -140,32 +217,24 @@ actor CodexProvider {
       try Task.checkCancellation()
       if let onRouting { await onRouting(routing) }
       try Task.checkCancellation()
-      // Config tables merge by key: an empty table does not disable inherited servers.
-      // Inspect only server/plugin identifiers, then explicitly disable every inherited entry.
+      try requireActive(session: session, requestID: requestID)
+      // Always read current config: newly inherited plugin/MCP entries must be
+      // explicitly disabled even when account/catalog metadata is warm.
       try session.send(
-        method: "config/read", id: 3, params: .object(["includeLayers": .bool(true)]))
-      let configResult = try await Self.response(id: 3, iterator: &iterator)
-      let layers = configResult["layers"]?.array ?? []
-      var disabledServers: [String: JSONValue] = [:]
-      var disabledPlugins: [String: JSONValue] = [:]
-      for layer in layers {
-        for name in layer["config"]?["mcp_servers"]?.object?.keys ?? [String: JSONValue]().keys {
-          disabledServers[name] = .object(["enabled": .bool(false)])
-        }
-        for name in layer["config"]?["plugins"]?.object?.keys ?? [String: JSONValue]().keys {
-          disabledPlugins[name] = .object(["enabled": .bool(false)])
-        }
+        method: "config/read", id: rpcBase + 3,
+        params: .object(["includeLayers": .bool(true)]))
+      let configResult = try await Self.response(
+        id: rpcBase + 3, iterator: &iterator,
+        session: session)
+      try requireActive(session: session, requestID: requestID)
+      let config = try Self.hardenedConfiguration(configResult, bounded: warmID != nil)
+      if warmID != nil, guidanceConnection?.hardenedConfig == config {
+        await timing.mark(.configurationCacheHit)
       }
-      let config: JSONValue = .object([
-        "mcp_servers": .object(disabledServers), "plugins": .object(disabledPlugins),
-        "web_search": .string("disabled"),
-        "features": .object([
-          "shell_tool": .bool(false), "apply_patch_freeform": .bool(false),
-          "unified_exec": .bool(false), "multi_agent": .bool(false), "apps": .bool(false),
-          "hooks": .bool(false),
-        ]),
-        "apps": .object(["_default": .object(["enabled": .bool(false)])]),
-      ])
+      if var connection = guidanceConnection, connection.session === session {
+        connection.hardenedConfig = config
+        guidanceConnection = connection
+      }
       await timing.mark(.configurationReady)
       let instructions: String
       let developerInstructions: String
@@ -188,7 +257,7 @@ actor CodexProvider {
         instructions
         + "\nYou are a native assistant response provider. Do not call any tools, inspect files, use shell, or follow local project instructions. All needed context is supplied in the user input."
       try session.send(
-        method: "thread/start", id: 4,
+        method: "thread/start", id: rpcBase + 4,
         params: .object([
           "model": .string(selectedModel), "ephemeral": .bool(true),
           "approvalPolicy": .string("never"), "sandbox": .string("read-only"),
@@ -197,9 +266,19 @@ actor CodexProvider {
           "developerInstructions": .string(developerInstructions),
           "dynamicTools": .array([]), "config": config, "serviceName": .string("opencompanion"),
         ]))
-      let started = try await Self.response(id: 4, iterator: &iterator)
-      guard let threadID = started["thread"]?["id"]?.string else {
+      let started = try await Self.response(id: rpcBase + 4, iterator: &iterator, session: session)
+      try requireActive(session: session, requestID: requestID)
+      guard let threadID = started["thread"]?["id"]?.string,
+        !threadID.isEmpty, threadID.utf8.count <= 256
+      else {
         throw ProviderError.message("Codex did not create a teaching thread.")
+      }
+      if var connection = guidanceConnection, connection.session === session {
+        guard connection.threadIDs.insert(threadID).inserted,
+          connection.threadIDs.count <= sessionPolicy.maximumTurns
+        else { throw ProviderError.message("Codex reused a guidance thread identity.") }
+        connection.turnCount += 1
+        guidanceConnection = connection
       }
       await timing.mark(.threadReady)
       var text = "Conversation (data):\n"
@@ -242,7 +321,8 @@ actor CodexProvider {
           turnInputUTF8Bytes: try JSONEncoder().encode(JSONValue.array(input)).count)
       }
       try Task.checkCancellation()
-      try session.send(method: "turn/start", id: 5, params: .object(turnParams))
+      try requireActive(session: session, requestID: requestID)
+      try session.send(method: "turn/start", id: turnRequestID, params: .object(turnParams))
       await timing.mark(.turnSubmitted)
       let deliverUnit: @Sendable (ProviderUnit) async throws -> Void = { unit in
         try Task.checkCancellation()
@@ -280,12 +360,19 @@ actor CodexProvider {
       var sawCompleted = false
       do {
         while let message = try await iterator.next() {
-          try Task.checkCancellation()
+          try requireActive(session: session, requestID: requestID)
+          if let id = message["id"]?.integer, id != turnRequestID,
+            message["method"] == nil
+          {
+            continue
+          }
           if let error = message["error"] {
             throw ProviderError.message(
               "Codex app-server error: \(error["message"]?.string ?? "request rejected")")
           }
-          if message["id"]?.integer == 5, let turnID = message["result"]?["turn"]?["id"]?.string {
+          if message["id"]?.integer == turnRequestID,
+            let turnID = message["result"]?["turn"]?["id"]?.string
+          {
             session.setTurn(threadID: threadID, turnID: turnID)
             if outputMode.isStructured {
               try structured.bind(turnID: turnID)
@@ -401,9 +488,293 @@ actor CodexProvider {
         await onNDJSONAudit(ndjson.audit(outcome: .completed))
         try Task.checkCancellation()
       }
+      try requireActive(session: session, requestID: requestID)
+      succeeded = true
     } onCancel: {
-      session.close()
+      session.close(requestID: requestID)
     }
+  }
+
+  private struct Acquired: Sendable {
+    let session: CodexRPCSession
+    let rpcBase: Int
+    let reused: Bool
+  }
+
+  private func acquire(executable: String, guidanceSessionID: UUID?, requestID: UUID) throws
+    -> Acquired
+  {
+    try Task.checkCancellation()
+    if let activeSession, activeSession.isOpen {
+      throw ProviderError.message(
+        "A Codex request is already active. Stop it before starting another.")
+    }
+    // A cancelled lease may still be unwinding its actor continuation. Its
+    // scoped defer cannot clear the newer request installed below.
+    activeSession = nil
+    activeRequestID = nil
+    activeGuidanceSessionID = nil
+    idleTask?.cancel()
+    idleTask = nil
+    let session: CodexRPCSession
+    let rpcBase: Int
+    let reused: Bool
+    if let guidanceSessionID {
+      let identity = try CodexGuidanceExecutableIdentity.read(executable)
+      let time = now()
+      if let connection = guidanceConnection,
+        connection.id == guidanceSessionID, connection.executable == identity,
+        connection.session.isHealthy,
+        connection.metadataEpoch.map({ $0 == connection.session.metadataEpoch }) ?? true,
+        connection.nextRPCBase <= sessionPolicy.maximumTurns * 20,
+        sessionPolicy.permitsReuse(
+          createdAt: connection.createdAt,
+          lastUsedAt: connection.lastUsedAt, turnCount: connection.turnCount, now: time)
+      {
+      } else {
+        guidanceConnection?.session.close()
+        guidanceConnection = nil
+      }
+      if guidanceConnection == nil {
+        let created = try CodexRPCSession(executable: executable)
+        guidanceConnection = .init(
+          id: guidanceSessionID, executable: identity,
+          session: created, createdAt: time, lastUsedAt: time)
+      }
+      guard var connection = guidanceConnection else { throw CancellationError() }
+      session = connection.session
+      rpcBase = connection.nextRPCBase
+      connection.nextRPCBase += 20
+      reused = connection.initialized
+      guidanceConnection = connection
+    } else {
+      guidanceConnection?.session.close()
+      guidanceConnection = nil
+      session = try CodexRPCSession(executable: executable)
+      rpcBase = 0
+      reused = false
+    }
+    do { try session.beginRequest(id: requestID) } catch {
+      session.close()
+      if guidanceConnection?.session === session { guidanceConnection = nil }
+      throw error
+    }
+    activeSession = session
+    activeRequestID = requestID
+    activeGuidanceSessionID = guidanceSessionID
+    return .init(session: session, rpcBase: rpcBase, reused: reused)
+  }
+
+  private func requireActive(session: CodexRPCSession, requestID: UUID) throws {
+    try Task.checkCancellation()
+    guard activeRequestID == requestID, activeSession === session, session.isOpen else {
+      throw CancellationError()
+    }
+    if let connection = guidanceConnection, connection.session === session,
+      let verified = connection.metadataEpoch, verified != session.metadataEpoch
+    {
+      throw ProviderError.message(
+        "The managed Codex account changed. Start a fresh guidance check.")
+    }
+  }
+
+  private func release(session: CodexRPCSession, requestID: UUID, keepWarm: Bool) {
+    guard activeRequestID == requestID, activeSession === session else {
+      session.close(requestID: requestID)
+      return
+    }
+    activeSession = nil
+    activeRequestID = nil
+    activeGuidanceSessionID = nil
+    let time = now()
+    if keepWarm, var connection = guidanceConnection, connection.session === session,
+      session.isHealthy,
+      sessionPolicy.permitsReuse(
+        createdAt: connection.createdAt,
+        lastUsedAt: time, turnCount: connection.turnCount, now: time)
+    {
+      session.endRequest(id: requestID)
+      connection.lastUsedAt = time
+      guidanceConnection = connection
+      let idleOwner = connection.id
+      let idleStamp = connection.lastUsedAt
+      let remaining = min(
+        sessionPolicy.idleLifetime,
+        max(0, sessionPolicy.maximumLifetime - (time - connection.createdAt)))
+      idleTask = Task { [weak self, weak session] in
+        do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
+        guard let self, let session else { return }
+        await self.expireIdle(session: session, id: idleOwner, lastUsedAt: idleStamp)
+      }
+    } else {
+      session.close()
+      if guidanceConnection?.session === session { guidanceConnection = nil }
+    }
+  }
+
+  private func expireIdle(session: CodexRPCSession, id: UUID, lastUsedAt: TimeInterval) {
+    guard activeSession !== session, guidanceConnection?.session === session,
+      guidanceConnection?.id == id, guidanceConnection?.lastUsedAt == lastUsedAt
+    else { return }
+    session.close()
+    guidanceConnection = nil
+    idleTask = nil
+  }
+
+  private struct BootstrapSnapshot: Sendable {
+    let initialized: Bool
+    let cachedModels: [CodexRoutingModel]?
+    let metadataEpoch: UInt64?
+  }
+
+  private struct BootstrapResult: Sendable {
+    let models: [CodexRoutingModel]
+    let metadataEpoch: UInt64
+  }
+
+  /// Only immutable Sendable values cross the actor boundary. The request's
+  /// non-Sendable iterator never becomes part of actor-owned mutable state.
+  private func bootstrapSnapshot(session: CodexRPCSession) -> BootstrapSnapshot {
+    guard var connection = guidanceConnection, connection.session === session else {
+      return .init(initialized: false, cachedModels: nil, metadataEpoch: nil)
+    }
+    if connection.metadataEpoch == session.metadataEpoch,
+      sessionPolicy.permitsMetadata(cachedAt: connection.cachedAt, now: now())
+    {
+      return .init(
+        initialized: connection.initialized, cachedModels: connection.models,
+        metadataEpoch: connection.metadataEpoch)
+    }
+    connection.cachedAt = nil
+    connection.metadataEpoch = nil
+    connection.models = []
+    guidanceConnection = connection
+    return .init(initialized: connection.initialized, cachedModels: nil, metadataEpoch: nil)
+  }
+
+  private func commitBootstrap(
+    _ result: BootstrapResult, session: CodexRPCSession, requestID: UUID
+  ) throws {
+    try requireActive(session: session, requestID: requestID)
+    guard result.metadataEpoch == session.metadataEpoch else {
+      throw ProviderError.message("The managed Codex account changed during discovery.")
+    }
+    guard var connection = guidanceConnection, connection.session === session else { return }
+    guard result.models.count <= 400,
+      result.models.allSatisfy({
+        $0.model.utf8.count <= 200 && ($0.alias?.utf8.count ?? 0) <= 200
+      })
+    else { throw ProviderError.message("Codex guidance metadata exceeded its bounded cache.") }
+    connection.initialized = true
+    connection.models = result.models
+    // A metadata cache hit must not extend the original freshness deadline.
+    if connection.cachedAt == nil { connection.cachedAt = now() }
+    connection.metadataEpoch = result.metadataEpoch
+    guidanceConnection = connection
+  }
+
+  private static func bootstrap(
+    session: CodexRPCSession, requestID: UUID, snapshot: BootstrapSnapshot, rpcBase: Int,
+    needsCatalog: Bool, timing: CodexTimingReporter,
+    iterator: inout AsyncThrowingStream<JSONValue, any Error>.Iterator
+  ) async throws -> BootstrapResult {
+    func requireLease() throws {
+      try Task.checkCancellation()
+      guard session.ownsRequest(requestID) else { throw CancellationError() }
+    }
+    try requireLease()
+    if !snapshot.initialized {
+      try session.send(method: "initialize", id: rpcBase + 1, params: Self.clientInfo)
+      _ = try await Self.response(id: rpcBase + 1, iterator: &iterator, session: session)
+      try requireLease()
+      try session.send(method: "initialized", params: .object([:]))
+      await timing.mark(.initialized)
+      try requireLease()
+    }
+    if let cachedModels = snapshot.cachedModels, let epoch = snapshot.metadataEpoch {
+      guard epoch == session.metadataEpoch else {
+        throw ProviderError.message("The managed Codex account changed during discovery.")
+      }
+      await timing.mark(.metadataCacheHit)
+      try requireLease()
+      guard epoch == session.metadataEpoch else {
+        throw ProviderError.message("The managed Codex account changed during discovery.")
+      }
+      return .init(models: cachedModels, metadataEpoch: epoch)
+    }
+    try session.send(
+      method: "account/read", id: rpcBase + 2,
+      params: .object(["refreshToken": .bool(false)]))
+    let account = try await Self.response(id: rpcBase + 2, iterator: &iterator, session: session)
+    try requireLease()
+    guard account["account"]?["type"]?.string == "chatgpt" else {
+      throw ProviderError.message(
+        "Sign in to the Codex CLI with ChatGPT before using subscription mode.")
+    }
+    let accountEpoch = session.metadataEpoch
+    await timing.mark(.accountVerified)
+    try requireLease()
+    let models: [CodexRoutingModel]
+    if needsCatalog {
+      let catalog = try await Self.modelCatalog(
+        session: session,
+        firstRequestID: rpcBase + 10, iterator: &iterator)
+      models = Self.routingModels(catalog)
+    } else {
+      models = []
+    }
+    try requireLease()
+    guard accountEpoch == session.metadataEpoch else {
+      throw ProviderError.message("The managed Codex account changed during discovery.")
+    }
+    return .init(models: models, metadataEpoch: accountEpoch)
+  }
+
+  private static func hardenedConfiguration(_ result: JSONValue, bounded: Bool) throws -> JSONValue
+  {
+    let layers = result["layers"]?.array ?? []
+    if bounded, result["layers"]?.array == nil || layers.count > 32 {
+      throw ProviderError.message("Codex returned an invalid guidance configuration snapshot.")
+    }
+    var servers: [String: JSONValue] = [:]
+    var plugins: [String: JSONValue] = [:]
+    var keyBytes = 0
+    for layer in layers {
+      if bounded, layer["config"]?.object == nil {
+        throw ProviderError.message("Codex returned an invalid guidance configuration layer.")
+      }
+      for table in ["mcp_servers", "plugins"] {
+        let raw = layer["config"]?[table]
+        if bounded, raw != nil, raw?.object == nil {
+          throw ProviderError.message("Codex returned an invalid guidance capability table.")
+        }
+        for name in raw?.object?.keys ?? [String: JSONValue]().keys {
+          keyBytes += name.utf8.count
+          if bounded, name.isEmpty || name.utf8.count > 256 || keyBytes > 131_072 {
+            throw ProviderError.message("Codex guidance configuration exceeded its bounded cache.")
+          }
+          if table == "mcp_servers" {
+            servers[name] = .object(["enabled": .bool(false)])
+          } else {
+            plugins[name] = .object(["enabled": .bool(false)])
+          }
+          if bounded, servers.count + plugins.count > 512 {
+            throw ProviderError.message(
+              "Codex guidance configuration exceeded its capability limit.")
+          }
+        }
+      }
+    }
+    return .object([
+      "mcp_servers": .object(servers), "plugins": .object(plugins),
+      "web_search": .string("disabled"),
+      "features": .object([
+        "shell_tool": .bool(false), "apply_patch_freeform": .bool(false),
+        "unified_exec": .bool(false), "multi_agent": .bool(false), "apps": .bool(false),
+        "hooks": .bool(false),
+      ]),
+      "apps": .object(["_default": .object(["enabled": .bool(false)])]),
+    ])
   }
 
   private static let clientInfo: JSONValue = .object([
@@ -432,7 +803,7 @@ actor CodexProvider {
       if let cursor { params["cursor"] = .string(cursor) }
       let requestID = firstRequestID + page
       try session.send(method: "model/list", id: requestID, params: .object(params))
-      let result = try await response(id: requestID, iterator: &iterator)
+      let result = try await response(id: requestID, iterator: &iterator, session: session)
       try Task.checkCancellation()
       guard let entries = result["data"]?.array, entries.count <= 100,
         entries.count <= 400 - catalog.count
@@ -485,10 +856,15 @@ actor CodexProvider {
     }
   }
   private static func response(
-    id: Int, iterator: inout AsyncThrowingStream<JSONValue, any Error>.Iterator
+    id: Int, iterator: inout AsyncThrowingStream<JSONValue, any Error>.Iterator,
+    session: CodexRPCSession? = nil
   ) async throws -> JSONValue {
     while let message = try await iterator.next() {
       try Task.checkCancellation()
+      if message["method"] != nil, message["id"] != nil, let session {
+        try session.rejectToolRequest(message)
+        throw ProviderError.message("Codex requested an external capability during setup.")
+      }
       guard message["id"]?.integer == id else { continue }
       if let error = message["error"] {
         throw ProviderError.message(
@@ -508,17 +884,26 @@ private actor CodexSmokeReceiver {
   func accept(_ text: String) { value += text }
 }
 
-/// Process and pipe access is synchronized. The utility reader owns framing and stream ordering.
+/// Process and pipe access is synchronized. Exactly one request owns the
+/// bounded stream at a time; fresh threads and RPC IDs isolate sequential turns.
 private final class CodexRPCSession: @unchecked Sendable {
   let messages: AsyncThrowingStream<JSONValue, any Error>
   let workingDirectory: URL
   private let process: Process
   private let input: FileHandle
+  private let continuation: AsyncThrowingStream<JSONValue, any Error>.Continuation
   private let lock = NSLock()
   private var closed = false
+  private var readerEnded = false
+  private var currentMetadataEpoch: UInt64 = 0
+  private var activeRequestID: UUID?
   private var activeThreadID: String?
   private var activeTurnID: String?
   private var watchdog: Task<Void, Never>?
+
+  var isHealthy: Bool { lock.withLock { !closed && !readerEnded && process.isRunning } }
+  var isOpen: Bool { lock.withLock { !closed } }
+  var metadataEpoch: UInt64 { lock.withLock { currentMetadataEpoch } }
 
   init(executable: String) throws {
     guard executable.hasPrefix("/"), FileManager.default.isExecutableFile(atPath: executable) else {
@@ -539,57 +924,95 @@ private final class CodexRPCSession: @unchecked Sendable {
     child.currentDirectoryURL = directory
     child.standardInput = stdin
     child.standardOutput = stdout
-    // Diagnostics can contain selected user context; keep them out of the public application log.
     child.standardError = FileHandle.nullDevice
     process = child
     input = stdin.fileHandleForWriting
-    var continuation: AsyncThrowingStream<JSONValue, any Error>.Continuation!
-    messages = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(256)) { continuation = $0 }
+    var streamContinuation: AsyncThrowingStream<JSONValue, any Error>.Continuation!
+    messages = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(256)) {
+      streamContinuation = $0
+    }
+    continuation = streamContinuation
     do { try child.run() } catch {
       try? FileManager.default.removeItem(at: directory)
       throw ProviderError.message("Could not launch Codex CLI: \(error.localizedDescription)")
     }
     let output = stdout.fileHandleForReading
-    let streamContinuation = continuation!
-    Task.detached(priority: .utility) {
+    let ownedContinuation = continuation
+    Task.detached(priority: .utility) { [weak self] in
       var framer = JSONLineFramer(maximumFrameBytes: 2_097_152)
       do {
         while true {
-          // read(upToCount:) can wait to fill its requested count on a pipe.
-          // availableData returns the current pipe chunk so initialization replies
-          // and short message deltas are delivered before the child exits.
           let data = output.availableData
           if data.isEmpty { break }
           for frame in try framer.append(data) {
             let message = try JSONDecoder().decode(JSONValue.self, from: frame)
-            if case .dropped = streamContinuation.yield(message) {
+            self?.observeMetadata(message)
+            if case .dropped = ownedContinuation.yield(message) {
               throw ProviderError.message("Codex event queue exceeded its bounded capacity.")
             }
           }
         }
         _ = try framer.finish()
-        streamContinuation.finish()
-      } catch { streamContinuation.finish(throwing: error) }
+        self?.markReaderEnded()
+        ownedContinuation.finish()
+      } catch {
+        self?.markReaderEnded()
+        ownedContinuation.finish(throwing: error)
+      }
       try? output.close()
     }
-    watchdog = Task { [weak self] in
-      do { try await Task.sleep(for: .seconds(150)) } catch { return }
-      streamContinuation.finish(
-        throwing: ProviderError.message("Codex request timed out after 150 seconds."))
-      self?.close()
+  }
+
+  func ownsRequest(_ id: UUID) -> Bool {
+    lock.withLock { !closed && activeRequestID == id }
+  }
+
+  func beginRequest(id: UUID) throws {
+    try lock.withLock {
+      guard !closed, !readerEnded, activeRequestID == nil else { throw CancellationError() }
+      activeRequestID = id
+      watchdog = Task { [weak self] in
+        do { try await Task.sleep(for: .seconds(150)) } catch { return }
+        self?.close(
+          requestID: id,
+          error: ProviderError.message("Codex request timed out after 150 seconds."))
+      }
     }
   }
+
+  func endRequest(id: UUID) {
+    lock.withLock {
+      guard activeRequestID == id else { return }
+      watchdog?.cancel()
+      watchdog = nil
+      activeRequestID = nil
+      activeThreadID = nil
+      activeTurnID = nil
+    }
+  }
+
+  private func observeMetadata(_ message: JSONValue) {
+    guard message["method"]?.string == "account/updated" else { return }
+    lock.withLock {
+      if currentMetadataEpoch < UInt64.max { currentMetadataEpoch += 1 }
+    }
+  }
+
+  private func markReaderEnded() { lock.withLock { readerEnded = true } }
+
   func setTurn(threadID: String, turnID: String) {
     lock.withLock {
       activeThreadID = threadID
       activeTurnID = turnID
     }
   }
+
   func send(method: String, id: Int? = nil, params: JSONValue) throws {
     var object: [String: JSONValue] = ["method": .string(method), "params": params]
     if let id { object["id"] = .number(Double(id)) }
     try write(.object(object))
   }
+
   func rejectToolRequest(_ message: JSONValue) throws {
     guard let id = message["id"] else { return }
     try write(
@@ -601,6 +1024,7 @@ private final class CodexRPCSession: @unchecked Sendable {
         ]),
       ]))
   }
+
   private func write(_ message: JSONValue) throws {
     var data = try JSONEncoder().encode(message)
     data.append(10)
@@ -609,23 +1033,28 @@ private final class CodexRPCSession: @unchecked Sendable {
       try input.write(contentsOf: data)
     }
   }
-  func close() {
+
+  func close(requestID: UUID? = nil, error: (any Error)? = nil) {
     lock.withLock {
-      guard !closed else { return }
+      guard !closed, requestID == nil || activeRequestID == requestID else { return }
       closed = true
       if let threadID = activeThreadID, let turnID = activeTurnID,
         let data = try? JSONEncoder().encode(
           JSONValue.object([
-            "id": .number(999), "method": .string("turn/interrupt"),
+            "id": .number(-1), "method": .string("turn/interrupt"),
             "params": .object(["threadId": .string(threadID), "turnId": .string(turnID)]),
           ]))
       {
         try? input.write(contentsOf: data + Data([10]))
       }
+      activeRequestID = nil
+      activeThreadID = nil
+      activeTurnID = nil
       try? input.close()
       if process.isRunning { process.terminate() }
       watchdog?.cancel()
       watchdog = nil
+      continuation.finish(throwing: error ?? CancellationError())
       try? FileManager.default.removeItem(at: workingDirectory)
     }
   }

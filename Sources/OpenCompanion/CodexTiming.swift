@@ -5,6 +5,7 @@ import Foundation
 struct CodexTimingEvent: Codable, Sendable, Equatable {
   enum Stage: String, Codable, Sendable, CaseIterable {
     case requestStarted, sessionStarted, initialized, accountVerified, routingSelected
+    case sessionReused, metadataCacheHit, configurationCacheHit
     case configurationReady, threadReady, turnSubmitted, turnAccepted
     case firstTextDelta, firstUnitAccepted, firstSceneAccepted, responseCompleted
     case finalMessageStarted, finalMessageCompleted, phaseCompatibilityFallback

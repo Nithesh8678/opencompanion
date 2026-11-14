@@ -62,6 +62,42 @@ import Testing
     }
   }
 
+  @Test func alreadyCancelledOldPrewarmCannotReplaceTheCurrentWarmConnection() async throws {
+    try await withFixture { fixture, provider in
+      let currentID = UUID()
+      try await provider.prepareGuidanceSession(
+        executable: fixture.executable.path, model: "fixture-default", sessionID: currentID)
+      let before = try fixture.requests()
+      let staleID = UUID()
+      let cancelled = Task {
+        withUnsafeCurrentTask { $0?.cancel() }
+        try await provider.prepareGuidanceSession(
+          executable: fixture.executable.path, model: "fixture-default", sessionID: staleID)
+      }
+      do {
+        try await cancelled.value
+        Issue.record("An already-cancelled prewarm must not acquire any connection")
+      } catch {
+        #expect(error is CancellationError)
+      }
+      let afterCancelled = try fixture.requests()
+      #expect(afterCancelled.count == before.count)
+      #expect(fixture.count("initialize", in: afterCancelled) == 1)
+      let response = try await send(provider, fixture, id: currentID)
+      #expect(response.stages.contains(.sessionReused))
+      #expect(response.stages.contains(.metadataCacheHit))
+      #expect(response.text == ["public response 1"])
+      let final = try fixture.requests()
+      #expect(Set(final.compactMap { $0["pid"] as? Int }).count == 1)
+      #expect(fixture.count("initialize", in: final) == 1)
+      #expect(fixture.count("account/read", in: final) == 1)
+      #expect(fixture.count("model/list", in: final) == 1)
+      #expect(fixture.count("config/read", in: final) == 1)
+      #expect(fixture.count("thread/start", in: final) == 1)
+      #expect(fixture.count("turn/start", in: final) == 1)
+    }
+  }
+
   @Test func metadataExpiresWithoutReinitializingHealthyConnection() async throws {
     let clock = GuidanceFixtureClock(1_000)
     try await withFixture(clock: clock) { fixture, provider in

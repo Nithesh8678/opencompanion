@@ -229,6 +229,8 @@ actor CaptureService {
     config.height = Int(sourceRect.height * scale)
     config.showsCursor = false
     config.scalesToFit = true
+    // Encoded window pixels map to SCWindow.frame, without an outer shadow.
+    if windowID != nil { config.ignoreShadowsSingleWindow = true }
     var image = try await SCScreenshotManager.captureImage(
       contentFilter: filter, configuration: config)
     let capturedAt = ProcessInfo.processInfo.systemUptime

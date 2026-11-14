@@ -67,6 +67,8 @@ enum GuidancePublicAppAcceptance {
     let height: Double
     let advanceOn: String?
     let shape: String?
+    let publicInstruction: String
+    let publicLabel: String?
   }
 
   private struct Preparation: Codable {
@@ -344,7 +346,9 @@ enum GuidancePublicAppAcceptance {
             frameID: evidence.frameID, evidenceRevision: evidence.revision,
             capturedAt: evidence.capturedAt, observedAt: ProcessInfo.processInfo.systemUptime,
             x: target.x, y: target.y, width: target.width, height: target.height,
-            advanceOn: target.advanceOn, shape: target.shape)
+            advanceOn: target.advanceOn, shape: target.shape,
+            publicInstruction: String(target.instruction.prefix(480)),
+            publicLabel: target.label.map { String($0.prefix(80)) })
           stages.append(stage)
           priorTarget?(target, evidence, generation, request)
           try write(

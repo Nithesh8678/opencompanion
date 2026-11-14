@@ -1,4 +1,5 @@
 import CompanionCore
+import Darwin
 import Foundation
 
 struct CodexModel: Sendable {
@@ -922,11 +923,23 @@ private final class CodexRPCSession: @unchecked Sendable {
       "features.shell_tool=false", "-c", "features.apps=false", "-c", "web_search=\"disabled\"",
     ]
     child.currentDirectoryURL = directory
+    let pipeWriter = stdin.fileHandleForWriting
+    // A peer can close stdin while keeping stdout/process alive. Suppress
+    // SIGPIPE on this descriptor only, so FileHandle.write throws EPIPE into
+    // the existing request cleanup instead of terminating the application.
+    guard Darwin.fcntl(pipeWriter.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+      try? pipeWriter.close()
+      try? stdin.fileHandleForReading.close()
+      try? stdout.fileHandleForReading.close()
+      try? stdout.fileHandleForWriting.close()
+      try? FileManager.default.removeItem(at: directory)
+      throw ProviderError.message("Could not safely configure the Codex request pipe.")
+    }
     child.standardInput = stdin
     child.standardOutput = stdout
     child.standardError = FileHandle.nullDevice
     process = child
-    input = stdin.fileHandleForWriting
+    input = pipeWriter
     var streamContinuation: AsyncThrowingStream<JSONValue, any Error>.Continuation!
     messages = AsyncThrowingStream(bufferingPolicy: .bufferingOldest(256)) {
       streamContinuation = $0

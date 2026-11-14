@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 
@@ -209,6 +210,41 @@ import Testing
     }
   }
 
+  @Test func closedPeerInputThrowsBrokenPipeWhileItsOutputIsStillAlive() async throws {
+    try await withFixture(mode: "close-input-after-catalog") { fixture, provider in
+      let receiver = GuidanceFixtureReceiver()
+      do {
+        _ = try await send(provider, fixture, id: UUID(), receiver: receiver)
+        Issue.record("Writing configuration to the closed peer must fail")
+      } catch {
+        // Foundation may wrap the POSIX error in a Cocoa file-write error.
+        // A timeout/disconnect/cancellation does not satisfy this regression.
+        var current = error as NSError
+        var brokenPipe = false
+        for _ in 0..<4 {
+          if current.domain == NSPOSIXErrorDomain && current.code == Int(EPIPE) {
+            brokenPipe = true
+            break
+          }
+          guard let underlying = current.userInfo[NSUnderlyingErrorKey] as? NSError else { break }
+          current = underlying
+        }
+        #expect(brokenPipe)
+      }
+      #expect(FileManager.default.fileExists(atPath: fixture.executable.path + ".stdin-closed"))
+      let snapshot = await receiver.snapshot()
+      #expect(snapshot.stages.contains(.routingSelected))
+      #expect(!snapshot.stages.contains(.configurationReady))
+      #expect(snapshot.text.isEmpty && snapshot.previews.isEmpty)
+      let requests = try fixture.requests()
+      #expect(fixture.count("initialize", in: requests) == 1)
+      #expect(fixture.count("model/list", in: requests) == 1)
+      #expect(fixture.count("config/read", in: requests) == 0)
+      #expect(fixture.count("thread/start", in: requests) == 0)
+      #expect(fixture.count("turn/start", in: requests) == 0)
+    }
+  }
+
   @Test func idleExpiryAndExecutableReplacementCreateNewConnections() async throws {
     let clock = GuidanceFixtureClock(1_000)
     try await withFixture(clock: clock) { fixture, provider in
@@ -307,7 +343,7 @@ private struct GuidanceProcessFixture: Sendable {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let script = #"""
       #!/usr/bin/env python3
-      import json,os,sys
+      import json,os,sys,time
       mode = "\#(mode)"
       thread_count = 0
       config_count = 0
@@ -350,6 +386,15 @@ private struct GuidanceProcessFixture: Sendable {
               item="item-"+str(turn_count)
               thread=request["params"]["threadId"]
               result={"turn":{"id":turn}}
+          if method == "model/list" and mode == "close-input-after-catalog":
+              # Close the actual read descriptor BEFORE acknowledging discovery:
+              # the parent's next config/read cannot race this closure. Keep
+              # stdout and the process alive, excluding EOF/health reconnect.
+              os.close(sys.stdin.fileno())
+              with open(__file__+".stdin-closed","w") as marker: marker.write("public fixture")
+              emit({"id":rid,"result":result})
+              time.sleep(30)
+              break
           if result is not None: emit({"id":rid,"result":result})
           if method == "turn/start":
               if mode == "stale-tail" and old is not None:

@@ -62,6 +62,20 @@ enum GuidanceObservationAcceptance {
       guard !FileManager.default.fileExists(atPath: terminal.path) else {
         throw Refusal("terminal-output-already-exists")
       }
+      phase = "waiting-public-fixture"
+      try FileHandle.standardOutput.write(
+        contentsOf: Data("GUIDANCE_OBSERVATION_WAITING_PUBLIC_FIXTURE\n".utf8))
+      let foregroundDeadline = ProcessInfo.processInfo.systemUptime + 45
+      while NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        != "org.opencompanion.fixture.guidance"
+      {
+        try Task.checkCancellation()
+        guard ProcessInfo.processInfo.systemUptime < foregroundDeadline else {
+          throw Refusal("public-fixture-foreground-timeout")
+        }
+        try await Task.sleep(for: .milliseconds(100))
+      }
+      try Task.checkCancellation()
       let fixture = try fixtureEnvironment()
       let scope = try GuidanceObservationScope(
         generation: 1,

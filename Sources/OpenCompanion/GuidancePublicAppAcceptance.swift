@@ -670,12 +670,23 @@ enum GuidancePublicAppAcceptance {
     else {
       throw Refusal("public-app-not-front")
     }
-    let windows = try windowStack(screen: screen.frame, primaryTop: primaryTop)
-    guard let front = windows.first, front.pid == app.processIdentifier, front.alpha == 1,
-      screen.frame.contains(front.rect)
-    else {
-      throw Refusal("focused-public-window-unverified")
+    let focus = try focusedAXWindow(
+      pid: app.processIdentifier, primaryTop: primaryTop, scenario: scenario)
+    var windows = try windowStack(screen: screen.frame, primaryTop: primaryTop)
+    // Safari can place a small separate native chrome window above its focused
+    // page. A same-process window is never sufficient proof on its own.
+    if let matching = windows.firstIndex(where: {
+      $0.pid == app.processIdentifier && sameGeometry($0.rect, focus.rect)
+    }) {
+      guard matching <= 8 else { throw Refusal("public-window-front-stack-budget") }
+      let chromeDeadline = ProcessInfo.processInfo.systemUptime + 0.25
+      for index in 0..<matching where windows[index].pid == app.processIdentifier {
+        windows[index].verifiedFocusedChrome = verifiesFocusedChrome(
+          windows[index].rect, focused: focus, primaryTop: primaryTop, deadline: chromeDeadline)
+      }
     }
+    let front = try selectPublicWindow(
+      windows, focusedRect: focus.rect, pid: app.processIdentifier, screen: screen.frame)
     return .init(
       pid: app.processIdentifier, windowID: front.id, windowRect: front.rect,
       displayID: display, screenRect: screen.frame, primaryTop: primaryTop)
@@ -698,14 +709,143 @@ enum GuidancePublicAppAcceptance {
       && frame.groundingCandidates.allSatisfy { $0.source != .accessibility }
   }
 
-  private struct PublicWindow {
+  struct WindowCandidate: Sendable, Equatable {
     let id: CGWindowID
     let pid: pid_t
     let rect: CGRect
     let alpha: Double
+    var verifiedFocusedChrome = false
+  }
+
+  /// Authored metadata seam: selection requires one exact focused-window match.
+  /// Higher foreign windows or unverified same-process popups never disappear
+  /// merely because the requested page is present farther down the stack.
+  static func selectPublicWindow(
+    _ windows: [WindowCandidate], focusedRect: CGRect, pid: pid_t, screen: CGRect
+  ) throws -> WindowCandidate {
+    guard windows.count <= 4_096, pid > 0,
+      GuidanceObservationScope.valid(focusedRect), screen.contains(focusedRect)
+    else { throw Refusal("focused-public-window-unverified") }
+    let matches = windows.indices.filter {
+      windows[$0].pid == pid && sameGeometry(windows[$0].rect, focusedRect)
+    }
+    guard matches.count == 1, let index = matches.first, index <= 8,
+      windows[index].id > 0, windows[index].alpha == 1, screen.contains(windows[index].rect)
+    else { throw Refusal("focused-public-window-unverified") }
+    for candidate in windows[..<index] {
+      guard candidate.id > 0, candidate.alpha.isFinite, candidate.alpha > 0,
+        candidate.alpha <= 1, candidate.pid == pid, candidate.verifiedFocusedChrome,
+        boundedTopChrome(candidate.rect, focusedRect: focusedRect)
+      else { throw Refusal("public-window-occlusion-unverified") }
+    }
+    return windows[index]
+  }
+
+  private static func sameGeometry(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+    GuidanceObservationScope.valid(lhs) && GuidanceObservationScope.valid(rhs)
+      && abs(lhs.minX - rhs.minX) <= 1 && abs(lhs.minY - rhs.minY) <= 1
+      && abs(lhs.width - rhs.width) <= 1 && abs(lhs.height - rhs.height) <= 1
+  }
+
+  private static func boundedTopChrome(_ rect: CGRect, focusedRect: CGRect) -> Bool {
+    GuidanceObservationScope.valid(rect) && focusedRect.contains(rect)
+      && rect.width <= 320 && rect.height <= 48 && rect.width * rect.height <= 15_360
+      && rect.minY >= focusedRect.maxY - 64
+  }
+
+  private struct FocusedAXWindow {
+    let app: AXUIElement
+    let window: AXUIElement
+    let rect: CGRect
+  }
+
+  private static func focusedAXWindow(
+    pid: pid_t, primaryTop: CGFloat, scenario: Scenario
+  ) throws -> FocusedAXWindow {
+    let app = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(app, 0.03)
+    guard let rawWindow = axValue(app, kAXFocusedWindowAttribute as CFString),
+      CFGetTypeID(rawWindow) == AXUIElementGetTypeID()
+    else { throw Refusal("focused-public-window-unavailable") }
+    let window = rawWindow as! AXUIElement
+    AXUIElementSetMessagingTimeout(window, 0.03)
+    guard let rect = axRect(window, primaryTop: primaryTop) else {
+      throw Refusal("public-ax-window-geometry-unavailable")
+    }
+    if scenario == .browser {
+      guard
+        axValue(window, kAXTitleAttribute as CFString) as? String
+          == "OpenCompanion Public Guide"
+      else { throw Refusal("browser-public-title-mismatch") }
+    } else if scenario == .textedit {
+      guard let raw = axValue(window, kAXDocumentAttribute as CFString) as? String,
+        raw.utf8.count <= 8_192, let url = URL(string: raw), url.isFileURL,
+        url.lastPathComponent == "OpenCompanion Public Guide.rtf"
+      else { throw Refusal("textedit-public-document-mismatch") }
+    }
+    return .init(app: app, window: window, rect: rect)
+  }
+
+  private static func verifiesFocusedChrome(
+    _ rect: CGRect, focused: FocusedAXWindow, primaryTop: CGFloat, deadline: TimeInterval
+  ) -> Bool {
+    guard boundedTopChrome(rect, focusedRect: focused.rect),
+      ProcessInfo.processInfo.systemUptime < deadline
+    else { return false }
+    var element: AXUIElement?
+    guard
+      AXUIElementCopyElementAtPosition(
+        focused.app, Float(rect.midX), Float(primaryTop - rect.midY), &element) == .success,
+      var current = element
+    else { return false }
+    let controls: Set<String> = [
+      "AXButton", "AXMenuButton", "AXPopUpButton", "AXTextField", "AXSearchField",
+      "AXCheckBox", "AXRadioButton",
+    ]
+    for _ in 0..<8 {
+      guard ProcessInfo.processInfo.systemUptime < deadline else { return false }
+      AXUIElementSetMessagingTimeout(current, 0.03)
+      guard let role = axValue(current, kAXRoleAttribute as CFString) as? String,
+        role.utf8.count <= 128, role != "AXWebArea", role != "AXWindow"
+      else { return false }
+      if controls.contains(role),
+        let owner = axValue(current, kAXWindowAttribute as CFString),
+        CFGetTypeID(owner) == AXUIElementGetTypeID(), CFEqual(owner, focused.window)
+      {
+        return true
+      }
+      guard let parent = axValue(current, kAXParentAttribute as CFString),
+        CFGetTypeID(parent) == AXUIElementGetTypeID()
+      else { return false }
+      current = parent as! AXUIElement
+    }
+    return false
+  }
+
+  private static func axValue(_ element: AXUIElement, _ attribute: CFString) -> CFTypeRef? {
+    var value: CFTypeRef?
+    return AXUIElementCopyAttributeValue(element, attribute, &value) == .success ? value : nil
+  }
+
+  private static func axRect(_ element: AXUIElement, primaryTop: CGFloat) -> CGRect? {
+    guard let rawPosition = axValue(element, kAXPositionAttribute as CFString),
+      let rawSize = axValue(element, kAXSizeAttribute as CFString),
+      CFGetTypeID(rawPosition) == AXValueGetTypeID(), CFGetTypeID(rawSize) == AXValueGetTypeID()
+    else { return nil }
+    let positionValue = rawPosition as! AXValue
+    let sizeValue = rawSize as! AXValue
+    var point = CGPoint.zero
+    var size = CGSize.zero
+    guard AXValueGetType(positionValue) == .cgPoint, AXValueGetType(sizeValue) == .cgSize,
+      AXValueGetValue(positionValue, .cgPoint, &point),
+      AXValueGetValue(sizeValue, .cgSize, &size)
+    else { return nil }
+    let rect = CGRect(
+      x: point.x, y: primaryTop - point.y - size.height, width: size.width, height: size.height)
+    return GuidanceObservationScope.valid(rect) ? rect : nil
   }
   @MainActor private static func windowStack(screen: CGRect, primaryTop: CGFloat) throws
-    -> [PublicWindow]
+    -> [WindowCandidate]
   {
     guard
       let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)
@@ -737,7 +877,7 @@ enum GuidancePublicAppAcceptance {
         throw Refusal("window-stack-geometry-unverified")
       }
       guard rect.intersects(screen) else { return nil }
-      return PublicWindow(id: id, pid: pid, rect: rect, alpha: alpha)
+      return WindowCandidate(id: id, pid: pid, rect: rect, alpha: alpha)
     }
   }
 
